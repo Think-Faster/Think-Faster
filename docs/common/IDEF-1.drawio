@@ -1,0 +1,64 @@
+<mxfile host="app.diagrams.net">
+  <diagram name="Page-1" id="1J7HLZdSr2kDxdS4oVeV">
+    <mxGraphModel dx="1641" dy="2028" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="_5oVzv0MyUcasf4rRsFa-1" parent="1" style="rounded=0;whiteSpace=wrap;html=1;" value="Прогнозирование пожара в инженерном&lt;br/&gt;коллекторе" vertex="1">
+          <mxGeometry height="120" width="200" x="400" y="160" as="geometry" />
+        </mxCell>
+        <mxCell id="_5oVzv0MyUcasf4rRsFa-2" edge="1" parent="1" source="_5oVzv0MyUcasf4rRsFa-3" style="endArrow=classic;html=1;rounded=0;entryX=0.195;entryY=0.992;entryDx=0;entryDy=0;entryPerimeter=0;exitX=0.5;exitY=0;exitDx=0;exitDy=0;" target="_5oVzv0MyUcasf4rRsFa-1" value="">
+          <mxGeometry height="50" relative="1" width="50" as="geometry">
+            <mxPoint x="439" y="510" as="sourcePoint" />
+            <mxPoint x="630" y="360" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="_5oVzv0MyUcasf4rRsFa-3" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="Диспетчер" vertex="1">
+          <mxGeometry height="30" width="60" x="410" y="520" as="geometry" />
+        </mxCell>
+        <mxCell id="_5oVzv0MyUcasf4rRsFa-4" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="Аналитик" vertex="1">
+          <mxGeometry height="30" width="60" x="550" y="520" as="geometry" />
+        </mxCell>
+        <mxCell id="_5oVzv0MyUcasf4rRsFa-6" edge="1" parent="1" source="_5oVzv0MyUcasf4rRsFa-4" style="endArrow=classic;html=1;rounded=0;entryX=0.895;entryY=0.992;entryDx=0;entryDy=0;entryPerimeter=0;exitX=0.5;exitY=0;exitDx=0;exitDy=0;" target="_5oVzv0MyUcasf4rRsFa-1" value="">
+          <mxGeometry height="50" relative="1" width="50" as="geometry">
+            <mxPoint x="580" y="410" as="sourcePoint" />
+            <mxPoint x="630" y="360" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="_5oVzv0MyUcasf4rRsFa-11" edge="1" parent="1" source="_5oVzv0MyUcasf4rRsFa-8" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=-0.01;entryY=0.176;entryDx=0;entryDy=0;entryPerimeter=0;" target="_5oVzv0MyUcasf4rRsFa-1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="360.06" y="60.06" />
+              <mxPoint x="360.06" y="180.06" />
+              <mxPoint x="400.06" y="180.06" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="_5oVzv0MyUcasf4rRsFa-8" parent="1" style="rounded=0;whiteSpace=wrap;html=1;" value="Анализ данных в автоматическом режиме" vertex="1">
+          <mxGeometry height="120" width="200" x="120" as="geometry" />
+        </mxCell>
+        <mxCell id="_5oVzv0MyUcasf4rRsFa-9" edge="1" parent="1" style="endArrow=classic;html=1;rounded=0;entryX=0;entryY=0.333;entryDx=0;entryDy=0;entryPerimeter=0;" target="_5oVzv0MyUcasf4rRsFa-8" value="">
+          <mxGeometry height="50" relative="1" width="50" as="geometry">
+            <mxPoint x="-62" y="40" as="sourcePoint" />
+            <mxPoint x="120" y="42" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="_5oVzv0MyUcasf4rRsFa-10" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="&lt;span style=&quot;color: rgb(31, 35, 40); font-family: &amp;quot;Mona Sans VF&amp;quot;, -apple-system, BlinkMacSystemFont, &amp;quot;Segoe UI&amp;quot;, &amp;quot;Noto Sans Backtick Fix&amp;quot;, &amp;quot;Noto Sans&amp;quot;, Helvetica, Arial, sans-serif, &amp;quot;Apple Color Emoji&amp;quot;, &amp;quot;Segoe UI Emoji&amp;quot;; font-size: 16px; text-align: start; background-color: rgb(255, 255, 255);&quot;&gt;Исторические данные — импорт из файлов CSV / XLSX.&lt;/span&gt;" vertex="1">
+          <mxGeometry height="30" width="250" x="-142" as="geometry" />
+        </mxCell>
+        <mxCell id="_5oVzv0MyUcasf4rRsFa-12" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="Веса" vertex="1">
+          <mxGeometry height="30" width="60" x="332" y="20" as="geometry" />
+        </mxCell>
+        <mxCell id="_5oVzv0MyUcasf4rRsFa-13" edge="1" parent="1" style="endArrow=classic;html=1;rounded=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" target="_5oVzv0MyUcasf4rRsFa-1" value="">
+          <mxGeometry height="50" relative="1" width="50" as="geometry">
+            <mxPoint x="-110" y="220" as="sourcePoint" />
+            <mxPoint x="332" y="252" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="_5oVzv0MyUcasf4rRsFa-14" parent="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" value="&lt;span style=&quot;color: rgb(31, 35, 40); font-family: &amp;quot;Mona Sans VF&amp;quot;, -apple-system, BlinkMacSystemFont, &amp;quot;Segoe UI&amp;quot;, &amp;quot;Noto Sans Backtick Fix&amp;quot;, &amp;quot;Noto Sans&amp;quot;, Helvetica, Arial, sans-serif, &amp;quot;Apple Color Emoji&amp;quot;, &amp;quot;Segoe UI Emoji&amp;quot;; font-size: 16px; text-align: start; background-color: rgb(255, 255, 255);&quot;&gt;&amp;nbsp;Потоковые данные из системы мониторинга СМВУ&amp;nbsp;&lt;/span&gt;" vertex="1">
+          <mxGeometry height="30" width="250" x="-120" y="180" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
