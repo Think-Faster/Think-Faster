@@ -151,7 +151,7 @@
 
 **Ссылка:** https://gbumac.ru/novosti-gbu-mac/statya-centr-upravleniya-kompleksa-gorodskogo-xozyajstva-moskvy-v-zhurnale-energosberezhenie-8-za-2022-god  
 **Группа:** городские диспетчерские ЖКХ  
-**Скриншот:** `TF-2-img/05_ais_tsugh_moscow.jpg`  
+**Скриншоты:** `TF-2-img/05_ais_tsugh_moscow1.png`, `TF-2-img/05_ais_tsugh_moscow2.png`
 **Скриншот-источник:** https://gbumac.ru/novosti-gbu-mac/statya-centr-upravleniya-kompleksa-gorodskogo-xozyajstva-moskvy-v-zhurnale-energosberezhenie-8-za-2022-god
 
 **Почему подходит под Москву:** это московский центр управления городским хозяйством, где сводится информация из разных городских систем. Для нашего исследования он особенно полезен как пример рабочего места, где одновременно смотрят карту, события и состояние городской инфраструктуры.
