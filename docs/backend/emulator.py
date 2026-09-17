@@ -19,10 +19,10 @@
 
 Ручки:
     GET /events?cursor=0&limit=1000    события после курсора (JSON или CSV)
-        &channel_id=  &system=  &type=  &alarm_only=true   фильтры
+        &channel_id=  &object_id=  &system=  &type=  &alarm_only=true
         &format=csv                                        как в датасете
     GET /stream                        те же события потоком (SSE)
-    GET /channels                      справочник каналов
+    GET /channels?object_id=&system=&active=true   справочник каналов
     GET /objects                       справочник объектов
     GET /health                        состояние: часы эмулятора, счётчики
 """
@@ -107,9 +107,12 @@ class Day(object):
 class Stream(object):
     """Часы эмулятора, выдача событий и буфер для чтения по курсору."""
 
-    def __init__(self, day, channels, speed, buffer_size):
+    def __init__(self, day, channels, objects, speed, buffer_size):
         self.day = day
         self.channels = channels
+        # связь канала с объектом появилась в справочнике 17.09.2026
+        self.object_name = {r['ид_объект']: r['диспетчерское_название_объекта']
+                            for r in objects}
         self.speed = speed
         self.buffer = deque(maxlen=buffer_size)
         self.cursor = 0                       # сквозной номер выдачи, он же курсор
@@ -130,6 +133,7 @@ class Stream(object):
 
     def _emit(self, moment, channel, alarm, value):
         meta = self.channels.get(channel, {})
+        obj = meta.get('ид_объект') or None
         event = {
             'курсор': 0,
             'ид_события': 0,
@@ -141,6 +145,8 @@ class Stream(object):
             'тип_инж_системы': meta.get('тип_инж_системы'),
             'тип_датчика': meta.get('тип_датчика'),
             'название_датчика': meta.get('название_датчика'),
+            'ид_объект': int(obj) if obj else None,
+            'название_объекта': self.object_name.get(obj),
         }
         with self.lock:
             self.cursor += 1
@@ -175,12 +181,14 @@ class Stream(object):
             first_day = False
             day_start = day_start + timedelta(days=1)
 
-    def read(self, cursor, limit, channel_id=None, system=None, sensor_type=None,
-             alarm_only=False):
+    def read(self, cursor, limit, channel_id=None, object_id=None, system=None,
+             sensor_type=None, alarm_only=False):
         with self.lock:
             rows = [e for e in self.buffer if e['курсор'] > cursor]
         if channel_id is not None:
             rows = [e for e in rows if e['ид_канала_данных'] == channel_id]
+        if object_id is not None:
+            rows = [e for e in rows if e['ид_объект'] == object_id]
         if system:
             rows = [e for e in rows if e['тип_инж_системы'] == system]
         if sensor_type:
@@ -231,6 +239,7 @@ def make_handler(stream, channels, objects):
             rows = stream.read(
                 cursor, limit,
                 channel_id=int(one('channel_id')) if one('channel_id') else None,
+                object_id=int(one('object_id')) if one('object_id') else None,
                 system=one('system'),
                 sensor_type=one('type'),
                 alarm_only=one('alarm_only', '').lower() in ('true', '1'),
@@ -294,6 +303,9 @@ def make_handler(stream, channels, objects):
                 system = q.get('system', [None])[0]
                 if system:
                     rows = [c for c in rows if c['тип_инж_системы'] == system]
+                obj = q.get('object_id', [None])[0]
+                if obj:
+                    rows = [c for c in rows if c.get('ид_объект') == obj]
                 if q.get('active', [''])[0].lower() in ('true', '1'):
                     rows = [c for c in rows
                             if int(c['ид_канала_данных']) in stream.day.channels]
@@ -335,7 +347,7 @@ def main():
     objects = read_csv(os.path.join(data, OBJECTS))
     day = Day(journal, args.jitter, rnd)
 
-    stream = Stream(day, channels, args.speed, args.buffer)
+    stream = Stream(day, channels, objects, args.speed, args.buffer)
     threading.Thread(target=stream.run, daemon=True).start()
 
     print('исходные сутки %s: %d событий, %d активных каналов'
