@@ -1,0 +1,339 @@
+{% load l10n %}{% comment %}
+  unlocalize обязателен: под ru-ru Django печатает 60.0 как «60,0»,
+  а это и в JS, и в атрибутах min/max — синтаксическая ошибка.
+{% endcomment %}<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Стенд эмулятора</title>
+<style>
+:root {
+  --фон: #f7f7f5; --панель: #ffffff; --рамка: #dcdcd6; --текст: #1c1c1a;
+  --тусклый: #6d6d66; --акцент: #2f6f4f; --тревога: #a8442a; --сбой: #8a6d1f;
+  --подсветка: #f0efe9;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --фон: #16171a; --панель: #1e1f23; --рамка: #33353b; --текст: #e6e6e3;
+    --тусклый: #9a9a94; --акцент: #6fb58a; --тревога: #e08a6d; --сбой: #d8b95f;
+    --подсветка: #26282d;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--фон); color: var(--текст);
+  font: 14px/1.45 -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+header {
+  position: sticky; top: 0; z-index: 5; background: var(--панель);
+  border-bottom: 1px solid var(--рамка); padding: 10px 16px;
+  display: flex; flex-wrap: wrap; gap: 16px; align-items: center;
+}
+h1 { font-size: 15px; margin: 0 8px 0 0; font-weight: 600; }
+.часы { font-variant-numeric: tabular-nums; font-size: 18px; font-weight: 600; }
+.метка { color: var(--тусклый); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+.группа { display: flex; align-items: center; gap: 6px; }
+button {
+  font: inherit; color: var(--текст); background: var(--панель);
+  border: 1px solid var(--рамка); border-radius: 6px; padding: 4px 9px; cursor: pointer;
+}
+button:hover { background: var(--подсветка); }
+button.вкл { background: var(--акцент); border-color: var(--акцент); color: #fff; }
+button.опасно.вкл { background: var(--тревога); border-color: var(--тревога); }
+input[type=text], input[type=number], select {
+  font: inherit; color: var(--текст); background: var(--фон);
+  border: 1px solid var(--рамка); border-radius: 6px; padding: 4px 8px;
+}
+main { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 16px; padding: 16px; }
+/* табличке нужно ~820px: пока лента стоит рядом, столбец сбоев уезжает за край */
+@media (max-width: 1240px) { main { grid-template-columns: 1fr; } }
+section { background: var(--панель); border: 1px solid var(--рамка); border-radius: 8px; }
+.заголовок {
+  display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+  padding: 10px 12px; border-bottom: 1px solid var(--рамка);
+}
+.обёртка { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; }
+th, td { padding: 6px 10px; text-align: left; border-bottom: 1px solid var(--рамка); vertical-align: middle; }
+th { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--тусклый); font-weight: 600; }
+td.число { font-variant-numeric: tabular-nums; }
+tr.правлен { background: var(--подсветка); }
+tr.сломан td:first-child { box-shadow: inset 3px 0 0 var(--сбой); }
+.мелко { color: var(--тусклый); font-size: 12px; }
+input[type=range] { width: 120px; vertical-align: middle; }
+td.управление > span { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.значение { display: inline-block; min-width: 58px; font-variant-numeric: tabular-nums; }
+.кнопки-сбоя button { font-size: 12px; padding: 3px 7px; }
+.кнопки-сбоя .группа { gap: 4px; flex-wrap: nowrap; }
+td.датчик { min-width: 190px; }
+.лента { max-height: 70vh; overflow-y: auto; margin: 0; padding: 0; list-style: none; }
+.лента li { padding: 5px 12px; border-bottom: 1px solid var(--рамка); font-size: 12px; display: flex; gap: 8px; }
+.лента time { color: var(--тусклый); font-variant-numeric: tabular-nums; }
+.лента .тревожно { color: var(--тревога); font-weight: 600; }
+.пусто { padding: 14px 12px; color: var(--тусклый); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Стенд эмулятора</h1>
+  <div class="группа">
+    <span class="метка">время</span>
+    <span class="часы" id="часы">—</span>
+  </div>
+  <div class="группа">
+    <span class="метка">ускорение</span>
+    <span id="кнопки-скорости"></span>
+    <input type="number" id="поле-скорости" min="{{ мин_скорость|unlocalize }}" max="{{ макс_скорость|unlocalize }}"
+           step="1" style="width: 80px" title="от {{ мин_скорость|unlocalize }} до {{ макс_скорость|unlocalize }}">
+    <button id="применить-скорость">задать</button>
+  </div>
+  <div class="группа мелко" id="счётчики">—</div>
+  <div class="группа" style="margin-left:auto">
+    <span class="мелко">сутки {{ исходные_сутки }} · {{ активных_каналов }} активных из {{ всего_каналов }}</span>
+    <button id="сброс">снять всё</button>
+  </div>
+</header>
+
+<main>
+  <section>
+    <div class="заголовок">
+      <strong>Датчики</strong>
+      <input type="text" id="поиск" placeholder="название, тип, объект или номер канала" style="flex:1; min-width:220px">
+      <label class="мелко"><input type="checkbox" id="только-активные" checked> только активные</label>
+      <span class="мелко" id="счёт-датчиков"></span>
+    </div>
+    <div class="обёртка">
+      <table>
+        <thead>
+          <tr>
+            <th>Канал</th><th>Датчик</th><th>Значение</th>
+            <th>Ручное управление</th><th>Сбои</th>
+          </tr>
+        </thead>
+        <tbody id="таблица"><tr><td colspan="5" class="пусто">загрузка…</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <div class="заголовок"><strong>Последние события</strong>
+      <span class="мелко" id="счёт-ленты"></span></div>
+    <ul class="лента" id="лента"></ul>
+  </section>
+</main>
+
+<script>
+const СКОРОСТИ = [1, 10, 60, 600, 3600];
+let курсор = 0, скорость = {{ скорость|unlocalize }}, тянут = null;
+
+function запрос(путь, метод, тело) {
+  return fetch(путь, {
+    method: метод || 'GET',
+    headers: {'Content-Type': 'application/json'},
+    body: тело ? JSON.stringify(тело) : null
+  }).then(r => r.json().then(д => ({код: r.status, данные: д})));
+}
+
+// --- ускорение ---
+const кнопкиСкорости = document.getElementById('кнопки-скорости');
+СКОРОСТИ.forEach(з => {
+  const б = document.createElement('button');
+  б.textContent = '×' + з;
+  б.dataset.скорость = з;
+  б.onclick = () => задатьСкорость(з);
+  кнопкиСкорости.appendChild(б);
+});
+function отметитьСкорость() {
+  [...кнопкиСкорости.children].forEach(б =>
+    б.classList.toggle('вкл', Number(б.dataset.скорость) === скорость));
+  const поле = document.getElementById('поле-скорости');
+  if (document.activeElement !== поле) поле.value = скорость;
+}
+function задатьСкорость(з) {
+  запрос('/api/speed', 'POST', {speed: з}).then(о => {
+    скорость = о.данные['ускорение'];
+    отметитьСкорость();
+  });
+}
+document.getElementById('применить-скорость').onclick = () =>
+  задатьСкорость(Number(document.getElementById('поле-скорости').value) || 1);
+document.getElementById('сброс').onclick = () =>
+  запрос('/api/reset', 'POST').then(обновитьДатчики);
+
+// --- таблица датчиков ---
+const телоТаблицы = document.getElementById('таблица');
+let текущиеКлючи = '';
+
+function обновитьДатчики() {
+  const q = encodeURIComponent(document.getElementById('поиск').value);
+  const активные = document.getElementById('только-активные').checked ? '1' : '0';
+  return запрос('/api/sensors?limit=200&active=' + активные + '&q=' + q).then(о => {
+    const д = о.данные;
+    отрисоватьДатчики(д['датчики']);
+    document.getElementById('счёт-датчиков').textContent =
+      'показано ' + д['показано'] + ' из ' + д['найдено'];
+    const ч = д['часы'];
+    document.getElementById('часы').textContent = ч['время_эмулятора'];
+    скорость = ч['ускорение'];
+    отметитьСкорость();
+    const сбои = ч['сбоев'];
+    document.getElementById('счётчики').textContent =
+      'событий ' + ч['выдано_событий'] + ' · тревог ' + ч['из_них_тревожных'] +
+      ' · ' + ч['событий_в_секунду'] + '/с · вручную ' + ч['ручных_значений'] +
+      ' · залипло ' + сбои['залипание'] + ' · отключено ' + сбои['отключение'] +
+      ' · закорочено ' + сбои['замыкание'];
+  });
+}
+
+function отрисоватьДатчики(датчики) {
+  if (!датчики.length) {
+    телоТаблицы.innerHTML = '<tr><td colspan="5" class="пусто">ничего не нашлось</td></tr>';
+    текущиеКлючи = '';
+    return;
+  }
+  const ключи = датчики.map(д => д['ид_канала_данных']).join(',');
+  // пока тянут ползунок или держат фокус в строке, таблицу не пересобираем:
+  // иначе элемент под курсором исчезнет на полпути
+  const занято = тянут !== null || телоТаблицы.contains(document.activeElement);
+  if (ключи !== текущиеКлючи && !занято) {
+    телоТаблицы.innerHTML = '';
+    датчики.forEach(д => телоТаблицы.appendChild(строка(д)));
+    текущиеКлючи = ключи;
+  } else {
+    датчики.forEach(д => обновитьСтроку(телоТаблицы.querySelector(
+      '[data-канал="' + д['ид_канала_данных'] + '"]'), д));
+  }
+}
+
+function строка(д) {
+  const tr = document.createElement('tr');
+  tr.dataset.канал = д['ид_канала_данных'];
+  tr.innerHTML =
+    '<td class="число">' + д['ид_канала_данных'] + '</td>' +
+    '<td>' + (д['название_датчика'] || '—') +
+      '<div class="мелко">' + [д['тип_датчика'], д['название_объекта'],
+        д['событий_в_сутки'] ? д['событий_в_сутки'] + ' соб./сут' : null]
+        .filter(Boolean).join(' · ') + '</div></td>' +
+    '<td class="число значение-ячейка">—</td>' +
+    '<td class="управление"></td>' +
+    '<td class="кнопки-сбоя"></td>';
+  tr.querySelector('.управление').appendChild(управление(д));
+  tr.querySelector('.кнопки-сбоя').appendChild(кнопкиСбоя(д));
+  обновитьСтроку(tr, д);
+  return tr;
+}
+
+function управление(д) {
+  const канал = д['ид_канала_данных'], пределы = д['пределы'], блок = document.createElement('span');
+  if (пределы['вид'] === 'число') {
+    const ползунок = document.createElement('input');
+    ползунок.type = 'range';
+    ползунок.min = пределы['мин']; ползунок.max = пределы['макс']; ползунок.step = пределы['шаг'];
+    ползунок.value = Number(д['вручную'] != null ? д['вручную'] : пределы['мин']);
+    ползунок.title = 'от ' + пределы['мин'] + ' до ' + пределы['макс'];
+    const показ = document.createElement('span');
+    показ.className = 'значение';
+    показ.textContent = Number(ползунок.value).toFixed(пределы['точность']);
+    ползунок.oninput = () => {
+      тянут = канал;
+      показ.textContent = Number(ползунок.value).toFixed(пределы['точность']);
+    };
+    ползунок.onchange = () => {
+      тянут = null;
+      применить(канал, Number(ползунок.value).toFixed(пределы['точность']));
+    };
+    блок.appendChild(ползунок);
+    блок.appendChild(показ);
+  } else if (пределы['вид'] === 'состояние') {
+    const список = document.createElement('select');
+    список.innerHTML = '<option value="">— по журналу —</option>' +
+      пределы['состояния'].map(с => '<option>' + с + '</option>').join('');
+    if (д['вручную']) список.value = д['вручную'];
+    список.onchange = () => список.value ? применить(канал, список.value) : снять(канал);
+    блок.appendChild(список);
+  } else {
+    блок.innerHTML = '<span class="мелко">нет наблюдавшихся значений</span>';
+    return блок;
+  }
+  const снятие = document.createElement('button');
+  снятие.textContent = '⟲';
+  снятие.title = 'вернуть датчик на журнал';
+  снятие.onclick = () => снять(канал);
+  блок.appendChild(снятие);
+  return блок;
+}
+
+function кнопкиСбоя(д) {
+  const канал = д['ид_канала_данных'], блок = document.createElement('span');
+  блок.className = 'группа';
+  [['stuck', 'залипание'], ['offline', 'отключение'], ['short', 'замыкание']].forEach(([вид, имя]) => {
+    const б = document.createElement('button');
+    б.textContent = имя;
+    б.dataset.вид = вид;
+    б.className = 'опасно';
+    б.onclick = () => {
+      const снимаем = б.classList.contains('вкл');
+      запрос('/api/fault', 'POST', {channel_id: канал, kind: снимаем ? 'ok' : вид})
+        .then(обновитьДатчики);
+    };
+    блок.appendChild(б);
+  });
+  return блок;
+}
+
+function обновитьСтроку(tr, д) {
+  if (!tr) return;
+  tr.querySelector('.значение-ячейка').textContent =
+    д['значение'] == null ? '—' : д['значение'];
+  tr.classList.toggle('правлен', д['вручную'] != null);
+  tr.classList.toggle('сломан', д['сбой'] != null);
+  tr.querySelectorAll('.кнопки-сбоя button').forEach(б =>
+    б.classList.toggle('вкл', б.dataset.вид === д['сбой']));
+  const ползунок = tr.querySelector('input[type=range]');
+  if (ползунок && тянут !== д['ид_канала_данных'] && д['вручную'] != null) {
+    ползунок.value = Number(д['вручную']);
+    tr.querySelector('.значение').textContent = д['вручную'];
+  }
+}
+
+function применить(канал, значение) {
+  запрос('/api/override', 'POST', {channel_id: канал, value: значение}).then(о => {
+    if (о.код !== 200) alert(о.данные['ошибка']);
+    обновитьДатчики();
+  });
+}
+function снять(канал) {
+  запрос('/api/override', 'DELETE', {channel_id: канал}).then(обновитьДатчики);
+}
+
+document.getElementById('поиск').oninput = () => { текущиеКлючи = ''; обновитьДатчики(); };
+document.getElementById('только-активные').onchange = () => { текущиеКлючи = ''; обновитьДатчики(); };
+
+// --- лента событий ---
+const лента = document.getElementById('лента');
+function обновитьЛенту() {
+  return запрос('/events?limit=40&cursor=' + курсор).then(о => {
+    const д = о.данные;
+    курсор = д['курсор'];
+    д['события'].forEach(е => {
+      const li = document.createElement('li');
+      li.innerHTML = '<time>' + е['время'] + '</time>' +
+        '<span>' + (е['название_датчика'] || е['ид_канала_данных']) + '</span>' +
+        '<strong class="' + (е['тревожное'] ? 'тревожно' : '') + '" style="margin-left:auto">' +
+        е['значение_датчика'] + (е['сбой'] ? ' ⚠' : '') + '</strong>';
+      лента.insertBefore(li, лента.firstChild);
+    });
+    while (лента.children.length > 120) лента.removeChild(лента.lastChild);
+    document.getElementById('счёт-ленты').textContent = 'курсор ' + курсор;
+  });
+}
+
+обновитьДатчики();
+обновитьЛенту();
+setInterval(обновитьДатчики, 1000);
+setInterval(обновитьЛенту, 1000);
+</script>
+</body>
+</html>
