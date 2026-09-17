@@ -16,7 +16,7 @@
 
 **Ссылка:** https://www.mosvodokanal.ru/about/evolution/avtomatizatsiya-tekhnologicheskikh-protsessov/avtomatizirovannaya-sistema-dispetcherskogo-kontrolya-i-upravleniya.php  
 **Группа:** диспетчерские системы мониторинга (SCADA / HMI)  
-**Скриншот:** `[TF-2-img/01_asdku_mosvodokanal.png] (https://github.com/GroznyiBombila/Think-Faster/blob/main/docs/designs/01_asdku_mosvodokanal.png)`  
+**Скриншот:** [TF-2-img/01_asdku_mosvodokanal.png] (https://github.com/GroznyiBombila/Think-Faster/blob/main/docs/designs/01_asdku_mosvodokanal.png)  
 **Скриншот-источник:** https://www.mosvodokanal.ru/upload/medialibrary/411/image-008.png
 
 ### Экраны
