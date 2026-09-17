@@ -1,0 +1,99 @@
+<mxfile host="app.diagrams.net" modified="2026-09-17T21:30:00.000Z" agent="ChatGPT" version="24.7.17">
+  <diagram id="jkh-architecture" name="Архитектура решения ДЖКХ">
+    <mxGraphModel dx="1600" dy="1000" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="1000" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+
+        <mxCell id="title" value="Сервис прогнозирования инцидентов и управления ремонтными работами инженерных коллекторов" style="text;html=1;strokeColor=none;fillColor=none;fontSize=22;fontStyle=1;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="350" y="20" width="900" height="50" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="sources" value="&lt;b&gt;ВНЕШНИЕ ИСТОЧНИКИ&lt;/b&gt;&lt;br&gt;&lt;br&gt;СМВУ&lt;br&gt;Датчики: температура, дым, газ, движение, насосы, вентиляторы и др.&lt;br&gt;&lt;br&gt;ОДС&lt;br&gt;Журналы срабатываний и история инцидентов&lt;br&gt;&lt;br&gt;Реестр оборудования&lt;br&gt;Объекты, оборудование, датчики, каналы&lt;br&gt;&lt;br&gt;Система заявок&lt;br&gt;Статусы ремонтных работ&lt;br&gt;&lt;br&gt;Метеослужбы&lt;br&gt;Температура, влажность, осадки, давление&lt;br&gt;&lt;br&gt;Исторические CSV/XLSX&lt;br&gt;Импорт архивных данных" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=14;align=left;verticalAlign=top;spacing=10;" vertex="1" parent="1">
+          <mxGeometry x="40" y="120" width="300" height="510" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="integration" value="&lt;b&gt;1. INTEGRATION / INGESTION SERVICE&lt;/b&gt;&lt;br&gt;&lt;br&gt;&lt;b&gt;Задача:&lt;/b&gt; получить данные из внешних систем и привести их к единому внутреннему формату.&lt;br&gt;&lt;br&gt;• API-клиенты для СМВУ, ОДС, реестра и заявок&lt;br&gt;• Consumer очереди сообщений СМВУ&lt;br&gt;• Импорт CSV/XLSX&lt;br&gt;• Получение метеоданных&lt;br&gt;• Валидация входного формата&lt;br&gt;• Дедупликация технических событий&lt;br&gt;• Нормализация идентификаторов источников&lt;br&gt;• Публикация единого события в шину данных&lt;br&gt;&lt;br&gt;&lt;b&gt;Выход:&lt;/b&gt; RawEvent / SensorReading / Equipment / IncidentEvent" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=14;align=left;verticalAlign=top;spacing=10;" vertex="1" parent="1">
+          <mxGeometry x="390" y="120" width="360" height="510" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="raw" value="&lt;b&gt;2. DATA STORAGE&lt;/b&gt;&lt;br&gt;&lt;br&gt;&lt;b&gt;Raw / исходные данные&lt;/b&gt;&lt;br&gt;Хранение исходных событий без потери оригинальных значений.&lt;br&gt;&lt;br&gt;&lt;b&gt;Normalized / операционные данные&lt;/b&gt;&lt;br&gt;Единый формат датчиков, оборудования, объектов, инцидентов и работ.&lt;br&gt;&lt;br&gt;&lt;b&gt;Historical / архив&lt;/b&gt;&lt;br&gt;История показаний и инцидентов для аналитики и обучения.&lt;br&gt;&lt;br&gt;&lt;b&gt;Features / аналитические витрины&lt;/b&gt;&lt;br&gt;Расчётные признаки для ML и агрегаты по временным окнам.&lt;br&gt;&lt;br&gt;&lt;b&gt;Технология:&lt;/b&gt; PostgreSQL; при необходимости отдельное timeseries/объектное хранилище." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=14;align=left;verticalAlign=top;spacing=10;" vertex="1" parent="1">
+          <mxGeometry x="810" y="120" width="340" height="510" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="processing" value="&lt;b&gt;3. DATA PROCESSING &amp;amp; FEATURE ENGINEERING SERVICE&lt;/b&gt;&lt;br&gt;&lt;br&gt;&lt;b&gt;Задача:&lt;/b&gt; превратить сырые исторические и текущие данные в качественные признаки для аналитики и ML.&lt;br&gt;&lt;br&gt;• Проверка качества и пропусков&lt;br&gt;• Нормализация и очистка&lt;br&gt;• Синхронизация временных рядов&lt;br&gt;• Агрегация за 5 мин / 1 ч / 24 ч&lt;br&gt;• Расчёт трендов и изменений&lt;br&gt;• Частота срабатываний датчиков&lt;br&gt;• Статистика работы насосов/вентиляторов&lt;br&gt;• Время с последнего ТО/ремонта&lt;br&gt;• Историческая частота инцидентов&lt;br&gt;• Объединение с погодой и календарём работ&lt;br&gt;&lt;br&gt;&lt;b&gt;Выход:&lt;/b&gt; FeatureVector / TrainingDataset" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=14;align=left;verticalAlign=top;spacing=10;" vertex="1" parent="1">
+          <mxGeometry x="1210" y="120" width="350" height="510" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="ml" value="&lt;b&gt;4. ML / ANALYTICS SERVICE&lt;/b&gt;&lt;br&gt;&lt;br&gt;&lt;b&gt;Задача:&lt;/b&gt; обучать модели на исторических данных и выполнять inference для новых признаков.&lt;br&gt;&lt;br&gt;&lt;b&gt;Training:&lt;/b&gt;&lt;br&gt;• Получает TrainingDataset&lt;br&gt;• Делит данные на train/validation/test&lt;br&gt;• Обучает модель&lt;br&gt;• Рассчитывает Precision, Recall и другие метрики&lt;br&gt;• Сохраняет версию модели&lt;br&gt;&lt;br&gt;&lt;b&gt;Inference:&lt;/b&gt;&lt;br&gt;• Получает FeatureVector&lt;br&gt;• Загружает активную модель&lt;br&gt;• Рассчитывает вероятность инцидента&lt;br&gt;• Возвращает тип, вероятность и горизонт прогноза&lt;br&gt;&lt;br&gt;&lt;b&gt;Выход:&lt;/b&gt; Prediction" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=14;align=left;verticalAlign=top;spacing=10;" vertex="1" parent="1">
+          <mxGeometry x="1210" y="700" width="350" height="430" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="prediction" value="&lt;b&gt;5. PREDICTION &amp;amp; INCIDENT SERVICE&lt;/b&gt;&lt;br&gt;&lt;br&gt;&lt;b&gt;Задача:&lt;/b&gt; превратить результат ML в бизнес-событие, понятное диспетчеру.&lt;br&gt;&lt;br&gt;• Приём Prediction от ML&lt;br&gt;• Определение уровня риска по правилам&lt;br&gt;• Определение объекта и локации&lt;br&gt;• Формирование прогноза на горизонт ≥ 24 ч&lt;br&gt;• Сценарии: пожар / подтопление / доступ / отказ оборудования&lt;br&gt;• Формирование рекомендаций по ТО/ППР&lt;br&gt;• Хранение истории прогнозов&lt;br&gt;• Ведение жизненного цикла инцидента&lt;br&gt;• Приём решения диспетчера: выезд / мониторинг / ложное срабатывание&lt;br&gt;&lt;br&gt;&lt;b&gt;Выход:&lt;/b&gt; Risk / Incident / Recommendation" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=14;align=left;verticalAlign=top;spacing=10;" vertex="1" parent="1">
+          <mxGeometry x="810" y="700" width="340" height="430" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="api" value="&lt;b&gt;6. APPLICATION API&lt;/b&gt;&lt;br&gt;&lt;br&gt;&lt;b&gt;Задача:&lt;/b&gt; предоставить единый REST API для UI и интеграции с потребителями.&lt;br&gt;&lt;br&gt;• Авторизация LDAP/AD&lt;br&gt;• RBAC&lt;br&gt;• Dashboard API&lt;br&gt;• Карта и объекты&lt;br&gt;• Прогнозы и риски&lt;br&gt;• Инциденты и верификация&lt;br&gt;• Оборудование и датчики&lt;br&gt;• Рекомендации и работы&lt;br&gt;• Отчёты&lt;br&gt;• Аудит действий пользователей&lt;br&gt;&lt;br&gt;&lt;b&gt;Взаимодействие:&lt;/b&gt; REST/JSON" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=14;align=left;verticalAlign=top;spacing=10;" vertex="1" parent="1">
+          <mxGeometry x="390" y="700" width="360" height="430" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="ui" value="&lt;b&gt;7. WEB UI&lt;/b&gt;&lt;br&gt;&lt;br&gt;&lt;b&gt;Разделы:&lt;/b&gt;&lt;br&gt;• Дашборд&lt;br&gt;• Интерактивная карта&lt;br&gt;• Прогнозы и риски&lt;br&gt;• Журнал инцидентов&lt;br&gt;• Оборудование и датчики&lt;br&gt;• Рекомендации по ТО/ППР&lt;br&gt;• Аналитика и история&lt;br&gt;• Отчёты&lt;br&gt;• Администрирование&lt;br&gt;&lt;br&gt;&lt;b&gt;Для диспетчера:&lt;/b&gt; увидеть риск → открыть объект → проверить данные → принять решение → зафиксировать результат." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=14;align=left;verticalAlign=top;spacing=10;" vertex="1" parent="1">
+          <mxGeometry x="40" y="700" width="300" height="430" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="bus" value="&lt;b&gt;MESSAGE BUS / QUEUE&lt;/b&gt;&lt;br&gt;&lt;br&gt;Асинхронная передача потоковых событий между Integration и Processing/Analytics.&lt;br&gt;&lt;br&gt;Например:&lt;br&gt;SensorReadingCreated&lt;br&gt;EquipmentChanged&lt;br&gt;IncidentEventCreated" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=13;align=left;verticalAlign=top;spacing=8;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="570" width="300" height="100" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e1" value="API / Queue / CSV-XLSX&lt;br&gt;Read-only" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;strokeWidth=2;" edge="1" parent="1" source="sources" target="integration">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e2" value="RawEvent / normalized data&lt;br&gt;REST or events" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;strokeWidth=2;" edge="1" parent="1" source="integration" target="raw">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e3" value="Read raw + normalized data&lt;br&gt;SQL" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;strokeWidth=2;" edge="1" parent="1" source="raw" target="processing">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e4" value="FeatureVector / TrainingDataset&lt;br&gt;REST / batch" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;strokeWidth=2;" edge="1" parent="1" source="processing" target="ml">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e5" value="Prediction&lt;br&gt;REST / internal API" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;strokeWidth=2;" edge="1" parent="1" source="ml" target="prediction">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e6" value="Prediction / Incident / Recommendation&lt;br&gt;REST / SQL" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;strokeWidth=2;" edge="1" parent="1" source="prediction" target="api">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e7" value="REST / JSON&lt;br&gt;WebSocket для уведомлений" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;strokeWidth=2;" edge="1" parent="1" source="api" target="ui">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e8" value="Решение диспетчера / outcome&lt;br&gt;REST" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;strokeWidth=2;" edge="1" parent="1" source="ui" target="api">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e9" value="Outcome / фактический результат&lt;br&gt;для следующего обучения" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;dashed=1;strokeWidth=2;" edge="1" parent="1" source="prediction" target="raw">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e10" value="События&lt;br&gt;async" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;dashed=1;strokeWidth=2;" edge="1" parent="1" source="integration" target="bus">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e11" value="Events&lt;br&gt;async" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;dashed=1;strokeWidth=2;" edge="1" parent="1" source="bus" target="processing">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="note" value="&lt;b&gt;Ключевая идея:&lt;/b&gt; исторические данные → признаки → обучение модели. Текущие данные → признаки → inference → прогноз. Решение диспетчера сохраняется как фактический outcome и в дальнейшем используется для оценки и переобучения модели." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=14;align=left;verticalAlign=middle;spacing=10;" vertex="1" parent="1">
+          <mxGeometry x="390" y="1160" width="1170" height="80" as="geometry"/>
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
