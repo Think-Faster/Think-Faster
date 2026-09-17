@@ -1,0 +1,207 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1620 1520" width="1620" height="1520">
+<defs><marker id="head" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 1 L9 5 L0 9 z" fill="#8c9a92"/></marker><marker id="headmuted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 1 L9 5 L0 9 z" fill="#b08f8a"/></marker></defs>
+<rect width="1620" height="1520" fill="#f6f7f4"/>
+<text x="40" y="54" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="27" font-weight="700" fill="#16211c" text-anchor="start">Структура бэкенда</text>
+<text x="40" y="82" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="14" font-weight="400" fill="#5d6a63" text-anchor="start">Разбор двух записей встречи 18.09.2026 — схема дорисовывалась по ходу разговора</text>
+<rect x="1080" y="32" width="490" height="52" rx="11" fill="#ffffff" stroke="#ccd4ce" stroke-width="1.3"/>
+<line x1="1098" y1="62" x2="1130" y2="62" stroke="#8c9a92" stroke-width="1.5" marker-end="url(#head)"/>
+<text x="1138" y="66" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" font-weight="400" fill="#5d6a63" text-anchor="start">запрос</text>
+<line x1="1196" y1="62" x2="1228" y2="62" stroke="#b08f8a" stroke-width="1.5" stroke-dasharray="2 5" marker-end="url(#headmuted)"/>
+<text x="1236" y="66" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" font-weight="400" fill="#5d6a63" text-anchor="start">событие в аудит</text>
+<rect x="1348" y="53" width="42" height="19" rx="9.5" fill="#f4efdf" stroke="#ddcf9f"/>
+<text x="1369" y="67" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="10.5" font-weight="700" fill="#8a6a1f" text-anchor="middle">JWT</text>
+<text x="1400" y="66" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" font-weight="400" fill="#5d6a63" text-anchor="start">токен проверяется на входе</text>
+<rect x="40" y="110" width="250" height="420" rx="16" fill="#eaf0f5" stroke="#8ea9bf" stroke-width="1.4" stroke-dasharray="7 6"/>
+<text x="58" y="136" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.5" font-weight="600" fill="#8ea9bf" text-anchor="start" letter-spacing="0.6">СНАРУЖИ</text>
+<rect x="330" y="110" width="1240" height="1090" rx="16" fill="#eef1ec" stroke="#a9b6ac" stroke-width="1.4" stroke-dasharray="7 6"/>
+<text x="348" y="136" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.5" font-weight="600" fill="#a9b6ac" text-anchor="start" letter-spacing="0.6">ВНУТРЕННИЙ КОНТУР · ЗА FIREWALL · ВНУТРИ ОБЫЧНЫЙ HTTP</text>
+<rect x="60" y="150" width="210" height="110" rx="11" fill="#ffffff" stroke="#ccd4ce" stroke-width="1.3"/>
+<rect x="61.5" y="160" width="5" height="90" rx="2.5" fill="#2f6f4f"/>
+<text x="80" y="178" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="16" font-weight="650" fill="#16211c" text-anchor="start">Диспетчер</text>
+<text x="80" y="200" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#5d6a63" text-anchor="start">браузер</text>
+<text x="80" y="219" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#5d6a63" text-anchor="start">токены — в куках</text>
+<rect x="60" y="300" width="210" height="190" rx="11" fill="#ffffff" stroke="#ccd4ce" stroke-width="1.3"/>
+<rect x="61.5" y="310" width="5" height="170" rx="2.5" fill="#2f6f4f"/>
+<text x="80" y="328" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="16" font-weight="650" fill="#16211c" text-anchor="start">Шина данных объекта</text>
+<text x="80" y="350" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#5d6a63" text-anchor="start">сервис на стороне</text>
+<text x="80" y="369" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#5d6a63" text-anchor="start">заказчика: собирает</text>
+<text x="80" y="388" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#5d6a63" text-anchor="start">показания датчиков</text>
+<text x="80" y="407" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#5d6a63" text-anchor="start">и шлёт их пачкой</text>
+<text x="80" y="426" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#5d6a63" text-anchor="start">один статический IP</text>
+<text x="80" y="445" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#5d6a63" text-anchor="start">вместо сотен датчиков</text>
+<rect x="360" y="150" width="240" height="160" rx="11" fill="#ffffff" stroke="#ccd4ce" stroke-width="1.3"/>
+<rect x="361.5" y="160" width="5" height="140" rx="2.5" fill="#2f6f4f"/>
+<text x="380" y="178" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="16" font-weight="650" fill="#16211c" text-anchor="start">nginx · reverse proxy</text>
+<text x="380" y="200" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#5d6a63" text-anchor="start">TLS, порты 80 и 443</text>
+<text x="380" y="219" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#5d6a63" text-anchor="start">80 → 443 редиректом</text>
+<text x="380" y="238" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#5d6a63" text-anchor="start">маршрут по суффиксу URL</text>
+<text x="380" y="257" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#5d6a63" text-anchor="start">снаружи открыт только он</text>
+<rect x="700" y="150" width="340" height="100" rx="11" fill="#ffffff" stroke="#ccd4ce" stroke-width="1.3"/>
+<rect x="701.5" y="160" width="5" height="80" rx="2.5" fill="#2f6f4f"/>
+<text x="720" y="178" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="16" font-weight="650" fill="#16211c" text-anchor="start">nginx · фронт</text>
+<text x="720" y="200" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#5d6a63" text-anchor="start">статика сборки React</text>
+<text x="720" y="219" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#5d6a63" text-anchor="start">запрос без суффикса приходит сюда</text>
+<rect x="700" y="290" width="340" height="200" rx="11" fill="#ffffff" stroke="#ccd4ce" stroke-width="1.3"/>
+<rect x="701.5" y="300" width="5" height="180" rx="2.5" fill="#2c5f8a"/>
+<text x="720" y="318" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="16" font-weight="650" fill="#16211c" text-anchor="start">BFF · C#</text>
+<text x="720" y="340" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#5d6a63" text-anchor="start">DAL, RBAC: роли и группы</text>
+<text x="720" y="359" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#5d6a63" text-anchor="start">заявки: алерт датчика или расчёт ML</text>
+<rect x="984" y="302" width="42" height="19" rx="9.5" fill="#f4efdf" stroke="#ddcf9f"/>
+<text x="1005" y="316" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="10.5" font-weight="700" fill="#8a6a1f" text-anchor="middle">JWT</text>
+<rect x="720" y="380" width="300" height="95" rx="11" fill="#ffffff" stroke="#ccd4ce" stroke-width="1.3"/>
+<rect x="721.5" y="390" width="5" height="75" rx="2.5" fill="#8a6a1f"/>
+<text x="740" y="408" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="14" font-weight="650" fill="#16211c" text-anchor="start">Аутентификация</text>
+<text x="740" y="430" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#5d6a63" text-anchor="start">логин и пароль, выпуск пары токенов</text>
+<text x="740" y="449" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#5d6a63" text-anchor="start">подписывает приватным ключом</text>
+<text x="740" y="468" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#5d6a63" text-anchor="start">ручка публичного ключа</text>
+<rect x="700" y="520" width="340" height="80" rx="11" fill="#ffffff" stroke="#ccd4ce" stroke-width="1.3"/>
+<rect x="701.5" y="530" width="5" height="60" rx="2.5" fill="#2c5f8a"/>
+<text x="720" y="548" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="16" font-weight="650" fill="#16211c" text-anchor="start">Dispatch</text>
+<text x="720" y="570" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#5d6a63" text-anchor="start">разводит алерты по соседним сервисам</text>
+<rect x="984" y="532" width="42" height="19" rx="9.5" fill="#f4efdf" stroke="#ddcf9f"/>
+<text x="1005" y="546" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="10.5" font-weight="700" fill="#8a6a1f" text-anchor="middle">JWT</text>
+<rect x="700" y="630" width="340" height="80" rx="11" fill="#ffffff" stroke="#ccd4ce" stroke-width="1.3"/>
+<rect x="701.5" y="640" width="5" height="60" rx="2.5" fill="#2c5f8a"/>
+<text x="720" y="658" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="16" font-weight="650" fill="#16211c" text-anchor="start">Funnel · воронка</text>
+<text x="720" y="680" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#5d6a63" text-anchor="start">принимает поток от шины объекта</text>
+<text x="720" y="699" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#5d6a63" text-anchor="start">проверяет её долгий токен</text>
+<rect x="984" y="642" width="42" height="19" rx="9.5" fill="#f4efdf" stroke="#ddcf9f"/>
+<text x="1005" y="656" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="10.5" font-weight="700" fill="#8a6a1f" text-anchor="middle">JWT</text>
+<rect x="700" y="740" width="340" height="80" rx="11" fill="#ffffff" stroke="#ccd4ce" stroke-width="1.3"/>
+<rect x="701.5" y="750" width="5" height="60" rx="2.5" fill="#2c5f8a"/>
+<text x="720" y="768" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="16" font-weight="650" fill="#16211c" text-anchor="start">ML · FastAPI</text>
+<text x="720" y="790" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#5d6a63" text-anchor="start">асинхронные расчёты</text>
+<text x="720" y="809" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#5d6a63" text-anchor="start">результат уходит в dispatch</text>
+<rect x="984" y="752" width="42" height="19" rx="9.5" fill="#f4efdf" stroke="#ddcf9f"/>
+<text x="1005" y="766" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="10.5" font-weight="700" fill="#8a6a1f" text-anchor="middle">JWT</text>
+<rect x="700" y="840" width="340" height="100" rx="11" fill="#ffffff" stroke="#ccd4ce" stroke-width="1.3"/>
+<rect x="701.5" y="850" width="5" height="80" rx="2.5" fill="#2c5f8a"/>
+<text x="720" y="868" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="16" font-weight="650" fill="#16211c" text-anchor="start">Notify · почта</text>
+<text x="720" y="890" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#5d6a63" text-anchor="start">письмо всей группе адресатов</text>
+<text x="720" y="909" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#5d6a63" text-anchor="start">кто сейчас на смене — система не знает</text>
+<rect x="984" y="852" width="42" height="19" rx="9.5" fill="#f4efdf" stroke="#ddcf9f"/>
+<text x="1005" y="866" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="10.5" font-weight="700" fill="#8a6a1f" text-anchor="middle">JWT</text>
+<rect x="700" y="960" width="340" height="80" rx="11" fill="#ffffff" stroke="#ccd4ce" stroke-width="1.3"/>
+<rect x="701.5" y="970" width="5" height="60" rx="2.5" fill="#2c5f8a"/>
+<text x="720" y="988" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="16" font-weight="650" fill="#16211c" text-anchor="start">Telegram</text>
+<text x="720" y="1010" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#5d6a63" text-anchor="start">то же уведомление в бот</text>
+<rect x="984" y="972" width="42" height="19" rx="9.5" fill="#f4efdf" stroke="#ddcf9f"/>
+<text x="1005" y="986" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="10.5" font-weight="700" fill="#8a6a1f" text-anchor="middle">JWT</text>
+<rect x="700" y="1070" width="340" height="90" rx="11" fill="#ffffff" stroke="#ccd4ce" stroke-width="1.3"/>
+<rect x="701.5" y="1080" width="5" height="70" rx="2.5" fill="#9c4b33"/>
+<text x="720" y="1098" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="16" font-weight="650" fill="#16211c" text-anchor="start">Audit</text>
+<text x="720" y="1120" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#5d6a63" text-anchor="start">события всех сервисов: кто, что, когда</text>
+<text x="720" y="1139" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#5d6a63" text-anchor="start">протухшие токены и отказы</text>
+<rect x="984" y="1082" width="42" height="19" rx="9.5" fill="#f4efdf" stroke="#ddcf9f"/>
+<text x="1005" y="1096" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="10.5" font-weight="700" fill="#8a6a1f" text-anchor="middle">JWT</text>
+<rect x="1120" y="290" width="420" height="510" rx="13" fill="#ffffff" stroke="#ccd4ce" stroke-width="1.3"/>
+<rect x="1121.5" y="300" width="5" height="490" rx="2.5" fill="#48566a"/>
+<text x="1140" y="318" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="16" font-weight="650" fill="#16211c" text-anchor="start">PostgreSQL · контейнер 1</text>
+<text x="1140" y="340" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#5d6a63" text-anchor="start">четыре схемы — по одной на сервис</text>
+<rect x="1140" y="360" width="380" height="82" rx="9" fill="#f3f5f7" stroke="#dbe1e6"/>
+<text x="1158" y="386" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="13.5" font-weight="620" fill="#16211c" text-anchor="start">схема аутентификации</text>
+<text x="1158" y="406" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.3" font-weight="400" fill="#5d6a63" text-anchor="start">только логин и хэш пароля</text>
+<text x="1158" y="424" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.3" font-weight="400" fill="#5d6a63" text-anchor="start">токены не хранятся — у них свой срок жизни</text>
+<rect x="1140" y="458" width="380" height="62" rx="9" fill="#f3f5f7" stroke="#dbe1e6"/>
+<text x="1158" y="484" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="13.5" font-weight="620" fill="#16211c" text-anchor="start">ещё три схемы</text>
+<text x="1158" y="504" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.3" font-weight="400" fill="#5d6a63" text-anchor="start">по одной на сервис</text>
+<text x="1140" y="556" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.5" font-weight="400" fill="#5d6a63" text-anchor="start">Внутри схемы — таблицы. Группы и пользователи</text>
+<text x="1140" y="575" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.5" font-weight="400" fill="#5d6a63" text-anchor="start">самой базы — отдельная сущность: они не равны</text>
+<text x="1140" y="594" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.5" font-weight="400" fill="#5d6a63" text-anchor="start">пользователям системы из таблицы users.</text>
+<text x="1140" y="626" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.5" font-weight="400" fill="#5d6a63" text-anchor="start">Рабочие контейнеры ходят под группой RW —</text>
+<text x="1140" y="645" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.5" font-weight="400" fill="#5d6a63" text-anchor="start">чтение и запись данных. Создавать таблицы</text>
+<text x="1140" y="664" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.5" font-weight="400" fill="#5d6a63" text-anchor="start">может только административная учётка.</text>
+<rect x="1120" y="840" width="420" height="80" rx="11" fill="#ffffff" stroke="#ccd4ce" stroke-width="1.3"/>
+<rect x="1121.5" y="850" width="5" height="60" rx="2.5" fill="#48566a"/>
+<text x="1140" y="868" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="16" font-weight="650" fill="#16211c" text-anchor="start">S3 / MinIO</text>
+<text x="1140" y="890" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#5d6a63" text-anchor="start">артефакты расчётов</text>
+<rect x="1120" y="940" width="420" height="110" rx="11" fill="#ffffff" stroke="#ccd4ce" stroke-width="1.3"/>
+<rect x="1121.5" y="950" width="5" height="90" rx="2.5" fill="#2c5f8a"/>
+<text x="1140" y="968" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="16" font-weight="650" fill="#16211c" text-anchor="start">Заявка — единица работы</text>
+<text x="1140" y="990" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#5d6a63" text-anchor="start">алерт датчика или расчёт ML ложится в BFF</text>
+<text x="1140" y="1009" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#5d6a63" text-anchor="start">уведомление уходит всей группе сразу</text>
+<text x="1140" y="1028" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#5d6a63" text-anchor="start">кто первым взял в работу, тот и ведёт</text>
+<rect x="1120" y="1070" width="420" height="90" rx="11" fill="#ffffff" stroke="#ccd4ce" stroke-width="1.3"/>
+<rect x="1121.5" y="1080" width="5" height="70" rx="2.5" fill="#48566a"/>
+<text x="1140" y="1098" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="16" font-weight="650" fill="#16211c" text-anchor="start">PostgreSQL · контейнер 2</text>
+<text x="1140" y="1120" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#5d6a63" text-anchor="start">только журнал аудита</text>
+<text x="1140" y="1139" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.8" font-weight="400" fill="#5d6a63" text-anchor="start">в идеале — отдельная машина</text>
+<polyline points="270,205 352,205" fill="none" stroke="#8c9a92" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#head)"/>
+<text x="311" y="194" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" font-weight="500" fill="#5d6a63" text-anchor="middle">HTTPS · tf.ru</text>
+<polyline points="270,395 310,395 310,290 352,290" fill="none" stroke="#8c9a92" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#head)"/>
+<text x="304" y="279" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" font-weight="500" fill="#5d6a63" text-anchor="middle">поток с датчиков</text>
+<polyline points="600,200 692,200" fill="none" stroke="#8c9a92" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#head)"/>
+<text x="686" y="190" font-family="'Cascadia Mono', Consolas, 'DejaVu Sans Mono', monospace" font-size="11.5" font-weight="500" fill="#5d6a63" text-anchor="end">/</text>
+<polyline points="600,240 640,240 640,390 692,390" fill="none" stroke="#8c9a92" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#head)"/>
+<text x="686" y="381" font-family="'Cascadia Mono', Consolas, 'DejaVu Sans Mono', monospace" font-size="11.5" font-weight="500" fill="#5d6a63" text-anchor="end">/api/bff</text>
+<polyline points="520,310 520,560 692,560" fill="none" stroke="#8c9a92" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#head)"/>
+<text x="686" y="551" font-family="'Cascadia Mono', Consolas, 'DejaVu Sans Mono', monospace" font-size="11.5" font-weight="500" fill="#5d6a63" text-anchor="end">/api/dispatch</text>
+<polyline points="470,310 470,670 692,670" fill="none" stroke="#8c9a92" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#head)"/>
+<text x="686" y="661" font-family="'Cascadia Mono', Consolas, 'DejaVu Sans Mono', monospace" font-size="11.5" font-weight="500" fill="#5d6a63" text-anchor="end">/api/funnel</text>
+<polyline points="420,310 420,780 692,780" fill="none" stroke="#8c9a92" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#head)"/>
+<text x="686" y="771" font-family="'Cascadia Mono', Consolas, 'DejaVu Sans Mono', monospace" font-size="11.5" font-weight="500" fill="#5d6a63" text-anchor="end">/api/ml</text>
+<polyline points="700,578 680,578 680,330 692,330" fill="none" stroke="#8c9a92" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#head)"/>
+<polyline points="680,578 680,890 692,890" fill="none" stroke="#8c9a92" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#head)"/>
+<text transform="translate(672,468) rotate(-90)" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#5d6a63" text-anchor="middle">техническая учётка</text>
+<polyline points="680,890 680,1000 692,1000" fill="none" stroke="#8c9a92" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#head)"/>
+<polyline points="1040,390 1112,390" fill="none" stroke="#8c9a92" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#head)"/>
+<text x="1106" y="380" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" font-weight="500" fill="#5d6a63" text-anchor="end">учётка RW</text>
+<polyline points="1040,560 1112,560" fill="none" stroke="#8c9a92" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#head)"/>
+<polyline points="1040,670 1112,670" fill="none" stroke="#8c9a92" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#head)"/>
+<polyline points="1040,780 1112,780" fill="none" stroke="#8c9a92" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#head)"/>
+<polyline points="1040,800 1080,800 1080,880 1112,880" fill="none" stroke="#8c9a92" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#head)"/>
+<polyline points="1040,1135 1112,1135" fill="none" stroke="#8c9a92" stroke-width="1.5" stroke-linejoin="round" marker-end="url(#head)"/>
+<text x="1106" y="1125" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" font-weight="500" fill="#5d6a63" text-anchor="end">своя база</text>
+<polyline points="1040,302 1060,302" fill="none" stroke="#8c9a92" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="2 5" stroke-linecap="round"/>
+<polyline points="1040,532 1060,532" fill="none" stroke="#8c9a92" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="2 5" stroke-linecap="round"/>
+<polyline points="1040,642 1060,642" fill="none" stroke="#8c9a92" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="2 5" stroke-linecap="round"/>
+<polyline points="1040,752 1060,752" fill="none" stroke="#8c9a92" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="2 5" stroke-linecap="round"/>
+<polyline points="1040,852 1060,852" fill="none" stroke="#8c9a92" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="2 5" stroke-linecap="round"/>
+<polyline points="1040,972 1060,972" fill="none" stroke="#8c9a92" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="2 5" stroke-linecap="round"/>
+<polyline points="1060,302 1060,1095 1048,1095" fill="none" stroke="#8c9a92" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="2 5" stroke-linecap="round" marker-end="url(#headmuted)"/>
+<text transform="translate(1054,1010) rotate(-90)" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#9a8580" text-anchor="middle">события в аудит</text>
+<rect x="40" y="1250" width="370" height="230" rx="12" fill="#ffffff" stroke="#ccd4ce" stroke-width="1.3"/>
+<rect x="40" y="1250" width="370" height="4" rx="2" fill="#8a6a1f"/>
+<text x="60" y="1284" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="14.5" font-weight="650" fill="#16211c" text-anchor="start">Токены и ключи</text>
+<text x="60" y="1310" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.3" font-weight="400" fill="#5d6a63" text-anchor="start">Токен доступа живёт 10 минут,</text>
+<text x="60" y="1329" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.3" font-weight="400" fill="#5d6a63" text-anchor="start">токен обновления — сутки.</text>
+<text x="60" y="1348" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.3" font-weight="400" fill="#5d6a63" text-anchor="start">При запуске выпускается пара</text>
+<text x="60" y="1367" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.3" font-weight="400" fill="#5d6a63" text-anchor="start">ключей X.509. Подпись — приватным,</text>
+<text x="60" y="1386" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.3" font-weight="400" fill="#5d6a63" text-anchor="start">проверка — публичным: его забирают</text>
+<text x="60" y="1405" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.3" font-weight="400" fill="#5d6a63" text-anchor="start">ручкой один раз при старте сервиса.</text>
+<text x="60" y="1424" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.3" font-weight="400" fill="#5d6a63" text-anchor="start">JWT в Base64, перебор нереален.</text>
+<text x="60" y="1443" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.3" font-weight="400" fill="#5d6a63" text-anchor="start">Сертификат перевыпускают раз в год.</text>
+<rect x="430" y="1250" width="370" height="230" rx="12" fill="#ffffff" stroke="#ccd4ce" stroke-width="1.3"/>
+<rect x="430" y="1250" width="370" height="4" rx="2" fill="#2c5f8a"/>
+<text x="450" y="1284" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="14.5" font-weight="650" fill="#16211c" text-anchor="start">Субъект запроса</text>
+<text x="450" y="1310" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.3" font-weight="400" fill="#5d6a63" text-anchor="start">В токене sub — идентификатор того,</text>
+<text x="450" y="1329" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.3" font-weight="400" fill="#5d6a63" text-anchor="start">кто прислал запрос.</text>
+<text x="450" y="1348" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.3" font-weight="400" fill="#5d6a63" text-anchor="start">Субъекта два вида: живой пользователь</text>
+<text x="450" y="1367" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.3" font-weight="400" fill="#5d6a63" text-anchor="start">и техническая учётная запись сервиса.</text>
+<text x="450" y="1386" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.3" font-weight="400" fill="#5d6a63" text-anchor="start">Своя учётка — у каждого, кто ходит</text>
+<text x="450" y="1405" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.3" font-weight="400" fill="#5d6a63" text-anchor="start">в соседние сервисы; кто не ходит —</text>
+<text x="450" y="1424" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.3" font-weight="400" fill="#5d6a63" text-anchor="start">обходится без неё. Токены техучёток</text>
+<text x="450" y="1443" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.3" font-weight="400" fill="#5d6a63" text-anchor="start">выпускают примерно на год.</text>
+<rect x="820" y="1250" width="370" height="230" rx="12" fill="#ffffff" stroke="#ccd4ce" stroke-width="1.3"/>
+<rect x="820" y="1250" width="370" height="4" rx="2" fill="#48566a"/>
+<text x="840" y="1284" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="14.5" font-weight="650" fill="#16211c" text-anchor="start">Учётные записи в базе</text>
+<text x="840" y="1310" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.3" font-weight="400" fill="#5d6a63" text-anchor="start">Пользователь системы — строка</text>
+<text x="840" y="1329" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.3" font-weight="400" fill="#5d6a63" text-anchor="start">в таблице users.</text>
+<text x="840" y="1348" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.3" font-weight="400" fill="#5d6a63" text-anchor="start">Пользователь базы — отдельная</text>
+<text x="840" y="1367" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.3" font-weight="400" fill="#5d6a63" text-anchor="start">сущность PostgreSQL, это не одно и то же.</text>
+<text x="840" y="1386" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.3" font-weight="400" fill="#5d6a63" text-anchor="start">Права трёх видов: чтение, запись,</text>
+<text x="840" y="1405" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.3" font-weight="400" fill="#5d6a63" text-anchor="start">администрирование.</text>
+<text x="840" y="1424" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.3" font-weight="400" fill="#5d6a63" text-anchor="start">RBAC — роль на действие; ABAC</text>
+<text x="840" y="1443" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.3" font-weight="400" fill="#5d6a63" text-anchor="start">(владелец датчика) — задел на будущее.</text>
+<rect x="1210" y="1250" width="370" height="230" rx="12" fill="#ffffff" stroke="#ccd4ce" stroke-width="1.3"/>
+<rect x="1210" y="1250" width="370" height="4" rx="2" fill="#2f6f4f"/>
+<text x="1230" y="1284" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="14.5" font-weight="650" fill="#16211c" text-anchor="start">Контейнеры</text>
+<text x="1230" y="1310" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.3" font-weight="400" fill="#5d6a63" text-anchor="start">На сервис — два контейнера.</text>
+<text x="1230" y="1329" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.3" font-weight="400" fill="#5d6a63" text-anchor="start">Рабочий запущен всегда и ходит</text>
+<text x="1230" y="1348" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.3" font-weight="400" fill="#5d6a63" text-anchor="start">в базу под RW-учёткой.</text>
+<text x="1230" y="1367" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.3" font-weight="400" fill="#5d6a63" text-anchor="start">Конфигурационный запускают вручную:</text>
+<text x="1230" y="1386" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.3" font-weight="400" fill="#5d6a63" text-anchor="start">он прогоняет миграции под</text>
+<text x="1230" y="1405" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.3" font-weight="400" fill="#5d6a63" text-anchor="start">административной учёткой и гаснет.</text>
+<text x="1230" y="1424" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.3" font-weight="400" fill="#5d6a63" text-anchor="start">Баз данных два контейнера: общий</text>
+<text x="1230" y="1443" font-family="'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" font-size="12.3" font-weight="400" fill="#5d6a63" text-anchor="start">на четыре схемы и отдельный под аудит.</text>
+</svg>
