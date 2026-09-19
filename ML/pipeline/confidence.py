@@ -61,8 +61,11 @@ def main() -> None:
     ap.add_argument('--types', default=','.join(config.TYPES))
     ap.add_argument('--horizon', type=int, default=config.HORIZON)
     ap.add_argument('--hours', type=int, default=6, help='порог «тревога горит давно», ч')
+    ap.add_argument('--eval', default='test', choices=['test', 'val'],
+                    help='на чём считать; val — проверка того, что признаки держатся и на другом годе')
     args = ap.parse_args()
     H = args.horizon
+    EV, YEAR = args.eval, {'val': 2025, 'test': 2026}[args.eval]
     spread = config.WORK / 'combo_spread.parquet'
     sp = pl.read_parquet(spread) if spread.exists() else None
 
@@ -70,25 +73,26 @@ def main() -> None:
     others = {}
     for tp in config.TYPES:
         _, _, nv, pv = op.split(args.run, 'val', 2025, tp, 'xgb')
-        _, _, _, ps = op.split(args.run, 'test', 2026, tp, 'xgb')
+        _, _, _, ps = op.split(args.run, EV, YEAR, tp, 'xgb')
         others[tp] = ps >= metrics.best_threshold((nv <= H).astype(np.int8), pv)
     near = {tp: sum(v for k, v in others.items() if k != tp).astype(np.int16) for tp in config.TYPES}
 
     for tp in args.types.split(','):
         ov, hv, nv, pv = op.split(args.run, 'val', 2025, tp, 'xgb')
-        os_, hs, ns, ps = op.split(args.run, 'test', 2026, tp, 'xgb')
+        os_, hs, ns, ps = op.split(args.run, EV, YEAR, tp, 'xgb')
         cv = np.load(config.WORK / 'runs' / args.run / 'preds' / f'cat_{tp}_val.npy')
-        cs = np.load(config.WORK / 'runs' / args.run / 'preds' / f'cat_{tp}_test.npy')
+        cs = np.load(config.WORK / 'runs' / args.run / 'preds' / f'cat_{tp}_{EV}.npy')
         yv, ys = (nv <= H).astype(np.int8), (ns <= H).astype(np.int8)
         print(f'\n## {config.TYPE_NAMES[tp]}')
 
         cal = IsotonicRegression(out_of_bounds='clip').fit(pv, yv)
         q = cal.predict(ps)
-        rows = []
-        for a, b in zip(BINS, BINS[1:]):
-            m = (q >= a) & (q < b)
-            rows.append((f'{a:.2f}–{min(b, 1.0):.2f}'.replace('.', ','), m))
-        table('калиброванная вероятность', group_rows(os_, hs, ys, rows))
+        if EV == 'test':   # на проверке калибровка обучена по этим же строкам, смотреть её незачем
+            rows = []
+            for a, b in zip(BINS, BINS[1:]):
+                m = (q >= a) & (q < b)
+                rows.append((f'{a:.2f}–{min(b, 1.0):.2f}'.replace('.', ','), m))
+            table('калиброванная вероятность', group_rows(os_, hs, ys, rows))
 
         tv = metrics.best_threshold(yv, pv)
         tc = metrics.best_threshold(yv, cv)
