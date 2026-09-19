@@ -27,6 +27,47 @@ def best_threshold(y: np.ndarray, p: np.ndarray) -> float:
     return float(th[np.argmax(f1)]) if len(th) else 0.5
 
 
+def threshold_for_precision(y: np.ndarray, p: np.ndarray, target: float,
+                            min_alarms: int = 50) -> float | None:
+    """Порог под заданную точность: наибольшая полнота среди точек, где Precision не ниже target.
+
+    Ложная тревога дороже пропуска по-разному для разных типов, поэтому рабочую точку выбирает
+    заказчик, а не F1. Точки, где тревог меньше min_alarms, отбрасываются: там точность случайна.
+    """
+    pr, rc, th = precision_recall_curve(y, p)
+    pos = max(int(y.sum()), 1)
+    alarms = rc[:-1] * pos / np.maximum(pr[:-1], 1e-12)
+    ok = np.where((pr[:-1] >= target) & (alarms >= min_alarms))[0]
+    return float(th[ok[0]]) if len(ok) else None
+
+
+def threshold_for_rate(p: np.ndarray, per_day: float, rows: int, days: float) -> float:
+    """Порог под бюджет диспетчера: сколько тревог в сутки он готов разбирать по всем объектам."""
+    rate = min(per_day * days / max(rows, 1), 1.0)
+    return float(np.quantile(p, 1 - rate))
+
+
+def signals(obj: np.ndarray, h: np.ndarray, y: np.ndarray, alarm: np.ndarray) -> tuple[int, int]:
+    """Сигналы диспетчеру: подряд идущие часы тревоги на объекте — это один сигнал, а не десять.
+
+    Возвращает (всего сигналов, из них подтвердившихся). Сигнал подтверждён, если хотя бы в один из
+    его часов инцидент действительно начался в горизонте. Остальные — ложные: то, что диспетчер
+    сходил и ничего не нашёл.
+    """
+    if not alarm.any():
+        return 0, 0
+    o, hh, yy = obj[alarm], h[alarm], y[alarm]
+    order = np.lexsort((hh, o))
+    o, hh, yy = o[order], hh[order], yy[order]
+    start = np.empty(len(o), bool)
+    start[0] = True
+    start[1:] = (o[1:] != o[:-1]) | (hh[1:] != hh[:-1] + 1)
+    run = np.cumsum(start) - 1
+    total = int(run[-1]) + 1
+    true = int(np.bincount(run, weights=yy, minlength=total).astype(bool).sum())
+    return total, true
+
+
 def ece(y: np.ndarray, p: np.ndarray, bins: int = 15) -> float:
     edges = np.quantile(p, np.linspace(0, 1, bins + 1))
     idx = np.clip(np.searchsorted(edges, p, side='right') - 1, 0, bins - 1)
@@ -68,6 +109,8 @@ def evaluate(obj: np.ndarray, h: np.ndarray, nxt: np.ndarray, p: np.ndarray, thr
                 k += 1
             runs.append(k)
     leads, runs = np.array(leads), np.array(runs)
+    sig, sig_true = signals(obj, h, y, alarm)
+    out.update({'signals': sig, 'signals_true': sig_true, 'signals_false': sig - sig_true})
     q = lambda a, x: float(np.percentile(a, x)) if len(a) else float('nan')
     out.update({'episodes': total, 'caught': caught, 'recall_episodes': caught / total if total else float('nan'),
                 'lead_median_h': q(leads, 50), 'lead_p25_h': q(leads, 25), 'lead_p75_h': q(leads, 75),

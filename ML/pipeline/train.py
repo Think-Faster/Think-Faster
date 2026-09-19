@@ -12,6 +12,8 @@
 
     python train.py --models xgb,cat
     python train.py --models lgbm --branch long
+    python train.py --models xgb,cat --params tuned --weather base   # то же с погодой (weather.py)
+    python train.py --models xgb,cat --params tuned --combo pairs   # …и со связками датчиков (combo.py)
 """
 import argparse
 import json
@@ -25,14 +27,24 @@ import config
 import metrics
 
 SPLITS = {'main': [2022, 2023, 2024], 'long': [2019, 2020, 2022, 2023, 2024]}
+WEATHER_TAG = {'': '', 'base': '_weather', 'ext': '_weather_ext', 'both': '_weather_both'}
+COMBO_TAG = {'': '', 'pairs': '_combo', 'spread': '_spread', 'both': '_combo_spread'}
 FEAT = config.WORK / 'features'
 
 
-def load(years: list[int], step: int, columns: list[str]) -> pl.DataFrame:
+def load(years: list[int], step: int, columns: list[str], wx: pl.DataFrame | None = None,
+         cb: pl.DataFrame | None = None) -> pl.DataFrame:
     lf = pl.scan_parquet([FEAT / f'{y}.parquet' for y in years])
     if step > 1:
         lf = lf.filter(pl.col('h') % step == 0)
-    return lf.select(columns).collect()
+    lf = lf.select(columns)
+    if wx is not None:  # погода одна на все объекты: приклеивается по часу
+        lf = lf.join(wx.lazy(), on='h', how='left')
+    if cb is not None:  # связки датчиков: по объекту и часу, где связок не было — нули
+        extra = [c for c in cb.columns if c not in ('object_id', 'h')]
+        lf = lf.join(cb.lazy(), on=['object_id', 'h'], how='left').with_columns(
+            [pl.col(c).fill_null(0) for c in extra])
+    return lf.collect()
 
 
 def matrix(df: pl.DataFrame, features: list[str]) -> np.ndarray:
@@ -113,20 +125,37 @@ def main() -> None:
     ap.add_argument('--target', default='', choices=['', '_prim'],
                     help='_prim — только первичные эпизоды: такого же не было 7 сут')
     ap.add_argument('--params', default='default', choices=['default', 'tuned'])
+    ap.add_argument('--weather', default='', choices=['', 'base', 'ext', 'both'],
+                    help='добавить признаки погоды из weather.py: набор ТЗ, расширенный или оба')
+    ap.add_argument('--combo', default='', choices=['', 'pairs', 'spread', 'both'],
+                    help='добавить связки соседних датчиков и/или разброс по пикетам из combo.py')
     args = ap.parse_args()
     models = [m for m in args.models.split(',') if m]
     types = args.types.split(',')
     H = args.horizon
     tg = args.target
-    tag = f'{args.branch}_h{H}{tg}' + ('_tuned' if args.params == 'tuned' else '')
+    tag = (f'{args.branch}_h{H}{tg}' + ('_tuned' if args.params == 'tuned' else '')
+           + WEATHER_TAG[args.weather] + COMBO_TAG[args.combo])
 
     meta = json.loads((FEAT / 'meta.json').read_text(encoding='utf-8'))
     features, cap = meta['features'], meta['next_cap']
+    wx = cb = None
+    if args.weather:
+        for pack in (['base', 'ext'] if args.weather == 'both' else [args.weather]):
+            w = pl.read_parquet(config.WORK / ('weather.parquet' if pack == 'base' else f'weather_{pack}.parquet'))
+            wx = w if wx is None else wx.join(w, on='h')
+        features = features + [c for c in wx.columns if c != 'h']
+    if args.combo:
+        for part in (['pairs', 'spread'] if args.combo == 'both' else [args.combo]):
+            c = pl.read_parquet(config.WORK / ('combo.parquet' if part == 'pairs' else 'combo_spread.parquet'))
+            cb = c if cb is None else cb.join(c, on=['object_id', 'h'], how='full', coalesce=True).fill_null(0)
+        features = features + [c for c in cb.columns if c not in ('object_id', 'h')]
     t = time.time()
     keys = ['object_id', 'h']
-    tr = load(SPLITS[args.branch], args.step, keys + features + meta['targets'])
-    va = load([2025], 1, keys + features + meta['targets'])
-    te = load([2026], 1, keys + features + meta['targets'])
+    cols = keys + meta['features'] + meta['targets']
+    tr = load(SPLITS[args.branch], args.step, cols, wx, cb)
+    va = load([2025], 1, cols, wx, cb)
+    te = load([2026], 1, cols, wx, cb)
     Xt, Xv, Xs = matrix(tr, features), matrix(va, features), matrix(te, features)
     tr, va, te = (df.select(keys + meta['targets']) for df in (tr, va, te))  # признаки уже в матрицах
     print(f'обучение {Xt.shape}, проверка {Xv.shape}, тест {Xs.shape}: {time.time() - t:.0f} с', flush=True)
