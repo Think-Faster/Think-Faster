@@ -1,0 +1,11 @@
+--extra-index-url https://download.pytorch.org/whl/cu124
+torch==2.5.1+cu124
+xgboost==3.4.1
+catboost==1.2.10
+lightgbm==4.7.0
+optuna==5.0.0
+duckdb==1.5.5
+polars==1.44.2
+pyarrow==25.0.1
+numpy==2.5.3
+scikit-learn==1.9.1
