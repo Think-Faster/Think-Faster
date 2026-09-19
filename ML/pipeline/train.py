@@ -1,0 +1,197 @@
+"""Шаг 4. Бустинг по типам инцидентов и базовые уровни (Ф5-1).
+
+Валидация по времени: обучение — 2022–2024 (ветка long добавляет 2019–2020), проверка — 2025
+(ранняя остановка, порог, калибровка), тест — 2026 один раз. По каждому типу своя бинарная модель
+«начнётся ли эпизод в ближайшие H часов». На GPU — XGBoost и CatBoost, LightGBM — на CPU
+(в pip-сборке нет CUDA), его можно пускать параллельно отдельным процессом.
+
+Базовые уровни:
+- freq — доля часов с инцидентом у объекта на обучении (частота без признаков);
+- rules — правило диспетчера «были триггеры этого типа за последние 24 ч», оценка — их число;
+- recency — сколько часов с прошлого эпизода этого типа (чем меньше, тем выше риск).
+
+    python train.py --models xgb,cat
+    python train.py --models lgbm --branch long
+"""
+import argparse
+import json
+import time
+
+import numpy as np
+import polars as pl
+from sklearn.isotonic import IsotonicRegression
+
+import config
+import metrics
+
+SPLITS = {'main': [2022, 2023, 2024], 'long': [2019, 2020, 2022, 2023, 2024]}
+FEAT = config.WORK / 'features'
+
+
+def load(years: list[int], step: int, columns: list[str]) -> pl.DataFrame:
+    lf = pl.scan_parquet([FEAT / f'{y}.parquet' for y in years])
+    if step > 1:
+        lf = lf.filter(pl.col('h') % step == 0)
+    return lf.select(columns).collect()
+
+
+def matrix(df: pl.DataFrame, features: list[str]) -> np.ndarray:
+    return np.ascontiguousarray(df.select(features).to_numpy(), dtype=np.float32)
+
+
+def fit_xgb(Xt, yt, Xv, yv, params: dict | None = None):
+    import xgboost as xgb
+    p = {'objective': 'binary:logistic', 'eval_metric': 'aucpr', 'tree_method': 'hist', 'device': 'cuda',
+         'max_depth': 8, 'learning_rate': 0.05, 'subsample': 0.8, 'colsample_bytree': 0.6,
+         'min_child_weight': 5, 'max_bin': 256, 'reg_lambda': 1.0}
+    p.update(params or {})
+    dt = xgb.QuantileDMatrix(Xt, yt, max_bin=p['max_bin'])
+    dv = xgb.QuantileDMatrix(Xv, yv, ref=dt)
+    booster = xgb.train(p, dt, num_boost_round=4000, evals=[(dv, 'val')], early_stopping_rounds=200,
+                        verbose_eval=False)
+    predict = lambda X: booster.inplace_predict(X, iteration_range=(0, booster.best_iteration + 1))
+    return booster, predict, booster.best_iteration + 1
+
+
+def fit_cat(Xt, yt, Xv, yv, params: dict | None = None):
+    from catboost import CatBoostClassifier
+    p = {'iterations': 4000, 'learning_rate': 0.05, 'depth': 8, 'task_type': 'GPU', 'devices': '0',
+         'loss_function': 'Logloss', 'border_count': 254, 'od_type': 'Iter', 'od_wait': 200,
+         'use_best_model': True, 'verbose': False, 'gpu_ram_part': 0.8}
+    p.update(params or {})
+    m = CatBoostClassifier(**p)
+    m.fit(Xt, yt, eval_set=(Xv, yv))
+    return m, lambda X: m.predict_proba(X)[:, 1], m.get_best_iteration() + 1
+
+
+def fit_lgbm(Xt, yt, Xv, yv, params: dict | None = None):
+    import lightgbm as lgb
+    p = {'objective': 'binary', 'metric': 'average_precision', 'learning_rate': 0.05, 'num_leaves': 127,
+         'min_child_samples': 50, 'feature_fraction': 0.6, 'bagging_fraction': 0.8, 'bagging_freq': 1,
+         'num_threads': 12, 'verbose': -1, 'max_bin': 255}
+    p.update(params or {})
+    dt = lgb.Dataset(Xt, yt, free_raw_data=True)
+    dv = lgb.Dataset(Xv, yv, reference=dt)
+    m = lgb.train(p, dt, num_boost_round=4000, valid_sets=[dv],
+                  callbacks=[lgb.early_stopping(200, verbose=False)])
+    return m, lambda X: m.predict(X, num_iteration=m.best_iteration), m.best_iteration
+
+
+FIT = {'xgb': fit_xgb, 'cat': fit_cat, 'lgbm': fit_lgbm}
+
+
+def tuned(name: str, tp: str, target: str, horizon: int) -> dict | None:
+    """Параметры из tune.py; для LightGBM подбора нет — берутся умолчания."""
+    path = config.WORK / 'runs' / 'tune' / f"{name}_{tp}{target}{'' if horizon == config.HORIZON else f'_h{horizon}'}.json"
+    if not path.exists():
+        return None
+    p = json.loads(path.read_text(encoding='utf-8'))['params']
+    if name == 'cat' and 'subsample' in p:
+        p['bootstrap_type'] = 'Bernoulli'
+    return p
+
+
+def importance(model, name: str, features: list[str], top: int = 20) -> list[tuple[str, float]]:
+    if name == 'xgb':
+        g = model.get_score(importance_type='total_gain')
+        pairs = [(features[int(k[1:])], v) for k, v in g.items()]
+    elif name == 'cat':
+        pairs = list(zip(features, model.get_feature_importance()))
+    else:
+        pairs = list(zip(features, model.feature_importance('gain')))
+    total = sum(v for _, v in pairs) or 1
+    return [(f, round(v / total, 4)) for f, v in sorted(pairs, key=lambda x: -x[1])[:top]]
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--models', default='xgb,cat')
+    ap.add_argument('--branch', default='main', choices=list(SPLITS))
+    ap.add_argument('--types', default=','.join(config.TYPES))
+    ap.add_argument('--step', type=int, default=3, help='шаг по часам в обучении: соседние часы почти одинаковы')
+    ap.add_argument('--horizon', type=int, default=config.HORIZON)
+    ap.add_argument('--target', default='', choices=['', '_prim'],
+                    help='_prim — только первичные эпизоды: такого же не было 7 сут')
+    ap.add_argument('--params', default='default', choices=['default', 'tuned'])
+    args = ap.parse_args()
+    models = [m for m in args.models.split(',') if m]
+    types = args.types.split(',')
+    H = args.horizon
+    tg = args.target
+    tag = f'{args.branch}_h{H}{tg}' + ('_tuned' if args.params == 'tuned' else '')
+
+    meta = json.loads((FEAT / 'meta.json').read_text(encoding='utf-8'))
+    features, cap = meta['features'], meta['next_cap']
+    t = time.time()
+    keys = ['object_id', 'h']
+    tr = load(SPLITS[args.branch], args.step, keys + features + meta['targets'])
+    va = load([2025], 1, keys + features + meta['targets'])
+    te = load([2026], 1, keys + features + meta['targets'])
+    Xt, Xv, Xs = matrix(tr, features), matrix(va, features), matrix(te, features)
+    tr, va, te = (df.select(keys + meta['targets']) for df in (tr, va, te))  # признаки уже в матрицах
+    print(f'обучение {Xt.shape}, проверка {Xv.shape}, тест {Xs.shape}: {time.time() - t:.0f} с', flush=True)
+
+    out_dir = config.WORK / 'runs' / tag
+    (out_dir / 'preds').mkdir(parents=True, exist_ok=True)
+    (out_dir / 'models').mkdir(parents=True, exist_ok=True)
+    for name, df in (('val', va), ('test', te)):
+        np.savez(out_dir / 'preds' / f'index_{name}.npz', object_id=df['object_id'].to_numpy(), h=df['h'].to_numpy())
+    fi = {f: i for i, f in enumerate(features)}
+    h1 = va['h'].to_numpy() < va['h'].min() + 181 * 24
+    report_path = out_dir / f'report_{"_".join(models)}.json'
+    report = json.loads(report_path.read_text(encoding='utf-8')) if report_path.exists() else {}
+
+    for tp in types:
+        yt = (tr[f'next_{tp}{tg}'].to_numpy() <= H).astype(np.float32)
+        yv = (va[f'next_{tp}{tg}'].to_numpy() <= H).astype(np.float32)
+        print(f'\n== {tp}: доля положительных train {yt.mean():.4f}, val {yv.mean():.4f}', flush=True)
+        scores: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        # базовые уровни
+        rate = tr.group_by('object_id').agg(pl.col(f'next_{tp}{tg}').le(H).mean().alias('r'))
+        rmap = dict(zip(rate['object_id'].to_list(), rate['r'].to_list()))
+        prior = float(yt.mean())
+        scores['freq'] = tuple(np.array([rmap.get(o, prior) for o in df['object_id'].to_list()], np.float32)
+                               for df in (va, te))
+        scores['rules'] = (Xv[:, fi[f'trig_{tp}_24h']], Xs[:, fi[f'trig_{tp}_24h']])
+        scores['recency'] = (-Xv[:, fi[f'since_{tp}']], -Xs[:, fi[f'since_{tp}']])
+        for name in models:
+            t1 = time.time()
+            model, predict, iters = FIT[name](Xt, yt, Xv, yv, tuned(name, tp, tg, H) if args.params == 'tuned' else None)
+            scores[name] = (predict(Xv).astype(np.float32), predict(Xs).astype(np.float32))
+            print(f'  {name}: {iters} деревьев за {time.time() - t1:.0f} с', flush=True)
+            if name == 'xgb':
+                model.save_model(out_dir / 'models' / f'xgb_{tp}.json')
+            elif name == 'cat':
+                model.save_model(str(out_dir / 'models' / f'cat_{tp}.cbm'))
+            else:
+                model.save_model(str(out_dir / 'models' / f'lgbm_{tp}.txt'))
+            report.setdefault(tp, {}).setdefault('importance', {})[name] = importance(model, name, features)
+            report[tp].setdefault('iterations', {})[name] = iters
+        for name, (pv, ps) in scores.items():
+            np.save(out_dir / 'preds' / f'{name}_{tp}_val.npy', pv)
+            np.save(out_dir / 'preds' / f'{name}_{tp}_test.npy', ps)
+            thr = metrics.best_threshold(yv, pv)
+            row = {}
+            # val_h1 — январь–июнь 2025: те же месяцы, что в тесте, без летнего сезона подтоплений
+            for split, df, p, m in (('val', va, pv, None), ('val_h1', va, pv, h1), ('test', te, ps, None)):
+                obj, hh = df['object_id'].to_numpy(), df['h'].to_numpy()
+                for target in ('', '_prim', '_conf'):
+                    nx = df[f'next_{tp}{target}'].to_numpy()
+                    row[f'{split}{target}'] = (metrics.evaluate(obj, hh, nx, p, thr, H, cap) if m is None else
+                                               metrics.evaluate(obj[m], hh[m], nx[m], p[m], thr, H, cap))
+            if name not in ('rules', 'recency'):
+                iso = IsotonicRegression(out_of_bounds='clip').fit(pv, yv)
+                ys = (te[f'next_{tp}{tg}'].to_numpy() <= H).astype(np.float32)
+                row['ece_test_raw'] = metrics.ece(ys, ps)
+                row['ece_test_isotonic'] = metrics.ece(ys, iso.predict(ps))
+            report.setdefault(tp, {}).setdefault('scores', {})[name] = row
+            v, s, sp = row['val'], row['test'], row['test_prim']
+            print(f'  {name:8s} val PR-AUC {v["pr_auc"]:.3f} | test PR-AUC {s["pr_auc"]:.3f} P {s["precision"]:.3f} '
+                  f'R(эп) {s["recall_episodes"]:.3f} упрежд {s["lead_median_h"]:.0f} ч | первичные PR-AUC '
+                  f'{sp["pr_auc"]:.3f} R(эп) {sp["recall_episodes"]:.3f}', flush=True)
+        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=1), encoding='utf-8')
+    print(f'\nготово за {time.time() - t:.0f} с → {report_path}')
+
+
+if __name__ == '__main__':
+    main()
