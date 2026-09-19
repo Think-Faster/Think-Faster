@@ -111,6 +111,11 @@
   риском. Нагрузка у всех моделей одинаковая, равные оценки базовых уровней разводятся случайно.
   Отказ пойман, если датчик был в списке на проверку хотя бы в одни из H суток перед отказом.
 
+- **Уверенность прогноза** — что показываем диспетчеру рядом с тревогой: калиброванная вероятность
+  (изотоническая регрессия на проверке), согласие XGBoost и CatBoost, длительность тревоги, число
+  сработавших каналов рядом. Каждый признак проверен на тесте по доле подтвердившихся сигналов,
+  разбор — `results/analytics.md`, раздел 6.
+
 Целевые Precision и Recall ТЗ оставляет на этап проектирования (§9). Мы фиксируем их по результатам
 теста: для каждого типа в `results/models.md` указан порог и то, что он дал на 2026 году.
 
@@ -167,6 +172,11 @@
 - **Погода Open-Meteo** (температура, осадки, давление по Москве) — только после ретропрогона.
   Прирост считается отдельно по подтоплениям и по пожарной подсистеме. Если прироста нет, так и
   пишем, признаки не тащим.
+  - **Сделано, прироста нет.** Подтопление: 0,674 против 0,674 на проверке. Пожарная подсистема:
+    хуже во всех четырёх парах. Признаки погоды в модель не взяты, `weather.py` оставлен, чтобы
+    проверку можно было повторить. Числа и причина — `results/analytics.md`.
+  - Там же — остальные заходы сверх ТЗ: качество воздуха, расширенный набор погоды, обучение на
+    семи годах, связки датчиков одного объекта.
 
 ## 10. Как воспроизвести
 
@@ -189,6 +199,36 @@ python sensor.py train --horizon 7                 #    одиночные от�
 python sensor.py train --horizon 1                 #    …и на 1 сутки
 python sensor.py train --horizon 7 --target fault  #    любые отказы, для сравнения
 python retro.py --run main_h24_tuned > ../work/retro.md   # 8. ретропрогон 2026 года
+```
+
+Заходы сверх ТЗ — `results/analytics.md`, прироста ни один не дал:
+
+```bash
+python weather.py base                             # 9. погода из ТЗ: скачать и собрать
+python train.py --models xgb,cat --params tuned --weather base
+python weather.py ext                              #    снег, грунт, порывы, расход реки
+python train.py --models xgb,cat --params tuned --weather ext
+python train.py --models xgb,cat --params tuned --split long    # 10. семь лет вместо трёх
+python combo.py build                              # 11. связки датчиков по пикетам
+python combo.py spread                             #     разброс сработок по пикетам
+python combo.py rules                              #     связка как правило диспетчера
+python train.py --models xgb,cat --params tuned --combo pairs
+python train.py --models xgb,cat --params tuned --combo spread
+python horizon.py --models xgb --hours 6,12,24,48,72   # 12. свой горизонт каждому типу
+```
+
+Рабочая точка — `results/models.md`, раздел 11:
+
+```bash
+python operating.py --run main_h24_tuned --model xgb --precision 0.5,0.7 --budget 10 --topk 3
+python operating.py --run main_h24_tuned --model recency --topk 3 --target _prim
+```
+
+Уверенность прогноза — `results/analytics.md`, раздел 6:
+
+```bash
+python confidence.py --run main_h24_tuned
+python maintenance.py --run main_h24_tuned --window 2
 ```
 
 Зависимости — `ML/requirements.txt` (torch со сборкой под CUDA 12.4).
