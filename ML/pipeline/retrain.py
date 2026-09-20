@@ -83,7 +83,9 @@ def dump(rows: list[dict], args) -> None:
     out = pl.DataFrame(rows)
     out.write_csv(config.WORK / 'retrain.csv')
     head = (f'Прогон вперёд с {args.start}, переобучение раз в {args.fold} суток, '
-            f'модель {args.model}, порог под {args.budget} тревог в сутки.')
+            f'модель {args.model}, порог под {args.budget} тревог в сутки, '
+            f'потолок {args.rounds} деревьев (остановка {args.early})'
+            + (f', вес положительного класса {args.pw}.' if args.pw != 1.0 else '.'))
     with open(config.WORK / 'retrain.md', 'w', encoding='utf-8') as f:
         f.write(head + '\n\n| ' + ' | '.join(out.columns) + ' |\n')
         f.write('|' + '---|' * len(out.columns) + '\n')
@@ -104,6 +106,10 @@ def main() -> None:
     ap.add_argument('--rounds', type=int, default=4000, help='потолок деревьев на отрезок')
     ap.add_argument('--early', type=int, default=200,
                     help='ранняя остановка: раундов без улучшения')
+    ap.add_argument('--pw', type=float, default=1.0,
+                    help='вес положительного класса: <1 делает пропуск дешевле ложной тревоги '
+                         '(раздел 25). Тот же ключ, что у train.py, — иначе прогон вперёд '
+                         'проверял бы не ту модель, которую ставим в работу')
     args = ap.parse_args()
     H, types = args.horizon, args.types.split(',')
     meta = json.loads((FEAT / 'meta.json').read_text(encoding='utf-8'))
@@ -129,6 +135,8 @@ def main() -> None:
         yp, ye = yp.astype(np.int8), ye.astype(np.int8)
         nxt_e = ev[f'next_{tp}'].to_numpy()
         params = train.tuned(args.model, tp, '', H) or {}
+        if args.pw != 1.0:
+            params = dict(params, scale_pos_weight=args.pw)
         for st in args.strategies.split(','):
             pred = np.zeros(len(he), np.float32)
             alarm = np.zeros(len(he), bool)
