@@ -95,8 +95,21 @@ FIT = {'xgb': fit_xgb, 'cat': fit_cat, 'lgbm': fit_lgbm}
 
 
 def tuned(name: str, tp: str, target: str, horizon: int) -> dict | None:
-    """Параметры из tune.py; для LightGBM подбора нет — берутся умолчания."""
-    path = config.WORK / 'runs' / 'tune' / f"{name}_{tp}{target}{'' if horizon == config.HORIZON else f'_h{horizon}'}.json"
+    """Параметры из tune.py; для LightGBM подбора нет — берутся умолчания.
+
+    Подбор делался под обычную цель. Для `--target _conf/_prim` своего файла нет, и раньше эта
+    функция молча возвращала None: прогон назывался `_tuned`, а обучался на умолчаниях, из-за чего
+    `main_h24_conf_tuned` вышел побитово равен `main_h24_conf`. Теперь параметры обычной цели
+    переносятся на цель-вариант явно и с отметкой в выводе — это допущение, а не подбор.
+    """
+    h = '' if horizon == config.HORIZON else f'_h{horizon}'
+    d = config.WORK / 'runs' / 'tune'
+    path = d / f'{name}_{tp}{target}{h}.json'
+    if not path.exists() and target:
+        path = d / f'{name}_{tp}{h}.json'
+        if path.exists():
+            print(f'    {name}/{tp}: своего подбора под цель {target} нет, '
+                  f'взяты параметры обычной цели')
     if not path.exists():
         return None
     p = json.loads(path.read_text(encoding='utf-8'))['params']
