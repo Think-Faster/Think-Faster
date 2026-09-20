@@ -26,6 +26,7 @@
     python retrain.py --types fire,equipment --fold 90
     python retrain.py --strategies all,d365,warm --model xgb
     python retrain.py --fold 30 --rounds 1500 --early 100   # быстрее, если отрезков много
+    python retrain.py --fold 14 --out retrain_f14           # параллельным прогонам — разные --out
 """
 import argparse
 import json
@@ -79,14 +80,19 @@ def dump(rows: list[dict], args) -> None:
     Прогон вперёд идёт часами, а писать результат только в конце нельзя: сбой или нехватка
     времени посередине оставляют пустой файл и ночь впустую. Таблица переписывается после каждой
     досчитанной стратегии, так что в файле всегда лежит всё, что успело сойтись.
+
+    Имя файла задаётся `--out`, и это не удобство. Прогонов вперёд много (ось частоты, ось веса),
+    идут они часами, и запускать их приходится параллельно. Пока имя было одно на всех, два
+    одновременных прогона переписывали таблицу друг другу после каждой стратегии, и к утру в файле
+    лежала мешанина из двух разных расчётов, различить которые можно было только по шапке.
     """
     out = pl.DataFrame(rows)
-    out.write_csv(config.WORK / 'retrain.csv')
+    out.write_csv(config.WORK / f'{args.out}.csv')
     head = (f'Прогон вперёд с {args.start}, переобучение раз в {args.fold} суток, '
             f'модель {args.model}, порог под {args.budget} тревог в сутки, '
             f'потолок {args.rounds} деревьев (остановка {args.early})'
             + (f', вес положительного класса {args.pw}.' if args.pw != 1.0 else '.'))
-    with open(config.WORK / 'retrain.md', 'w', encoding='utf-8') as f:
+    with open(config.WORK / f'{args.out}.md', 'w', encoding='utf-8') as f:
         f.write(head + '\n\n| ' + ' | '.join(out.columns) + ' |\n')
         f.write('|' + '---|' * len(out.columns) + '\n')
         for r in out.iter_rows():
@@ -97,6 +103,9 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument('--types', default=','.join(config.TYPES))
     ap.add_argument('--model', default='xgb')
+    ap.add_argument('--out', default='retrain',
+                    help='имя файлов результата в work: <out>.md и <out>.csv. Параллельным '
+                         'прогонам нужны разные имена, иначе они перепишут таблицу друг другу')
     ap.add_argument('--strategies', default=','.join(STRATEGIES))
     ap.add_argument('--fold', type=int, default=90, help='как часто переобучаем, суток')
     ap.add_argument('--horizon', type=int, default=config.HORIZON)
@@ -194,7 +203,7 @@ def main() -> None:
                   f"{r['переобучений']} переобучений, {r['деревьев']} дер.", flush=True)
             dump(rows, args)
 
-    print(f'готово за {round(time.time() - t0)} с → retrain.md', flush=True)
+    print(f'готово за {round(time.time() - t0)} с → {args.out}.md', flush=True)
 
 
 if __name__ == '__main__':
