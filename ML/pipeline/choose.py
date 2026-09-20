@@ -44,9 +44,12 @@ def main() -> None:
     ap.add_argument('--level', type=float, default=0.6, help='доля пойманных эпизодов')
     ap.add_argument('--gap', type=int, default=6, help='склейка дребезга, раздел 27')
     ap.add_argument('--steps', type=int, default=40)
+    ap.add_argument('--smooths', default=','.join(str(m) for m in SMOOTHS),
+                    help='набор окон сглаживания: он сам по себе гиперпараметр, раздел 30')
     ap.add_argument('--horizon', type=int, default=config.HORIZON)
     args = ap.parse_args()
     runs = args.runs.split(',')
+    smooths = [int(m) for m in args.smooths.split(',')]
 
     print(f'Выбор по проверке 2025, числа по тесту 2026. Уровень: поймано '
           f'{args.level:.0%} эпизодов, склейка дребезга {args.gap} ч.\n')
@@ -62,7 +65,7 @@ def main() -> None:
                 te = persist.prepare(run, 'test', 2026, tp, args.model, args.horizon)
             except FileNotFoundError:
                 continue
-            for m in SMOOTHS:
+            for m in smooths:
                 key = name(run, m)
                 for ctx, store in ((va, val_f), (te, test_f)):
                     score = persist.smoothed(ctx, m)
