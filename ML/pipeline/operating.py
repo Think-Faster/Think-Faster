@@ -20,6 +20,7 @@
     python operating.py --run main_h24_tuned --model xgb
     python operating.py --run main_h24_tuned --model cat --budget 5,20 --topk 3,5
     python operating.py --match main_h24,main_h24_conf     # равная полнота, разные цели обучения
+    python operating.py --match main_h24,main_h24+main_h24_conf   # смесь двух целей
 """
 import argparse
 import json
@@ -73,6 +74,21 @@ def row(obj, h, nx, p, thr, H, cap, days) -> str:
             f"{m['lead_median_h']:.0f} |").replace('.', ',')
 
 
+def load_mix(name: str, on: str, year: int, tp: str, model: str) -> tuple:
+    """Прогон или смесь прогонов: `a+b` — среднее рангов вероятностей.
+
+    Вероятности двух моделей, обученных на разных целях, по величине несопоставимы: у цели
+    «только подтверждённые» положительных впятеро меньше, и вероятности систематически ниже.
+    Складывать можно только порядок, поэтому смешиваются ранги, а не сами числа.
+    """
+    parts = [x for x in name.split('+') if x]
+    obj, h, nxt, p = split(parts[0], on, year, tp, model)
+    for extra in parts[1:]:
+        _, _, _, q = split(extra, on, year, tp, model)
+        p = (p.argsort().argsort() + q.argsort().argsort()).astype(np.float32)
+    return obj, h, nxt, p
+
+
 def match(runs: list[str], model: str, H: int, levels: list[float], steps: int,
           on: str = 'test') -> None:
     """Сколько ложных сигналов стоит одна и та же доля пойманных эпизодов у разных прогонов.
@@ -88,7 +104,7 @@ def match(runs: list[str], model: str, H: int, levels: list[float], steps: int,
         curves, total = {}, 0
         for run in runs:
             try:
-                obj, h, nxt, p = split(run, on, year, tp, model)
+                obj, h, nxt, p = load_mix(run, on, year, tp, model)
             except FileNotFoundError:
                 continue
             y = (nxt <= H).astype(np.int8)
