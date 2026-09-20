@@ -15,6 +15,7 @@
     python train.py --models xgb,cat --params tuned --weather base   # то же с погодой (weather.py)
     python train.py --models xgb,cat --params tuned --combo pairs   # …и со связками датчиков (combo.py)
     python train.py --models xgb --soft 0.5   # мягкая цель: неподтверждённый эпизод весит половину
+    python train.py --models xgb --params tuned --rounds 300 --early 40   # короткий бюджет деревьев
 """
 import argparse
 import json
@@ -53,6 +54,12 @@ def matrix(df: pl.DataFrame, features: list[str]) -> np.ndarray:
     return np.ascontiguousarray(df.select(features).to_numpy(), dtype=np.float32)
 
 
+# Бюджет деревьев. Раздел 19 показал, что он сам по себе стоит трети ложных сигналов: лишние
+# деревья продолжают голосовать, а ранняя остановка с большим запасом позволяет им это делать.
+# Значения переопределяются ключами --rounds/--early; retrain.py держит свой бюджет отдельно.
+ROUNDS, EARLY = 4000, 200
+
+
 def fit_xgb(Xt, yt, Xv, yv, params: dict | None = None):
     import xgboost as xgb
     p = {'objective': 'binary:logistic', 'eval_metric': 'aucpr', 'tree_method': 'hist', 'device': 'cuda',
@@ -61,16 +68,16 @@ def fit_xgb(Xt, yt, Xv, yv, params: dict | None = None):
     p.update(params or {})
     dt = xgb.QuantileDMatrix(Xt, yt, max_bin=p['max_bin'])
     dv = xgb.QuantileDMatrix(Xv, yv, ref=dt)
-    booster = xgb.train(p, dt, num_boost_round=4000, evals=[(dv, 'val')], early_stopping_rounds=200,
-                        verbose_eval=False)
+    booster = xgb.train(p, dt, num_boost_round=ROUNDS, evals=[(dv, 'val')],
+                        early_stopping_rounds=EARLY, verbose_eval=False)
     predict = lambda X: booster.inplace_predict(X, iteration_range=(0, booster.best_iteration + 1))
     return booster, predict, booster.best_iteration + 1
 
 
 def fit_cat(Xt, yt, Xv, yv, params: dict | None = None):
     from catboost import CatBoostClassifier
-    p = {'iterations': 4000, 'learning_rate': 0.05, 'depth': 8, 'task_type': 'GPU', 'devices': '0',
-         'loss_function': 'Logloss', 'border_count': 254, 'od_type': 'Iter', 'od_wait': 200,
+    p = {'iterations': ROUNDS, 'learning_rate': 0.05, 'depth': 8, 'task_type': 'GPU', 'devices': '0',
+         'loss_function': 'Logloss', 'border_count': 254, 'od_type': 'Iter', 'od_wait': EARLY,
          'use_best_model': True, 'verbose': False, 'gpu_ram_part': 0.8}
     p.update(params or {})
     m = CatBoostClassifier(**p)
@@ -86,8 +93,8 @@ def fit_lgbm(Xt, yt, Xv, yv, params: dict | None = None):
     p.update(params or {})
     dt = lgb.Dataset(Xt, yt, free_raw_data=True)
     dv = lgb.Dataset(Xv, yv, reference=dt)
-    m = lgb.train(p, dt, num_boost_round=4000, valid_sets=[dv],
-                  callbacks=[lgb.early_stopping(200, verbose=False)])
+    m = lgb.train(p, dt, num_boost_round=ROUNDS, valid_sets=[dv],
+                  callbacks=[lgb.early_stopping(EARLY, verbose=False)])
     return m, lambda X: m.predict(X, num_iteration=m.best_iteration), m.best_iteration
 
 
@@ -148,16 +155,20 @@ def main() -> None:
                     help='добавить признаки погоды из weather.py: набор ТЗ, расширенный или оба')
     ap.add_argument('--combo', default='', choices=['', 'pairs', 'spread', 'both'],
                     help='добавить связки соседних датчиков и/или разброс по пикетам из combo.py')
+    ap.add_argument('--rounds', type=int, default=ROUNDS, help='предел числа деревьев (раздел 19)')
+    ap.add_argument('--early', type=int, default=EARLY, help='запас ранней остановки (раздел 19)')
     args = ap.parse_args()
+    globals()['ROUNDS'], globals()['EARLY'] = args.rounds, args.early
     models = [m for m in args.models.split(',') if m]
     types = args.types.split(',')
     H = args.horizon
     tg = args.target
     soft = args.soft
     assert soft == 1.0 or not tg, '--soft задаёт вес внутри обычной цели, с --target не сочетается'
+    budget = '' if (args.rounds, args.early) == (4000, 200) else f'_r{args.rounds}e{args.early}'
     tag = (f'{args.branch}_h{H}{tg}' + ('' if soft == 1.0 else f'_soft{int(round(soft * 100)):02d}')
            + ('_tuned' if args.params == 'tuned' else '')
-           + WEATHER_TAG[args.weather] + COMBO_TAG[args.combo])
+           + WEATHER_TAG[args.weather] + COMBO_TAG[args.combo] + budget)
 
     meta = json.loads((FEAT / 'meta.json').read_text(encoding='utf-8'))
     features, cap = meta['features'], meta['next_cap']
