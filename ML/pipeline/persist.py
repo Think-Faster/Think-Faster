@@ -69,6 +69,17 @@ def rolling_mean(grid: np.ndarray, m: int) -> np.ndarray:
     return out
 
 
+def smooth_rows(obj: np.ndarray, h: np.ndarray, p: np.ndarray, m: int) -> np.ndarray:
+    """Сглаживание оценки по объекту (раздел 29) прямо на строках витрины.
+
+    Нужно там, где счёт идёт не по прямоугольнику, а по строкам, — например в factalert.py.
+    """
+    if m <= 1:
+        return p
+    grid, _, oi, hi, _ = dense(obj, h, p, 0)
+    return rolling_mean(grid, m)[oi, hi]
+
+
 def variants(grid: np.ndarray) -> dict[str, tuple[np.ndarray, int]]:
     """Имя варианта → (оценка, сколько часов подряд она должна держаться выше порога)."""
     v = {'как есть': (grid, 1)}
@@ -140,9 +151,48 @@ def prepare(run, part, year, tp, model, horizon):
     keep = [(o, e) for o, e in eps if any((o, e - k) in seen for k in range(1, horizon + 1))]
     eo = np.searchsorted(objs, np.array([o for o, _ in keep]))
     ec = np.array([e for _, e in keep]) - h0
-    return {'grid': grid, 'oi': oi, 'hi': hi, 'order': order, 'horizon': horizon,
+    return {'grid': grid, 'oi': oi, 'hi': hi, 'order': order, 'horizon': horizon, 'y': y,
             'oo': obj[order], 'oh': h[order], 'oy': y[order],
             'eo': eo, 'ec': ec, 'episodes': len(keep)}
+
+
+def smoothed(ctx: dict, m: int) -> np.ndarray:
+    return ctx['grid'] if m <= 1 else rolling_mean(ctx['grid'], m)
+
+
+def point(args) -> None:
+    """Рабочая точка: порог снимается на проверке 2025, числа — на тесте 2026.
+
+    Это то же правило, по которому снят порог у сырой оценки, поэтому столбцы сравнимы между
+    собой: меняется только то, на что порог ставится. Выбирать порог на тесте нельзя — тогда
+    сглаживание получило бы фору, которой в работе не будет.
+    """
+    smooths = [int(x) for x in args.smooth.split(',')]
+    print(f'Прогон {args.run}, модель {args.model}. Порог — по лучшему F1 на проверке 2025, '
+          f'числа — на тесте 2026'
+          + (f', склейка дребезга {args.gap} ч' if args.gap else '') + '.\n')
+    print('| тип | сглаживание | порог | сигналов | ложных | ложных в сутки | поймано эпизодов | упреждение |')
+    print('|---|---|---:|---:|---:|---:|---|---:|')
+    days = 181
+    for tp in config.TYPES:
+        try:
+            va = prepare(args.run, 'val', 2025, tp, args.model, args.horizon)
+            te = prepare(args.run, 'test', 2026, tp, args.model, args.horizon)
+        except FileNotFoundError:
+            continue
+        for m in smooths:
+            sv, st = smoothed(va, m), smoothed(te, m)
+            rows = sv[va['oi'], va['hi']]
+            thr = metrics.best_threshold(va['y'].astype(np.int8), rows)
+            c = curve(st, 1, [thr], te, args.gap)[0]
+            caught, false, lead = c
+            a = alarm_grid(st, thr, 1)
+            sig, true = signals_fast(te['oo'], te['oh'], te['oy'], a[te['oi'], te['hi']][te['order']],
+                                     args.gap)
+            name = 'нет' if m <= 1 else f'{m} ч'
+            print(f'| {config.TYPE_NAMES[tp]} | {name} | {thr:.3f} | {sig} | {false} | '
+                  f'{false / days:.2f} | {caught} из {te["episodes"]} | '
+                  f'{lead:.0f} ч |', flush=True)
 
 
 def main() -> None:
@@ -153,7 +203,13 @@ def main() -> None:
     ap.add_argument('--horizon', type=int, default=config.HORIZON)
     ap.add_argument('--gap', type=int, default=0, help='склейка дребезга, раздел 27')
     ap.add_argument('--steps', type=int, default=40)
+    ap.add_argument('--mode', default='curve', choices=['curve', 'point'],
+                    help='curve — сравнение при равной полноте; point — рабочая точка по порогу с проверки')
+    ap.add_argument('--smooth', default='1,6,12', help='окна сглаживания для режима point')
     args = ap.parse_args()
+    if args.mode == 'point':
+        point(args)
+        return
     part, year = ('test', 2026) if args.on == 'test' else ('val', 2025)
 
     names = list(variants(np.zeros((1, 1), np.float32)))

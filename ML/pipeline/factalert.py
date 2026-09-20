@@ -40,6 +40,7 @@ import config
 import labels
 import metrics
 import operating as op
+import persist
 
 RULES = ['first', 'n2', 'nch2', 'clean', 'clean2', 'cleanch2', 'silent']
 WAIT = 10   # минут задержки: Н8 считается по ±10 минутам вокруг триггера, раньше не вычислим
@@ -121,7 +122,8 @@ def tradeoff(con, args) -> None:
     print(f'Порог прогноза меняется, канал «по факту» добирает остальное. Правило канала выбрано '
           f'по типу: сначала ноль ложных объявлений, при равенстве — большая полнота. '
           f'Тест {args.year}, прогон {args.run}'
-          + (f', склейка дребезга {args.gap} ч.\n' if args.gap else '.\n'))
+          + (f', склейка дребезга {args.gap} ч' if args.gap else '')
+          + (f', сглаживание оценки {args.smooth} ч' if args.smooth > 1 else '') + '.\n')
     print('| тип | правило «по факту» | порог | сигналов прогноза | из них ложных | '
           'с упреждением | медиана форы, ч | по факту | не объявлено | ложных «по факту» |')
     print('|---|---|---|---:|---:|---:|---:|---:|---:|---:|')
@@ -138,8 +140,12 @@ def tradeoff(con, args) -> None:
         said = opts[rule]
         cover = float(said[real].sum()) / max(int(real.sum()), 1)
         bad = int((said & ~real).sum())
-        _, _, nv, pv = op.split(args.run, 'val', 2025, tp, args.model)
+        ov, hv, nv, pv = op.split(args.run, 'val', 2025, tp, args.model)
         obj, h, ns, ps = op.split(args.run, 'test', args.year, tp, args.model)
+        # сглаживание применяется и к проверке, и к тесту: порог снимается уже на сглаженной
+        # оценке, иначе он был бы снят не с той величины, к которой его прикладывают
+        pv = persist.smooth_rows(ov, hv, pv, args.smooth)
+        ps = persist.smooth_rows(obj, h, ps, args.smooth)
         y = (ns <= H).astype(np.int8)
         thr0 = metrics.best_threshold((nv <= H).astype(np.int8), pv)
         above = ps[ps >= thr0]
@@ -163,6 +169,8 @@ def main() -> None:
     ap.add_argument('--year', type=int, default=2026)
     ap.add_argument('--horizon', type=int, default=config.HORIZON)
     ap.add_argument('--mode', default='rules', choices=['rules', 'tradeoff'])
+    ap.add_argument('--smooth', type=int, default=0,
+                    help='окно сглаживания оценки в часах (раздел 29); 0 — сырая оценка')
     ap.add_argument('--gap', type=int, default=0,
                     help='склейка дребезга: повтор на том же объекте в пределах gap '
                          'часов — продолжение прежней тревоги, а не новая (раздел 27)')
