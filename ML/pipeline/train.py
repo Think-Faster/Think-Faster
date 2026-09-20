@@ -177,6 +177,10 @@ def main() -> None:
                          'происшествий объекта, both — и то и другое (раздел 23)')
     ap.add_argument('--rounds', type=int, default=ROUNDS, help='предел числа деревьев (раздел 19)')
     ap.add_argument('--early', type=int, default=EARLY, help='запас ранней остановки (раздел 19)')
+    ap.add_argument('--note', default='',
+                    help='приписка к имени прогона: те же ключи, но другой подбор параметров — '
+                         'иначе прогон лёг бы поверх прежнего и затёр базу, на которой считаны '
+                         'разделы 15 и 16')
     ap.add_argument('--pw', type=float, default=1.0,
                     help='вес положительного класса: <1 делает пропуск дешевле ложной тревоги '
                          '(cost-sensitive learning, раздел 25)')
@@ -192,7 +196,8 @@ def main() -> None:
     pw = '' if args.pw == 1.0 else f'_pw{int(round(args.pw * 100)):03d}'
     tag = (f'{args.branch}_h{H}{tg}' + ('' if soft == 1.0 else f'_soft{int(round(soft * 100)):02d}')
            + ('_tuned' if args.params == 'tuned' else '')
-           + WEATHER_TAG[args.weather] + COMBO_TAG[args.combo] + DROP_TAG[args.drop] + budget + pw)
+           + WEATHER_TAG[args.weather] + COMBO_TAG[args.combo] + DROP_TAG[args.drop] + budget + pw
+           + (f'_{args.note}' if args.note else ''))
 
     meta = json.loads((FEAT / 'meta.json').read_text(encoding='utf-8'))
     features, cap = meta['features'], meta['next_cap']
@@ -249,8 +254,13 @@ def main() -> None:
         prior = float(yt.mean())
         scores['freq'] = tuple(np.array([rmap.get(o, prior) for o in df['object_id'].to_list()], np.float32)
                                for df in (va, te))
-        scores['rules'] = (Xv[:, fi[f'trig_{tp}_24h']], Xs[:, fi[f'trig_{tp}_24h']])
-        scores['recency'] = (-Xv[:, fi[f'since_{tp}']], -Xs[:, fi[f'since_{tp}']])
+        # --drop может унести признак, на котором стоит базовый уровень: при снятой истории
+        # происшествий `since_<тип>` в матрице нет. Уровень тогда просто не считается — сравнивать
+        # модель всё равно надо с теми уровнями, которым признаки оставлены (раздел 23).
+        if f'trig_{tp}_24h' in fi:
+            scores['rules'] = (Xv[:, fi[f'trig_{tp}_24h']], Xs[:, fi[f'trig_{tp}_24h']])
+        if f'since_{tp}' in fi:
+            scores['recency'] = (-Xv[:, fi[f'since_{tp}']], -Xs[:, fi[f'since_{tp}']])
         for name in models:
             t1 = time.time()
             par = tuned(name, tp, tg, H, budget) if args.params == 'tuned' else None
