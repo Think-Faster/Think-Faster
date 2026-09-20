@@ -234,13 +234,14 @@ python operating.py --run main_h24_tuned --model recency --topk 3 --target _prim
 
 ```bash
 python confidence.py --run main_h24_tuned
+python confidence.py --mode visit --window 2   # раздел 20: проверка тревог выездом бригады
 python maintenance.py --run main_h24_tuned --window 2
 python maintenance.py --mode suppress --window 2
 ```
 
 Зависимости — `ML/requirements.txt` (torch со сборкой под CUDA 12.4).
 
-Снижение ложных и дообучение — `results/analytics.md`, разделы 10–19:
+Снижение ложных и дообучение — `results/analytics.md`, разделы 10–20:
 
 ```bash
 python factalert.py                                # 13. канал «по факту»: правила объявления
