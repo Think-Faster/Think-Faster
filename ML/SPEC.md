@@ -195,17 +195,23 @@ python labels.py          # 2. триггеры, эпизоды, шум, вые�
 python features.py        # 3. витрина и ряды для нейросети
 python check.py 10        #    сверка витрины с журналом
 python label_stats.py     #    числа для обоснования разметки
-python tune.py --model xgb --trials 40             # 5. подбор гиперпараметров
-python tune.py --model cat --trials 30
-python train.py --models xgb,cat --params tuned    # 4. бустинг и базовые уровни
+python tune.py --model xgb --trials 40 --rounds 100 --early 20   # 5. подбор гиперпараметров
+python tune.py --model cat --trials 30 --rounds 100 --early 20
+python train.py --models xgb,cat --params tuned --rounds 100 --early 20   # 4. бустинг
 python train.py --models lgbm                      #    LightGBM на CPU
 python seqmodel.py --epochs 12                     # 6. нейросеть
 python sensor.py build                             # 7. отказ датчика: канал × сутки
 python sensor.py train --horizon 7                 #    одиночные отказы на 7 суток
 python sensor.py train --horizon 1                 #    …и на 1 сутки
 python sensor.py train --horizon 7 --target fault  #    любые отказы, для сравнения
-python retro.py --run main_h24_tuned > ../work/retro.md   # 8. ретропрогон 2026 года
+python retro.py --run main_h24_tuned_r100e20 > ../work/retro.md   # 8. ретропрогон 2026 года
 ```
+
+Бюджет деревьев задаётся явно, а не берётся из умолчания `train.py` (4000/200): раздел 24
+аналитики показал, что на полном бюджете модель переучивается и даёт у пожара втрое больше ложных
+сигналов при той же полноте. Итоговая конфигурация (раздел 16) снята с прогона
+`main_h24_tuned_r100e20`; умолчание в коде оставлено прежним, чтобы старые прогоны
+воспроизводились по своим тегам.
 
 Заходы сверх ТЗ — `results/analytics.md`, прироста ни один не дал:
 
