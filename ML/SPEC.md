@@ -295,7 +295,16 @@ python choose.py --level 0.6 --smooths 1,6 --runs main_h24_tuned_r100e20,main_h2
 python calib.py                                    # 32. окна скользящей калибровки порога
 python calib.py --transfer --smooth 6              #     перенос порога с проверки на тест
 python final.py                                    #     арифметика итоговой конфигурации
+python train.py --models xgb,cat,lgbm --rounds 100 --early 20   # 33. зоопарк на коротком бюджете
+python train.py --models cat,lgbm --params tuned --rounds 100 --early 20
+python tune.py --model cat --rounds 100 --early 20             #     свой подбор под этот бюджет
+python train.py --models cat --params tuned --rounds 100 --early 20 --note retuned
+python operating.py --match main_h24_tuned_r100e20/xgb,main_h24_r100e20/cat   # семейства при равной полноте
+python choose.py --runs main_h24_tuned_r100e20,main_h24_tuned_r12e4,main_h24_r100e20/cat --smooths 1,3,6,12,0
 ```
+
+Косая черта в имени прогона выбирает семейство внутри него (`прогон/cat`); без неё берётся
+`--model`. Это нужно, чтобы сводить семейства при равной полноте, а не по порогу F1.
 
 Ключи `--gap` (склейка дребезга) и `--smooth` (сглаживание оценки) по умолчанию выключены, поэтому
 все числа разделов до 27 воспроизводятся прежними командами без изменений.
