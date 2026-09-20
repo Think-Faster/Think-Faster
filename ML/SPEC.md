@@ -240,11 +240,12 @@ python maintenance.py --mode suppress --window 2
 
 Зависимости — `ML/requirements.txt` (torch со сборкой под CUDA 12.4).
 
-Снижение ложных и дообучение — `results/analytics.md`, разделы 10–15:
+Снижение ложных и дообучение — `results/analytics.md`, разделы 10–19:
 
 ```bash
 python factalert.py                                # 13. канал «по факту»: правила объявления
 python factalert.py --mode tradeoff                #     порог прогноза против канала «по факту»
+python factnoise.py                                #     фильтр ложных объявлений (отброшен)
 python cascade.py --run main_h24_tuned             # 14. вторая ступень поверх тревоги
 python perobject.py --target 0.5 --min-signals 8   # 15. пороги по объектам (отброшено)
 python drift.py --step 8                           # 16. дрейф признаков и дрейф цели
