@@ -256,5 +256,11 @@ python retrain.py --fold 90                        # 17. прогон вперё
 python weather.py hum                              #     влажность, конденсат, календарь
 python train.py --models xgb,cat --params tuned --weather hum
 python train.py --models xgb,cat --target _conf    #     цель «подтверждено выездом»
-python train.py --models xgb --soft 0.5            #     раздел 22: мягкая цель
+python train.py --models xgb --soft 0.5            #     раздел 22: мягкая цель (отброшена)
+python train.py --models xgb --params tuned --rounds 100 --early 20   # раздел 24: бюджет деревьев
+python train.py --models xgb --params tuned --drop ident              # раздел 23: память об объекте
+python tune.py --model xgb --rounds 100 --early 20 #     подбор под короткий бюджет
 ```
+
+Разделы 21 и 22 (цель «выезд», мягкая метка) отброшены разделом 24: их выигрыш оказался следствием
+числа деревьев, а не цели обучения. Команды оставлены, чтобы результат можно было воспроизвести.
