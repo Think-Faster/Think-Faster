@@ -14,6 +14,7 @@
     python train.py --models lgbm --branch long
     python train.py --models xgb,cat --params tuned --weather base   # то же с погодой (weather.py)
     python train.py --models xgb,cat --params tuned --combo pairs   # …и со связками датчиков (combo.py)
+    python train.py --models xgb --params tuned --fleet   # …и со следом общей причины (fleet.py)
     python train.py --models xgb --soft 0.5   # мягкая цель: неподтверждённый эпизод весит половину
     python train.py --models xgb --params tuned --rounds 300 --early 40   # короткий бюджет деревьев
     python train.py --models xgb --params tuned --rounds 100 --early 20 --pw 0.3   # ложная дороже пропуска
@@ -172,6 +173,9 @@ def main() -> None:
                     help='добавить признаки погоды из weather.py: набор ТЗ, расширенный или оба')
     ap.add_argument('--combo', default='', choices=['', 'pairs', 'spread', 'both'],
                     help='добавить связки соседних датчиков и/или разброс по пикетам из combo.py')
+    ap.add_argument('--fleet', action='store_true',
+                    help='добавить след общей причины из fleet.py: что в этот час творится во '
+                         'всём парке и на скольких объектах сразу (раздел 27)')
     ap.add_argument('--drop', default='', choices=list(DROP),
                     help='убрать память об объекте: ident — статический состав, hist — история '
                          'происшествий объекта, both — и то и другое (раздел 23)')
@@ -196,7 +200,8 @@ def main() -> None:
     pw = '' if args.pw == 1.0 else f'_pw{int(round(args.pw * 100)):03d}'
     tag = (f'{args.branch}_h{H}{tg}' + ('' if soft == 1.0 else f'_soft{int(round(soft * 100)):02d}')
            + ('_tuned' if args.params == 'tuned' else '')
-           + WEATHER_TAG[args.weather] + COMBO_TAG[args.combo] + DROP_TAG[args.drop] + budget + pw
+           + WEATHER_TAG[args.weather] + ('_fleet' if args.fleet else '')
+           + COMBO_TAG[args.combo] + DROP_TAG[args.drop] + budget + pw
            + (f'_{args.note}' if args.note else ''))
 
     meta = json.loads((FEAT / 'meta.json').read_text(encoding='utf-8'))
@@ -207,6 +212,11 @@ def main() -> None:
             w = pl.read_parquet(config.WORK / ('weather.parquet' if pack == 'base' else f'weather_{pack}.parquet'))
             wx = w if wx is None else wx.join(w, on='h')
         features = features + [c for c in wx.columns if c != 'h']
+    if args.fleet:
+        # ряд парка join-ится по часу так же, как погода: он один на все объекты (см. fleet.py)
+        w = pl.read_parquet(config.WORK / 'fleet.parquet')
+        wx = w if wx is None else wx.join(w, on='h')
+        features = features + [c for c in w.columns if c != 'h']
     if args.combo:
         for part in (['pairs', 'spread'] if args.combo == 'both' else [args.combo]):
             c = pl.read_parquet(config.WORK / ('combo.parquet' if part == 'pairs' else 'combo_spread.parquet'))
