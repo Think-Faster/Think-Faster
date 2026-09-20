@@ -120,7 +120,8 @@ def tradeoff(con, args) -> None:
     H = args.horizon
     print(f'Порог прогноза меняется, канал «по факту» добирает остальное. Правило канала выбрано '
           f'по типу: сначала ноль ложных объявлений, при равенстве — большая полнота. '
-          f'Тест {args.year}, прогон {args.run}.\n')
+          f'Тест {args.year}, прогон {args.run}'
+          + (f', склейка дребезга {args.gap} ч.\n' if args.gap else '.\n'))
     print('| тип | правило «по факту» | порог | сигналов прогноза | из них ложных | '
           'с упреждением | медиана форы, ч | по факту | не объявлено | ложных «по факту» |')
     print('|---|---|---|---:|---:|---:|---:|---:|---:|---:|')
@@ -147,7 +148,7 @@ def tradeoff(con, args) -> None:
                 (f'выше, q{int(q * 100)}', float(np.quantile(above, q)) if len(above) else 1.1)
                 for q in (0.25, 0.5, 0.75, 0.9)]:
             m = metrics.evaluate(obj, h, ns, ps, t, H, metrics.RUN_CAP)
-            sig, true = metrics.signals(obj, h, y, ps >= t)
+            sig, true = metrics.signals(obj, h, y, ps >= t, args.gap)
             lost = m['episodes'] - m['caught']
             byfact = int(round(lost * cover))
             print(f'| {name} | {rule} | {tag} | {sig} | {sig - true} | {m["caught"]} | '
@@ -162,6 +163,9 @@ def main() -> None:
     ap.add_argument('--year', type=int, default=2026)
     ap.add_argument('--horizon', type=int, default=config.HORIZON)
     ap.add_argument('--mode', default='rules', choices=['rules', 'tradeoff'])
+    ap.add_argument('--gap', type=int, default=0,
+                    help='склейка дребезга: повтор на том же объекте в пределах gap '
+                         'часов — продолжение прежней тревоги, а не новая (раздел 27)')
     args = ap.parse_args()
     H = args.horizon
     con = duckdb.connect(str(config.WORK / 'tf.duckdb'), read_only=True)

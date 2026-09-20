@@ -33,6 +33,9 @@ import maintenance as mt
 import metrics
 import operating as op
 
+# склейка дребезга: ставится из --gap один раз и читается там, где считаются сигналы
+GAP = [0]
+
 FEAT = config.WORK / 'features'
 
 
@@ -85,7 +88,7 @@ def stricter(obj, h, y, nxt, p, thr0, target_sig, H):
     best = None
     for q in np.linspace(0.0, 0.995, 200):
         t = float(np.quantile(above, q)) if len(above) else 1.1
-        sig, true = metrics.signals(obj, h, y, p >= t)
+        sig, true = metrics.signals(obj, h, y, p >= t, GAP[0])
         if best is None or abs(sig - target_sig) < abs(best[0] - target_sig):
             best = (sig, sig - true, t)
     sig, false, t = best
@@ -139,7 +142,11 @@ def main() -> None:
     ap.add_argument('--scale', default='oof', choices=['oof', 'insample'],
                     help='по каким оценкам выбирать рабочую точку: вне обучения или по обучающим')
     ap.add_argument('--folds', type=int, default=5, help='блоков для оценок вне обучения')
+    ap.add_argument('--gap', type=int, default=0,
+                    help='склейка дребезга: повтор на том же объекте в пределах gap '
+                         'часов — продолжение прежней тревоги, а не новая (раздел 27)')
     args = ap.parse_args()
+    GAP[0] = args.gap
     import xgboost as xgb
     H = args.horizon
     feats = json.loads((FEAT / 'meta.json').read_text(encoding='utf-8'))['features']
@@ -185,7 +192,7 @@ def main() -> None:
         qs = b.predict(xgb.DMatrix(Xs, feature_names=cols))
 
         base = metrics.evaluate(os_, hs, ns, ps, thr, H, metrics.RUN_CAP)
-        sig, true = metrics.signals(os_, hs, ys, as_)
+        sig, true = metrics.signals(os_, hs, ys, as_, GAP[0])
         print(f'| {name} | без второй ступени | {sig} | {sig - true} | '
               f"{1 - (sig - true) / sig:.3f} | {base['caught']} из {base['episodes']} |"
               .replace('.', ','))

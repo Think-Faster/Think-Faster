@@ -47,12 +47,16 @@ def threshold_for_rate(p: np.ndarray, per_day: float, rows: int, days: float) ->
     return float(np.quantile(p, 1 - rate))
 
 
-def signals(obj: np.ndarray, h: np.ndarray, y: np.ndarray, alarm: np.ndarray) -> tuple[int, int]:
+def signals(obj: np.ndarray, h: np.ndarray, y: np.ndarray, alarm: np.ndarray,
+            gap: int = 0) -> tuple[int, int]:
     """Сигналы диспетчеру: подряд идущие часы тревоги на объекте — это один сигнал, а не десять.
 
     Возвращает (всего сигналов, из них подтвердившихся). Сигнал подтверждён, если хотя бы в один из
     его часов инцидент действительно начался в горизонте. Остальные — ложные: то, что диспетчер
     сходил и ничего не нашёл.
+
+    `gap` — склейка дребезга (раздел 27): пауза не длиннее gap часов не начинает новый сигнал.
+    При gap = 0 счёт прежний, час тишины разрывает сигнал надвое.
     """
     if not alarm.any():
         return 0, 0
@@ -61,7 +65,7 @@ def signals(obj: np.ndarray, h: np.ndarray, y: np.ndarray, alarm: np.ndarray) ->
     o, hh, yy = o[order], hh[order], yy[order]
     start = np.empty(len(o), bool)
     start[0] = True
-    start[1:] = (o[1:] != o[:-1]) | (hh[1:] != hh[:-1] + 1)
+    start[1:] = (o[1:] != o[:-1]) | (hh[1:] - hh[:-1] > gap + 1)
     run = np.cumsum(start) - 1
     total = int(run[-1]) + 1
     true = int(np.bincount(run, weights=yy, minlength=total).astype(bool).sum())
