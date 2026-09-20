@@ -279,7 +279,7 @@ python tune.py --model xgb --rounds 100 --early 20 #     подбор под к�
 Разделы 21 и 22 (цель «выезд», мягкая метка) отброшены разделом 24: их выигрыш оказался следствием
 числа деревьев, а не цели обучения. Команды оставлены, чтобы результат можно было воспроизвести.
 
-Постобработка тревоги и выбор конфигурации — разделы 25–31:
+Постобработка тревоги и выбор конфигурации — разделы 25–32:
 
 ```bash
 python mute.py                                     # 25. молчание шумных объектов (отброшено)
@@ -290,6 +290,10 @@ python persist.py                                  # 29. сглаживание 
 python persist.py --mode point --gap 6             #     рабочая точка с постобработкой
 python choose.py --level 0.6                       # 30. выбор конфигурации по проверке 2025
 python factalert.py --mode tradeoff --gap 6 --smooth 6   # 31. два канала с постобработкой
+python train.py --models xgb --params tuned --rounds 100 --early 20 --pw 0.1   # 26. вес класса
+python choose.py --level 0.6 --smooths 1,6 --runs main_h24_tuned_r100e20,main_h24_tuned_r12e4,main_h24_tuned_r100e20_pw010
+python calib.py                                    # 32. окна скользящей калибровки порога
+python calib.py --transfer --smooth 6              #     перенос порога с проверки на тест
 python final.py                                    #     арифметика итоговой конфигурации
 ```
 

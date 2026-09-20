@@ -29,6 +29,8 @@ SMOOTHS = (1, 3, 6, 12)
 
 def name(run: str, m: int) -> str:
     short = run.replace('main_h24_tuned_', '')
+    if m == 0:
+        return short + ' + ансамбль окон'
     return short + (f' + среднее {m} ч' if m > 1 else ' + как есть')
 
 

@@ -33,6 +33,9 @@ LEAD_LEVEL = 0.6
 BIG = np.iinfo(np.int32).max
 
 
+ENS = (1, 6, 12)   # окна, по которым усредняет ensemble()
+
+
 def dense(obj: np.ndarray, h: np.ndarray, p: np.ndarray, horizon: int):
     """Строки витрины → прямоугольник объект × час (пропущенные часы остаются nan)."""
     objs = np.unique(obj)
@@ -157,7 +160,20 @@ def prepare(run, part, year, tp, model, horizon):
 
 
 def smoothed(ctx: dict, m: int) -> np.ndarray:
+    """Сглаживание оценки окном m. Ноль означает среднее сразу по нескольким окнам (раздел 30)."""
+    if m == 0:
+        return ensemble(ctx, ENS)
     return ctx['grid'] if m <= 1 else rolling_mean(ctx['grid'], m)
+
+
+def ensemble(ctx: dict, ms=None) -> np.ndarray:
+    """Среднее из нескольких окон вместо выбора одного.
+
+    Раздел 30 показал, что слепой выбор окна по проверке стоит 8-16% ложных. Усреднение выбора не
+    делает вовсе: оно не может выиграть у лучшего окна, но и промахнуться мимо него не может.
+    """
+    ms = ms or ENS
+    return np.nanmean(np.stack([smoothed(ctx, m) for m in ms]), axis=0)
 
 
 def point(args) -> None:
