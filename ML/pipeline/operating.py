@@ -12,8 +12,14 @@
 
 Модели не переобучаются: берутся сохранённые прогнозы прогона (`runs/<тег>/preds`).
 
+**Режим `--match`** сравнивает несколько прогонов **при равной полноте**. Порог по F1 у разных
+моделей встаёт в разные точки кривой, и сравнение по нему выходит про порог, а не про модель.
+Здесь для каждого прогона перебирается сетка порогов и берётся наименьшее число ложных сигналов
+среди точек, где поймано не меньше заданной доли эпизодов теста (раздел 21 аналитики).
+
     python operating.py --run main_h24_tuned --model xgb
     python operating.py --run main_h24_tuned --model cat --budget 5,20 --topk 3,5
+    python operating.py --match main_h24,main_h24_conf     # равная полнота, разные цели обучения
 """
 import argparse
 import json
@@ -67,6 +73,45 @@ def row(obj, h, nx, p, thr, H, cap, days) -> str:
             f"{m['lead_median_h']:.0f} |").replace('.', ',')
 
 
+def match(runs: list[str], model: str, H: int, levels: list[float], steps: int,
+          on: str = 'test') -> None:
+    """Сколько ложных сигналов стоит одна и та же доля пойманных эпизодов у разных прогонов.
+
+    Точка на кривой выбирается по тому же году, на котором считается, — это подглядывание, и
+    оно одинаково выгодно всем прогонам. Чтобы выигрыш не оказался следствием подглядывания,
+    тот же расчёт повторяется на проверке (`--on val`): настоящее преимущество держится на обоих.
+    """
+    year = {'val': 2025, 'test': 2026}[on]
+    print('| тип | поймано эпизодов | ' + ' | '.join(f'`{r}`' for r in runs) + ' |')
+    print('|---|---|' + '---:|' * len(runs))
+    for tp in config.TYPES:
+        curves, total = {}, 0
+        for run in runs:
+            try:
+                obj, h, nxt, p = split(run, on, year, tp, model)
+            except FileNotFoundError:
+                continue
+            y = (nxt <= H).astype(np.int8)
+            pts = []
+            for q in np.linspace(0.90, 0.99999, steps):
+                t = float(np.quantile(p, q))
+                a = p >= t
+                if not a.any():
+                    continue
+                sig, true = metrics.signals(obj, h, y, a)
+                m = metrics.evaluate(obj, h, nxt, p, t, H, metrics.RUN_CAP)
+                pts.append((m['caught'], sig - true))
+                total = m['episodes']
+            curves[run] = pts
+        for lv in levels:
+            need = lv * total
+            cells = [min([f for c, f in curves.get(r, []) if c >= need], default=None)
+                     for r in runs]
+            cells = ['—' if c is None else str(c) for c in cells]
+            print(f'| {config.TYPE_NAMES[tp]} | {lv:.0%} ({int(need)} из {total}) | '
+                  + ' | '.join(cells) + ' |')
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument('--run', default='main_h24_tuned')
@@ -75,10 +120,18 @@ def main() -> None:
     ap.add_argument('--precision', default='0.5,0.7')
     ap.add_argument('--budget', default='10', help='тревог в сутки по всем объектам')
     ap.add_argument('--topk', default='3', help='суточный наряд: сколько объектов в сутки')
+    ap.add_argument('--match', default='', help='прогоны через запятую: сравнить при равной полноте')
+    ap.add_argument('--levels', default='0.4,0.5,0.6,0.7,0.75', help='доли эпизодов для --match')
+    ap.add_argument('--steps', type=int, default=70, help='сколько порогов перебрать для --match')
+    ap.add_argument('--on', default='test', choices=['test', 'val'], help='год для --match')
     ap.add_argument('--target', default='', choices=['', '_prim'],
                     help='_prim — засчитывать только первичные эпизоды: такого же не было 7 сут')
     args = ap.parse_args()
     H = args.horizon
+    if args.match:
+        match([r for r in args.match.split(',') if r], args.model, H,
+              [float(x) for x in args.levels.split(',')], args.steps, args.on)
+        return
     cap = json.loads((FEAT / 'meta.json').read_text(encoding='utf-8'))['next_cap']
 
     print(f'\nПрогон `{args.run}`, модель {args.model}, горизонт {H} ч. Порог выбран на проверке '
