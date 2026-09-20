@@ -145,7 +145,8 @@ def curve(score, k, thr_grid, ctx, gap):
 
 
 def prepare(run, part, year, tp, model, horizon):
-    obj, h, nxt, p = op.split(run, part, year, tp, model)
+    run, _, m = run.partition('/')      # `прогон/семейство`, иначе семейство из --model
+    obj, h, nxt, p = op.split(run, part, year, tp, m or model)
     grid, objs, oi, hi, h0 = dense(obj, h, p, horizon)
     y = (nxt <= horizon).astype(np.float64)
     order = np.lexsort((h, obj))

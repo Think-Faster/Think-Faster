@@ -22,6 +22,7 @@
     python operating.py --match main_h24,main_h24_conf     # равная полнота, разные цели обучения
     python operating.py --match main_h24,main_h24+main_h24_conf   # смесь двух целей
     python operating.py --match 'main_h24:0.75+main_h24_conf:0.25'   # …с неравными долями
+    python operating.py --match main_h24_r100e20/cat,main_h24_tuned_r100e20/xgb   # семейства
     python operating.py --match main_h24,main_h24_conf --target _conf   # мерить по выездам
 """
 import argparse
@@ -84,17 +85,22 @@ def load_mix(name: str, on: str, year: int, tp: str, model: str, label: str = ''
     Складывать можно только порядок, поэтому смешиваются ранги, а не сами числа.
 
     Вес пишется через двоеточие: `a:0.75+b:0.25`. Без весов доли равные.
+
+    Семейство пишется через косую черту: `main_h24_r100e20/cat`. Без неё берётся `--model`.
+    Это нужно, чтобы сравнивать не только цели обучения, но и семейства между собой: у них
+    порог по F1 встаёт в разные точки кривой, и сравнение по нему выходит про порог.
     """
     parts = []
     for part in name.split('+'):
         if part:
             run, _, w = part.partition(':')
-            parts.append((run, float(w) if w else 1.0))
-    obj, h, nxt, p = split(parts[0][0], on, year, tp, model, label)
+            run, _, m = run.partition('/')
+            parts.append((run, m or model, float(w) if w else 1.0))
+    obj, h, nxt, p = split(parts[0][0], on, year, tp, parts[0][1], label)
     if len(parts) > 1:
-        p = parts[0][1] * p.argsort().argsort()
-        for run, w in parts[1:]:
-            _, _, _, q = split(run, on, year, tp, model, label)
+        p = parts[0][2] * p.argsort().argsort()
+        for run, m, w in parts[1:]:
+            _, _, _, q = split(run, on, year, tp, m, label)
             p = p + w * q.argsort().argsort()
     return obj, h, nxt, p.astype(np.float32)
 
