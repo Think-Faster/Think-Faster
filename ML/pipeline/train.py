@@ -183,7 +183,7 @@ def main() -> None:
                          'разделы 15 и 16')
     ap.add_argument('--pw', type=float, default=1.0,
                     help='вес положительного класса: <1 делает пропуск дешевле ложной тревоги '
-                         '(cost-sensitive learning, раздел 25)')
+                         '(cost-sensitive learning, раздел 26)')
     args = ap.parse_args()
     globals()['ROUNDS'], globals()['EARLY'] = args.rounds, args.early
     models = [m for m in args.models.split(',') if m]
@@ -267,7 +267,7 @@ def main() -> None:
             if args.pw != 1.0 and name in ('xgb', 'cat'):
                 # Цена ошибки несимметрична: у диспетчера ложный выезд дороже, чем узнать
                 # о происшествии не за сутки, а в момент, — канал «по факту» всё равно объявит
-                # (раздел 25). scale_pos_weight < 1 записывает это прямо в функцию потерь.
+                # (раздел 26). scale_pos_weight < 1 записывает это прямо в функцию потерь.
                 par = dict(par or {}, scale_pos_weight=args.pw)
             model, predict, iters = FIT[name](Xt, yt, Xv, yv, par)
             scores[name] = (predict(Xv).astype(np.float32), predict(Xs).astype(np.float32))
