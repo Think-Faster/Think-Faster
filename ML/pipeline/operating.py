@@ -118,12 +118,24 @@ def load_mix(name: str, on: str, year: int, tp: str, model: str, label: str = ''
 
 
 def match(runs: list[str], model: str, H: int, levels: list[float], steps: int,
-          on: str = 'test', label: str = '') -> None:
+          on: str = 'test', label: str = '', low: float = 0.90) -> None:
     """Сколько ложных сигналов стоит одна и та же доля пойманных эпизодов у разных прогонов.
 
     Точка на кривой выбирается по тому же году, на котором считается, — это подглядывание, и
     оно одинаково выгодно всем прогонам. Чтобы выигрыш не оказался следствием подглядывания,
     тот же расчёт повторяется на проверке (`--on val`): настоящее преимущество держится на обоих.
+
+    `low` — нижний квантиль перебора порогов. При low = 0,90 тревогой может стать не больше
+    десятой части часов, и у типа с долей положительных 9% (отказ оборудования) высокая полнота
+    в такой перебор не попадает: в таблице появляется прочерк.
+
+    Опускать `low` ниже 0,90 можно только чтобы посмотреть, где проходит эта граница, но не
+    чтобы сравнивать прогоны. Ложные считаются блоками подряд идущих часов тревоги, и ниже
+    примерно 10% часов под тревогой блоки начинают склеиваться между собой: число ложных проходит
+    максимум и **падает**, хотя тревога висит всё дольше. У отказа оборудования на проверке 2025:
+    569 ложных при 10% часов, 696 при 20%, 244 при 50% — и в последней точке средний сигнал
+    длится 651 час. Метрика в этой области немонотонна по порогу, и выбор по ней едет в её слепое
+    пятно (раздел 31). Кривая снимается `curve.py`.
     """
     year = years(runs[0], on)
     print('| тип | поймано эпизодов | ' + ' | '.join(f'`{r}`' for r in runs) + ' |')
@@ -137,7 +149,7 @@ def match(runs: list[str], model: str, H: int, levels: list[float], steps: int,
                 continue
             y = (nxt <= H).astype(np.int8)
             pts = []
-            for q in np.linspace(0.90, 0.99999, steps):
+            for q in np.linspace(low, 0.99999, steps):
                 t = float(np.quantile(p, q))
                 a = p >= t
                 if not a.any():
@@ -167,6 +179,9 @@ def main() -> None:
     ap.add_argument('--match', default='', help='прогоны через запятую: сравнить при равной полноте')
     ap.add_argument('--levels', default='0.4,0.5,0.6,0.7,0.75', help='доли эпизодов для --match')
     ap.add_argument('--steps', type=int, default=70, help='сколько порогов перебрать для --match')
+    ap.add_argument('--low', type=float, default=0.90,
+                    help='нижний квантиль перебора порогов: 0,90 значит «тревога не чаще чем '
+                         'в десятой части часов». Типам с частыми происшествиями нужен ниже')
     ap.add_argument('--on', default='test', choices=['test', 'val'], help='год для --match')
     ap.add_argument('--target', default='', choices=['', '_prim', '_conf'],
                     help='какие эпизоды засчитывать за настоящие: _prim — только первичные '
@@ -175,7 +190,8 @@ def main() -> None:
     H = args.horizon
     if args.match:
         match([r for r in args.match.split(',') if r], args.model, H,
-              [float(x) for x in args.levels.split(',')], args.steps, args.on, args.target)
+              [float(x) for x in args.levels.split(',')], args.steps, args.on, args.target,
+              args.low)
         return
     cap = json.loads((FEAT / 'meta.json').read_text(encoding='utf-8'))['next_cap']
 

@@ -218,17 +218,26 @@ def main() -> None:
                                  H, metrics.RUN_CAP)
             sig, true = metrics.signals(oe[seen], he[seen], ye[seen], alarm[seen], args.gap)
             days = float(seen.sum()) / max(len(np.unique(oe)), 1) / DAY
+            # Доля часов под тревогой и средняя длина сигнала — страховка от слепого пятна счёта
+            # сигналов (раздел 31): подряд идущие часы склеиваются в один блок, и при слишком
+            # низком пороге число ложных начинает падать, хотя тревога висит дольше. Пока доля
+            # часов держится ниже десятой, а длина — в десятках часов, строка сравнима с другими.
+            share = float(alarm[seen].mean())
+            dur = float(alarm[seen].sum()) / max(sig, 1)
             rows.append({'тип': config.TYPE_NAMES[tp], 'стратегия': st, 'переобучений': fitted,
                          'деревьев': int(np.mean(trees)), 'PR-AUC': round(float(
                              metrics.average_precision_score(ye[seen], pred[seen])), 3),
                          'сигналов': sig, 'ложных': sig - true,
                          'ложных в сутки': round((sig - true) / max(days, 1), 2),
                          'доля верных': round(true / sig, 3) if sig else float('nan'),
+                         'часов под тревогой': round(share, 4), 'длина сигнала, ч': round(dur, 1),
                          'поймано эпизодов': m['caught'], 'эпизодов': m['episodes']})
             r = rows[-1]
             print(f"  {r['тип']:18} {st:9} PR-AUC {r['PR-AUC']:.3f} | сигналов {r['сигналов']:5} "
                   f"ложных {r['ложных']:5} ({r['ложных в сутки']}/сут) | доля верных "
                   f"{r['доля верных']:.3f} | эпизодов {r['поймано эпизодов']}/{r['эпизодов']} | "
+                  f"тревога {r['часов под тревогой']:.1%} часов, сигнал "
+                  f"{r['длина сигнала, ч']:.0f} ч | "
                   f"{r['переобучений']} переобучений, {r['деревьев']} дер.", flush=True)
             dump(rows, args)
 
