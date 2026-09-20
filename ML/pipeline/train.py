@@ -42,7 +42,7 @@ SPLITS = {'main': ([2022, 2023, 2024], [2025]),
           'long': ([2019, 2020, 2022, 2023, 2024], [2025]),
           'wide': ([2022, 2023], [2024, 2025])}
 WEATHER_TAG = {'': '', 'base': '_weather', 'ext': '_weather_ext', 'hum': '_weather_hum',
-               'both': '_weather_both'}
+               'air': '_weather_air', 'both': '_weather_both'}
 COMBO_TAG = {'': '', 'pairs': '_combo', 'spread': '_spread', 'both': '_combo_spread'}
 
 # Что именно модель помнит об объекте (раздел 23). `ident` — статический состав объекта: сколько
@@ -178,8 +178,9 @@ def main() -> None:
                     help='вес неподтверждённых выездом эпизодов в обучении: 1 — обычная цель, '
                          '0 — как --target _conf, промежуточные — мягкая метка (раздел 22)')
     ap.add_argument('--params', default='default', choices=['default', 'tuned'])
-    ap.add_argument('--weather', default='', choices=['', 'base', 'ext', 'hum', 'both'],
-                    help='добавить признаки погоды из weather.py: набор ТЗ, расширенный или оба')
+    ap.add_argument('--weather', default='', choices=['', 'base', 'ext', 'hum', 'air', 'both'],
+                    help='добавить признаки из weather.py: набор ТЗ, расширенный, конденсат, '
+                         'качество воздуха или база вместе с расширенным')
     ap.add_argument('--combo', default='', choices=['', 'pairs', 'spread', 'both'],
                     help='добавить связки соседних датчиков и/или разброс по пикетам из combo.py')
     ap.add_argument('--fleet', action='store_true',

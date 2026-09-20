@@ -10,7 +10,12 @@
   с ними производственный календарь (isdayoff.ru). Стенки коллектора держат температуру месячного
   среднего, и когда точка росы выше неё — на них выпадает роса: это заливает контакты и даёт отказы
   датчиков, не видные ни по дождю, ни по грунту. Обратный край того же ряда — сухой воздух, при
-  котором горит легче. Календарь отвечает за людей: в выходные и праздники на объектах никого.
+  котором горит легче. Календарь отвечает за людей: в выходные и праздники на объектах никого;
+- `air` — качество воздуха (CAMS): CO, NO2, SO2, PM10, PM2.5. Гипотеза не «ряд увидит утечку» —
+  городской фон утечку под землёй не видит, — а «ряд увидит застой». Загазованность в замкнутом
+  объёме требует и утечки, и отсутствия проветривания; при инверсии над городом фон растёт по всем
+  веществам разом, и тот же застой стоит в коллекторе. Поэтому главные признаки набора —
+  превышение над собственным недельным фоном и длительность этого превышения.
 
 Признаки общие для всех объектов — зависят только от часа, поэтому лежат отдельной таблицей
 «час → погода» и приклеиваются к витрине по `h` (`train.py --weather base|ext|both`). Витрина при
@@ -46,11 +51,16 @@ FLOOD = ('https://flood-api.open-meteo.com/v1/flood?latitude={lat}&longitude={lo
 PACKS = {'base': ['temperature_2m', 'precipitation', 'surface_pressure'],
          'ext': ['snow_depth', 'soil_moisture_0_to_7cm', 'soil_moisture_7_to_28cm', 'wind_gusts_10m'],
          'hum': ['relative_humidity_2m', 'dew_point_2m', 'shortwave_radiation',
-                 'vapour_pressure_deficit']}
+                 'vapour_pressure_deficit'],
+         'air': ['carbon_monoxide', 'nitrogen_dioxide', 'sulphur_dioxide', 'pm10', 'pm2_5']}
 SHORT = {'temperature_2m': 'temp', 'precipitation': 'prec', 'surface_pressure': 'press',
          'snow_depth': 'snow', 'soil_moisture_0_to_7cm': 'soil0', 'soil_moisture_7_to_28cm': 'soil28',
          'wind_gusts_10m': 'gust', 'relative_humidity_2m': 'rh', 'dew_point_2m': 'dew',
-         'shortwave_radiation': 'rad', 'vapour_pressure_deficit': 'vpd'}
+         'shortwave_radiation': 'rad', 'vapour_pressure_deficit': 'vpd',
+         'carbon_monoxide': 'co', 'nitrogen_dioxide': 'no2', 'sulphur_dioxide': 'so2',
+         'pm10': 'pm10', 'pm2_5': 'pm25'}
+AIR = ('https://air-quality-api.open-meteo.com/v1/air-quality?latitude={lat}&longitude={lon}'
+       '&start_date={a}&end_date={b}&hourly={vars}&timezone=Europe%2FMoscow')
 CALENDAR = 'https://isdayoff.ru/api/getdata?year={y}'   # производственный календарь России
 RAIN = 0.5  # мм/ч: ниже этого — морось, «дождь был» не считаем
 
@@ -66,7 +76,8 @@ def get(url: str) -> dict:
 
 
 def fetch(pack: str) -> dict:
-    raw = get(ARCHIVE.format(lat=LAT, lon=LON, a=START.date(), b=END.date(), vars=','.join(PACKS[pack])))
+    url = AIR if pack == 'air' else ARCHIVE
+    raw = get(url.format(lat=LAT, lon=LON, a=START.date(), b=END.date(), vars=','.join(PACKS[pack])))
     if pack == 'ext':
         raw['flood'] = get(FLOOD.format(lat=LAT, lon=LON, a=START.date(), b=END.date()))['daily']
     if pack == 'hum':
@@ -199,11 +210,55 @@ def hum_features(s: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     return f
 
 
+def air_features(s: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """Качество воздуха по центру Москвы: CO, NO2, SO2, пыль (Open-Meteo CAMS).
+
+    Важно понимать, что этот ряд измеряет и чего не измеряет. Это **городской фон**, одна точка на
+    весь город, а не воздух в конкретном коллекторе. Утечку под землёй он не увидит никогда.
+
+    Полезен он другим. Загазованность в замкнутом объёме — это всегда две вещи сразу: что-то
+    подтекает и **не выветривается**. Первое ряд не видит, зато второе видит хорошо: когда над
+    городом стоит инверсия и воздух не перемешивается, фоновые концентрации ползут вверх все разом,
+    на всех веществах и по всему городу. Тот же застой стоит и в коллекторе. Поэтому главными здесь
+    сделаны не уровни, а **превышения над собственным недельным фоном** и то, сколько часов подряд
+    это превышение держится: ряд используется как индикатор режима проветривания, а не как
+    измеритель утечки.
+
+    Побочно то же самое может пригодиться двум другим типам: CO и мелкая пыль поднимаются при
+    горении (пожар), крупная пыль PM10 — это запылённость, от которой слепнут оптические датчики.
+    Эти два применения проверяются заодно, отдельной гипотезы под них не строилось.
+    """
+    f = {}
+    for k in ('co', 'no2', 'so2', 'pm10', 'pm25'):
+        x = s[k]
+        f[f'aq_{k}'] = x
+        base = window_sum(x, 168) / 168          # недельный фон самого ряда
+        f[f'aq_{k}_base'] = base
+        # превышение над фоном в долях: безразмерно, поэтому сравнимо между веществами и сезонами
+        over = np.divide(x, base, out=np.ones_like(x), where=base > 0) - 1.0
+        f[f'aq_{k}_over'] = over
+        f[f'aq_{k}_over_max_24h'] = window_ext(over, 24, np.max)
+        # часы застоя: сколько за сутки и за трое было выше фона. Длительность важнее пика —
+        # разовый выброс проветрится, а трое суток над фоном означают, что не проветривается ничего
+        high = (over > 0.25).astype(np.float32)
+        for w in (24, 72):
+            f[f'aq_{k}_high_{w}h'] = window_sum(high, w)
+    # согласованность: застой поднимает все вещества сразу, локальный выброс — одно
+    f['aq_all_over'] = np.mean([f[f'aq_{k}_over'] for k in ('co', 'no2', 'so2', 'pm10')], axis=0)
+    f['aq_all_high_24h'] = np.mean([f[f'aq_{k}_high_24h'] for k in ('co', 'no2', 'so2', 'pm10')],
+                                   axis=0)
+    # доля мелкой фракции: горение даёт мелкую пыль, пыление и песок — крупную
+    f['aq_fine_share'] = np.divide(s['pm25'], s['pm10'], out=np.zeros_like(s['pm10']),
+                                   where=s['pm10'] > 0)
+    return f
+
+
 def build(raw: dict, pack: str) -> None:
     s = series(raw, pack)
     if pack in ('ext', 'hum') and path('base', 'json').exists():   # нужна температура
         s.update(series(json.loads(path('base', 'json').read_text(encoding='utf-8')), 'base'))
-    f = {'base': base_features, 'ext': ext_features, 'hum': hum_features}[pack](s)
+    f = {'base': base_features, 'ext': ext_features, 'hum': hum_features,
+         'air': air_features}[pack](s)
     lo = BACK * 24  # первые 60 суток были нужны только для окон
     cols = {'h': np.arange(NH, dtype=np.int32)}
     cols.update({k: v[lo:lo + NH].astype(np.float32) for k, v in f.items()})
