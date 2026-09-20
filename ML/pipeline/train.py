@@ -19,6 +19,7 @@
 """
 import argparse
 import json
+import re
 import time
 
 import numpy as np
@@ -32,6 +33,15 @@ SPLITS = {'main': [2022, 2023, 2024], 'long': [2019, 2020, 2022, 2023, 2024]}
 WEATHER_TAG = {'': '', 'base': '_weather', 'ext': '_weather_ext', 'hum': '_weather_hum',
                'both': '_weather_both'}
 COMBO_TAG = {'': '', 'pairs': '_combo', 'spread': '_spread', 'both': '_combo_spread'}
+
+# Что именно модель помнит об объекте (раздел 23). `ident` — статический состав объекта: сколько
+# каких датчиков на нём висит. Он не меняется никогда, поэтому работает как имя объекта. `hist` —
+# сколько происшествий у объекта уже было и давно ли. Она меняется, но медленно: окно 2160 ч.
+DROP = {'': None,
+        'ident': r'comp_\d+',
+        'hist': r'(onset_\w+_\d+h|since_(' + '|'.join(config.TYPES) + r'))',
+        'both': r'(comp_\d+|onset_\w+_\d+h|since_(' + '|'.join(config.TYPES) + r'))'}
+DROP_TAG = {'': '', 'ident': '_noident', 'hist': '_nohist', 'both': '_nomem'}
 FEAT = config.WORK / 'features'
 
 
@@ -155,6 +165,9 @@ def main() -> None:
                     help='добавить признаки погоды из weather.py: набор ТЗ, расширенный или оба')
     ap.add_argument('--combo', default='', choices=['', 'pairs', 'spread', 'both'],
                     help='добавить связки соседних датчиков и/или разброс по пикетам из combo.py')
+    ap.add_argument('--drop', default='', choices=list(DROP),
+                    help='убрать память об объекте: ident — статический состав, hist — история '
+                         'происшествий объекта, both — и то и другое (раздел 23)')
     ap.add_argument('--rounds', type=int, default=ROUNDS, help='предел числа деревьев (раздел 19)')
     ap.add_argument('--early', type=int, default=EARLY, help='запас ранней остановки (раздел 19)')
     args = ap.parse_args()
@@ -168,7 +181,7 @@ def main() -> None:
     budget = '' if (args.rounds, args.early) == (4000, 200) else f'_r{args.rounds}e{args.early}'
     tag = (f'{args.branch}_h{H}{tg}' + ('' if soft == 1.0 else f'_soft{int(round(soft * 100)):02d}')
            + ('_tuned' if args.params == 'tuned' else '')
-           + WEATHER_TAG[args.weather] + COMBO_TAG[args.combo] + budget)
+           + WEATHER_TAG[args.weather] + COMBO_TAG[args.combo] + DROP_TAG[args.drop] + budget)
 
     meta = json.loads((FEAT / 'meta.json').read_text(encoding='utf-8'))
     features, cap = meta['features'], meta['next_cap']
@@ -183,6 +196,12 @@ def main() -> None:
             c = pl.read_parquet(config.WORK / ('combo.parquet' if part == 'pairs' else 'combo_spread.parquet'))
             cb = c if cb is None else cb.join(c, on=['object_id', 'h'], how='full', coalesce=True).fill_null(0)
         features = features + [c for c in cb.columns if c not in ('object_id', 'h')]
+    if args.drop:
+        pat = re.compile(DROP[args.drop])
+        gone = [c for c in features if pat.fullmatch(c)]
+        features = [c for c in features if not pat.fullmatch(c)]
+        print(f'убрано признаков: {len(gone)} из {len(gone) + len(features)} '
+              f'({", ".join(gone[:4])}…)')
     t = time.time()
     keys = ['object_id', 'h']
     cols = keys + meta['features'] + meta['targets']
