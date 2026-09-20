@@ -19,6 +19,20 @@
 | `d90`, `d180`, `d365` | скользящее окно в 90/180/365 суток, старое отрезается |
 | `decay90`, `decay180` | всё прошлое, но вес строки падает вдвое каждые 90/180 суток |
 | `warm` | деревья достраиваются поверх модели прошлого отрезка, только на новых данных |
+| `frozen` | модель обучается один раз и больше не трогается, пересчитывается только порог |
+| `thrfix` | наоборот: модель переобучается как в `all`, а порог берётся один раз и держится |
+
+`frozen` и `thrfix` — контроли, а не кандидаты в работу. Раздел 19 нашёл, что переобучение раз в
+30 суток выгоднее, чем раз в 90, и объяснил это не устареванием данных (признаки не дрейфуют,
+раздел 13), а тем, что вместе с моделью пересчитывается **порог**, а он привязан к частоте
+происшествий, которая ходит в разы. В литературе это называется prior probability shift, и
+рекомендация там та же: если признаки стабильны, а меняется только доля положительных, лечить
+надо порог, а не модель.
+
+Само по себе это объяснение проверить нельзя: в `all` обе ручки крутятся вместе. Поэтому их
+разводят. `all` — двигаются обе, `frozen` — только порог, `thrfix` — только модель. Если выигрыш
+даёт порог, `frozen` догонит `all`, а `thrfix` просядет; если модель — наоборот. Тогда ответ на
+вопрос «переобучать раз в месяц или хватит пересчитать порог» будет измерен, а не выведен.
 
 Считается не PR-AUC, а то, что видит диспетчер: сколько сигналов за прогон, сколько из них ложных,
 сколько эпизодов поймано. Итог — таблица «какая стратегия для какого типа лучше».
@@ -42,7 +56,7 @@ import train
 FEAT = config.WORK / 'features'
 DAY = 24
 VAL_DAYS = 14          # последние сутки перед переобучением — на раннюю остановку и порог
-STRATEGIES = ['all', 'd90', 'd180', 'd365', 'decay90', 'decay180', 'warm']
+STRATEGIES = ['all', 'd90', 'd180', 'd365', 'decay90', 'decay180', 'warm', 'frozen', 'thrfix']
 
 
 def pick(h: np.ndarray, lo: int | None, hi: int) -> np.ndarray:
@@ -149,7 +163,7 @@ def main() -> None:
         for st in args.strategies.split(','):
             pred = np.zeros(len(he), np.float32)
             alarm = np.zeros(len(he), bool)
-            prev, trees, fitted = None, [], 0
+            prev, trees, fitted, thr0 = None, [], 0, None
             for t in edges:
                 cut = t - H                       # метка обучающей строки не должна видеть отрезок
                 lo = None
@@ -163,17 +177,26 @@ def main() -> None:
                 if tr.sum() < 5000 or va.sum() < 500 or yp[tr].sum() < 20 or yp[va].sum() < 5:
                     continue
                 w = weights(hp[tr], cut, int(st[5:])) if st.startswith('decay') else None
-                model, predict, n = fold_fit(args.model, Xp[tr], yp[tr], w, Xp[va], yp[va],
-                                             params, prev if st == 'warm' else None,
-                                             args.rounds, args.early)
+                if st == 'frozen' and prev is not None:
+                    predict, n = prev, trees[-1]          # модель не трогаем, порог ниже пересчитаем
+                else:
+                    model, predict, n = fold_fit(args.model, Xp[tr], yp[tr], w, Xp[va], yp[va],
+                                                 params, prev if st == 'warm' else None,
+                                                 args.rounds, args.early)
+                    fitted += 1
+                    if st == 'warm':
+                        prev = model
+                    elif st == 'frozen':
+                        prev = predict
                 trees.append(n)
-                fitted += 1
-                if st == 'warm':
-                    prev = model
                 # порог по бюджету диспетчера, снятый на тех же последних двух неделях
-                pv = predict(Xp[va])
-                thr = metrics.threshold_for_rate(pv, args.budget, int(va.sum()),
-                                                 VAL_DAYS * (args.step if args.step else 1))
+                if st == 'thrfix' and thr0 is not None:
+                    thr = thr0                            # порог заморожен, модель переобучается
+                else:
+                    pv = predict(Xp[va])
+                    thr = metrics.threshold_for_rate(pv, args.budget, int(va.sum()),
+                                                     VAL_DAYS * (args.step if args.step else 1))
+                    thr0 = thr
                 sl = (he >= t) & (he < t + args.fold * DAY)
                 if not sl.any():
                     continue
