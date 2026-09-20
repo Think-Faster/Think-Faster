@@ -16,6 +16,7 @@
     python train.py --models xgb,cat --params tuned --combo pairs   # …и со связками датчиков (combo.py)
     python train.py --models xgb --soft 0.5   # мягкая цель: неподтверждённый эпизод весит половину
     python train.py --models xgb --params tuned --rounds 300 --early 40   # короткий бюджет деревьев
+    python train.py --models xgb --params tuned --rounds 100 --early 20 --pw 0.3   # ложная дороже пропуска
 """
 import argparse
 import json
@@ -176,6 +177,9 @@ def main() -> None:
                          'происшествий объекта, both — и то и другое (раздел 23)')
     ap.add_argument('--rounds', type=int, default=ROUNDS, help='предел числа деревьев (раздел 19)')
     ap.add_argument('--early', type=int, default=EARLY, help='запас ранней остановки (раздел 19)')
+    ap.add_argument('--pw', type=float, default=1.0,
+                    help='вес положительного класса: <1 делает пропуск дешевле ложной тревоги '
+                         '(cost-sensitive learning, раздел 25)')
     args = ap.parse_args()
     globals()['ROUNDS'], globals()['EARLY'] = args.rounds, args.early
     models = [m for m in args.models.split(',') if m]
@@ -185,9 +189,10 @@ def main() -> None:
     soft = args.soft
     assert soft == 1.0 or not tg, '--soft задаёт вес внутри обычной цели, с --target не сочетается'
     budget = '' if (args.rounds, args.early) == (4000, 200) else f'_r{args.rounds}e{args.early}'
+    pw = '' if args.pw == 1.0 else f'_pw{int(round(args.pw * 100)):03d}'
     tag = (f'{args.branch}_h{H}{tg}' + ('' if soft == 1.0 else f'_soft{int(round(soft * 100)):02d}')
            + ('_tuned' if args.params == 'tuned' else '')
-           + WEATHER_TAG[args.weather] + COMBO_TAG[args.combo] + DROP_TAG[args.drop] + budget)
+           + WEATHER_TAG[args.weather] + COMBO_TAG[args.combo] + DROP_TAG[args.drop] + budget + pw)
 
     meta = json.loads((FEAT / 'meta.json').read_text(encoding='utf-8'))
     features, cap = meta['features'], meta['next_cap']
@@ -248,8 +253,13 @@ def main() -> None:
         scores['recency'] = (-Xv[:, fi[f'since_{tp}']], -Xs[:, fi[f'since_{tp}']])
         for name in models:
             t1 = time.time()
-            model, predict, iters = FIT[name](Xt, yt, Xv, yv,
-                                              tuned(name, tp, tg, H, budget) if args.params == 'tuned' else None)
+            par = tuned(name, tp, tg, H, budget) if args.params == 'tuned' else None
+            if args.pw != 1.0 and name in ('xgb', 'cat'):
+                # Цена ошибки несимметрична: у диспетчера ложный выезд дороже, чем узнать
+                # о происшествии не за сутки, а в момент, — канал «по факту» всё равно объявит
+                # (раздел 25). scale_pos_weight < 1 записывает это прямо в функцию потерь.
+                par = dict(par or {}, scale_pos_weight=args.pw)
+            model, predict, iters = FIT[name](Xt, yt, Xv, yv, par)
             scores[name] = (predict(Xv).astype(np.float32), predict(Xs).astype(np.float32))
             print(f'  {name}: {iters} деревьев за {time.time() - t1:.0f} с', flush=True)
             if name == 'xgb':
