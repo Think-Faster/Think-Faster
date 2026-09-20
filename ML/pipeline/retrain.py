@@ -41,6 +41,7 @@
     python retrain.py --strategies all,d365,warm --model xgb
     python retrain.py --fold 30 --rounds 1500 --early 100   # быстрее, если отрезков много
     python retrain.py --fold 14 --out retrain_f14           # параллельным прогонам — разные --out
+    python retrain.py --fold 30 --pw 0.1 --gap 6           # лучшее из разделов 26 и 27 сразу
 """
 import argparse
 import json
@@ -105,7 +106,8 @@ def dump(rows: list[dict], args) -> None:
     head = (f'Прогон вперёд с {args.start}, переобучение раз в {args.fold} суток, '
             f'модель {args.model}, порог под {args.budget} тревог в сутки, '
             f'потолок {args.rounds} деревьев (остановка {args.early})'
-            + (f', вес положительного класса {args.pw}.' if args.pw != 1.0 else '.'))
+            + (f', вес положительного класса {args.pw}' if args.pw != 1.0 else '')
+            + (f', склейка дребезга {args.gap} ч.' if args.gap else '.'))
     with open(config.WORK / f'{args.out}.md', 'w', encoding='utf-8') as f:
         f.write(head + '\n\n| ' + ' | '.join(out.columns) + ' |\n')
         f.write('|' + '---|' * len(out.columns) + '\n')
@@ -129,6 +131,10 @@ def main() -> None:
     ap.add_argument('--rounds', type=int, default=4000, help='потолок деревьев на отрезок')
     ap.add_argument('--early', type=int, default=200,
                     help='ранняя остановка: раундов без улучшения')
+    ap.add_argument('--gap', type=int, default=0,
+                    help='склейка дребезга: пауза не длиннее gap часов не начинает новый сигнал '
+                         '(раздел 27). По умолчанию 0 — счёт как раньше, чтобы старые таблицы '
+                         'оставались сопоставимыми')
     ap.add_argument('--pw', type=float, default=1.0,
                     help='вес положительного класса: <1 делает пропуск дешевле ложной тревоги '
                          '(раздел 26). Тот же ключ, что у train.py, — иначе прогон вперёд '
@@ -210,7 +216,7 @@ def main() -> None:
             m = metrics.evaluate(oe[seen], he[seen], nxt_e[seen], pred[seen],
                                  float(np.min(pred[alarm & seen])) if (alarm & seen).any() else 1.1,
                                  H, metrics.RUN_CAP)
-            sig, true = metrics.signals(oe[seen], he[seen], ye[seen], alarm[seen])
+            sig, true = metrics.signals(oe[seen], he[seen], ye[seen], alarm[seen], args.gap)
             days = float(seen.sum()) / max(len(np.unique(oe)), 1) / DAY
             rows.append({'тип': config.TYPE_NAMES[tp], 'стратегия': st, 'переобучений': fitted,
                          'деревьев': int(np.mean(trees)), 'PR-AUC': round(float(
