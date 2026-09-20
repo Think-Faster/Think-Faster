@@ -139,17 +139,31 @@ def main() -> None:
                     help='вес положительного класса: <1 делает пропуск дешевле ложной тревоги '
                          '(раздел 26). Тот же ключ, что у train.py, — иначе прогон вперёд '
                          'проверял бы не ту модель, которую ставим в работу')
+    ap.add_argument('--weather', default='', choices=['', 'base', 'ext', 'hum', 'air', 'both'],
+                    help='пакет признаков из weather.py; `air` взят под загазованность (раздел 23)')
     args = ap.parse_args()
     H, types = args.horizon, args.types.split(',')
     meta = json.loads((FEAT / 'meta.json').read_text(encoding='utf-8'))
     feats = meta['features']
     tcols = [f'next_{tp}' for tp in types]
 
+    # Пакеты из weather.py цепляются по часу — они одни на все объекты. Ключ тот же, что у
+    # train.py: прогон вперёд должен проверять ту модель, которую ставим в работу, а не соседнюю.
+    # Читать из витрины при этом надо только её собственные колонки (`feats`), а в матрицу идут
+    # уже приклеенные (`allf`) — join происходит внутри train.load, после выбора колонок.
+    wx, allf = None, feats
+    if args.weather:
+        for pack in (['base', 'ext'] if args.weather == 'both' else [args.weather]):
+            name = 'weather.parquet' if pack == 'base' else f'weather_{pack}.parquet'
+            w = pl.read_parquet(config.WORK / name)
+            wx = w if wx is None else wx.join(w, on='h')
+        allf = feats + [c for c in wx.columns if c != 'h']
+
     t0 = time.time()
     years = [2022, 2023, 2024, 2025, 2026]
-    pool = train.load(years, args.step, ['object_id', 'h'] + tcols + feats)
-    ev = train.load([2025, 2026], 1, ['object_id', 'h'] + tcols + feats)
-    Xp, Xe = train.matrix(pool, feats), train.matrix(ev, feats)
+    pool = train.load(years, args.step, ['object_id', 'h'] + tcols + feats, wx)
+    ev = train.load([2025, 2026], 1, ['object_id', 'h'] + tcols + feats, wx)
+    Xp, Xe = train.matrix(pool, allf), train.matrix(ev, allf)
     pool, ev = pool.select(['object_id', 'h'] + tcols), ev.select(['object_id', 'h'] + tcols)
     hp, he = pool['h'].to_numpy(), ev['h'].to_numpy()
     oe = ev['object_id'].to_numpy()
