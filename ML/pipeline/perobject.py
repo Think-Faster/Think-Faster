@@ -23,6 +23,7 @@
 
     python perobject.py
     python perobject.py --target 0.6 --min-signals 5
+    python perobject.py --refit 30   # пороги объектов пересчитываются раз в 30 суток
 """
 import argparse
 
@@ -80,6 +81,61 @@ def own_threshold(p_obj, y_obj, thr0, target, grid=60):
     return None
 
 
+def fit_stats(obj, h, y, alarm):
+    """По окну подгонки: сколько сигналов у объекта и какая доля из них верна, плюс метки часов."""
+    fobj, ftrue, _ = runs(obj, h, y, alarm)
+    stat = {}
+    for o in np.unique(fobj):
+        m = fobj == o
+        stat[int(o)] = (int(m.sum()), float(ftrue[m].mean()))
+    return stat, sig_labels(obj, h, y, alarm)
+
+
+def object_mask(rule, guard, target, thr, fit, tobj, tp_, tsel):
+    """Какие тревожные часы гасим. `fit` — окно подгонки (obj, h, y, p), только прошлое."""
+    fobj, fh, fy, fp = fit
+    stat, flab = fit_stats(fobj, fh, fy, fp >= thr)
+    mask, touched = np.zeros(len(tobj), bool), 0
+    for o, (n, good) in stat.items():
+        if n < guard or good >= target:
+            continue
+        sel = tsel & (tobj == o)
+        if rule == 'mute':
+            mask |= sel
+        else:
+            fsel = fobj == o
+            t = own_threshold(fp[fsel], flab[fsel], thr, target)
+            mask |= sel if t is None else (sel & (tp_ < t))
+        touched += 1
+    return mask, touched
+
+
+def rolling_mask(rule, guard, target, thr, H, days, val, test, tsel):
+    """То же, но пороги пересчитываются каждые `days` суток по предыдущим `days` суткам.
+
+    Раздел 13 показал, что меняется не парк, а отдельные объекты: у подтопления две трети эпизодов
+    2025 года дал один объект, к 2026 самым частым стал другой. Пороги, снятые на 2025 один раз,
+    настроены на объекты, которых в тесте уже нет. Здесь они снимаются на скользящем окне.
+
+    Заглядывать в будущее нельзя: окно подгонки — предыдущий отрезок, и его последние H часов
+    отброшены, потому что к моменту решения их метка ещё не известна. Для самого первого отрезка
+    прошлого внутри теста нет, поэтому берётся проверка целиком — как в обычном режиме.
+    """
+    tobj, th, ty, tp_ = test
+    blk = (th - th.min()) // (days * 24)
+    mask, touched = np.zeros(len(tobj), bool), 0
+    for b in range(int(blk.max()) + 1):
+        prev = blk == b - 1 if b else np.zeros(len(th), bool)
+        if prev.any():
+            prev &= th < th[prev].max() - H + 1
+        # для первого отрезка прошлого внутри теста нет, для пустого — тоже: берём проверку
+        fit = (tobj[prev], th[prev], ty[prev], tp_[prev]) if prev.any() else val
+        m, t = object_mask(rule, guard, target, thr, fit, tobj, tp_, tsel & (blk == b))
+        mask |= m
+        touched = max(touched, t)
+    return mask, touched
+
+
 def control(obj, h, y, nxt, p, thr0, want, H):
     """Столько же сигналов, но просто общим порогом повыше."""
     above = p[p >= thr0]
@@ -103,12 +159,18 @@ def main() -> None:
     ap.add_argument('--target', type=float, default=0.5, help='целевая доля верных сигналов объекта')
     ap.add_argument('--min-signals', type=int, default=8,
                     help='сколько сигналов объект должен набрать на проверке, чтобы получить свой порог')
+    ap.add_argument('--refit', type=int, default=0,
+                    help='пересчитывать пороги объектов каждые N суток по предыдущим N суткам; '
+                         '0 — один раз на проверке 2025, как было (раздел 14)')
     args = ap.parse_args()
     H = args.horizon
 
-    print(f'Пороги подобраны по объектам на проверке 2025 и перенесены на тест 2026 без изменений. '
-          f'Прогон {args.run}, цель по доле верных {args.target}, свой порог получают объекты от '
-          f'{args.min_signals} сигналов на проверке.\n'.replace('0.', '0,'))
+    how = (f'Пороги объектов пересчитываются каждые {args.refit} сут по предыдущим {args.refit} сут '
+           f'теста; последние {H} ч окна отброшены — их метка к моменту решения не известна. '
+           f'Первый отрезок считается по проверке 2025.' if args.refit else
+           'Пороги подобраны по объектам на проверке 2025 и перенесены на тест 2026 без изменений.')
+    print(f'{how} Прогон {args.run}, цель по доле верных {args.target}, свой порог получают '
+          f'объекты от {args.min_signals} сигналов на окне подгонки.\n'.replace('0.', '0,'))
     print('| тип | правило | объектов затронуто | сигналов | из них ложных | доля верных | '
           'поймано эпизодов |')
     print('|---|---|---:|---:|---:|---:|---:|')
@@ -127,31 +189,14 @@ def main() -> None:
         if not sig:
             continue
 
-        vobj, vtrue, _ = runs(ov, hv, yv, av)
-        stat = {}
-        for o in np.unique(vobj):
-            m = vobj == o
-            stat[int(o)] = (int(m.sum()), float(vtrue[m].mean()))
-        vlab = sig_labels(ov, hv, yv, av)   # «верный» проставлен всему сигналу, а не часу
-
+        val, test = (ov, hv, yv, pv), (os_, hs, ys, ps)
         for rule in ('mute', 'own'):
             for guard, tag in ((args.min_signals, ''), (1, ' без ограничения по числу сигналов')):
-                mask = np.zeros(len(as_), bool)   # True — час гасится
-                touched = 0
-                for o, (n, good) in stat.items():
-                    if n < guard or good >= args.target:
-                        continue
-                    sel = (os_ == o)
-                    if rule == 'mute':
-                        mask |= sel & as_
-                        touched += 1
-                        continue
-                    t = own_threshold(pv[sel_v := (ov == o)], vlab[sel_v], thr, args.target)
-                    if t is None:
-                        mask |= sel & as_
-                    else:
-                        mask |= sel & as_ & (ps < t)
-                    touched += 1
+                if args.refit:
+                    mask, touched = rolling_mask(rule, guard, args.target, thr, H,
+                                                 args.refit, val, test, as_)
+                else:
+                    mask, touched = object_mask(rule, guard, args.target, thr, val, os_, ps, as_)
                 # пятым идут именно погашенные часы; сигнал пропадает, только если погашен весь
                 sig2, false2 = mt.shown_signals(os_, hs, ys, as_, mask)
                 m2 = metrics.evaluate(os_, hs, ns, np.where(mask, 0.0, ps), thr, H, metrics.RUN_CAP)
