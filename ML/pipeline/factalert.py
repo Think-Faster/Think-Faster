@@ -22,6 +22,7 @@
 | `clean` | на первом триггере, не помеченном шумом (Н7, Н8) |
 | `clean2` | на втором таком триггере |
 | `cleanch2` | когда шумом не помечен второй разный канал |
+| `silent` | через 10 минут после первого триггера, если сам первый триггер не помечен шумом |
 
 По каждому: сколько эпизодов объявлено, сколько из объявленных шумные (ложные), сколько настоящих
 пропущено и с какой задержкой приходит объявление. Отдельно — сколько эпизодов, пропущенных
@@ -40,10 +41,11 @@ import labels
 import metrics
 import operating as op
 
-RULES = ['first', 'n2', 'nch2', 'clean', 'clean2', 'cleanch2']
+RULES = ['first', 'n2', 'nch2', 'clean', 'clean2', 'cleanch2', 'silent']
+WAIT = 10   # минут задержки: Н8 считается по ±10 минутам вокруг триггера, раньше не вычислим
 
 
-def episodes(con, tp: str, years: tuple[int, ...]) -> 'duckdb.DuckDBPyRelation':
+def episodes(con, tp: str, years: tuple[int, ...], wait: int = WAIT) -> 'duckdb.DuckDBPyRelation':
     """Эпизоды типа с моментом срабатывания каждого правила объявления.
 
     Шум считается по тем же признакам, что и в разметке (labels.py), но по данным, доступным в
@@ -75,7 +77,14 @@ def episodes(con, tp: str, years: tuple[int, ...]) -> 'duckdb.DuckDBPyRelation':
                min(CASE WHEN ch = 2 THEN ts END) AS t_nch2,
                min(CASE WHEN clean AND kc = 1 THEN ts END) AS t_clean,
                min(CASE WHEN clean AND kc = 2 THEN ts END) AS t_clean2,
-               min(CASE WHEN clean AND chc = 2 THEN ts END) AS t_cleanch2
+               min(CASE WHEN clean AND chc = 2 THEN ts END) AS t_cleanch2,
+               -- Н7/Н8 проверяются на первом триггере эпизода и только на нём. Объявление
+               -- задержано на {wait} минут не ради «тишины», а потому что Н8 (массовый дым)
+               -- считается по ±10 минутам вокруг триггера: раньше этого срока признак физически
+               -- не вычислим. Ноль ложных у этого правила — следствие того, как построена
+               -- разметка, а не измерение; что он значит и чего не значит — в разделе 18
+               CASE WHEN max(CASE WHEN NOT clean AND ts <= t0 THEN 1 ELSE 0 END) = 0
+                    THEN t0 + INTERVAL {wait} MINUTE END AS t_silent
         FROM t GROUP BY object_id, t0""")
 
 
@@ -122,7 +131,7 @@ def tradeoff(con, args) -> None:
         real = np.ma.getdata(d['real_']).astype(bool)
         # правило выбирается по типу: `first` полнее, но у пожара и подтопления шумит, а фильтр
         # шума у оборудования наоборот вычёркивает 423 настоящих эпизода ни за что
-        opts = {r: present(d[f't_{r}']) for r in ('first', 'clean')}
+        opts = {r: present(d[f't_{r}']) for r in ('first', 'clean', 'silent')}
         rule = min(opts, key=lambda r: (int((opts[r] & ~real).sum()),
                                         -int(opts[r][real].sum())))
         said = opts[rule]
@@ -184,7 +193,7 @@ def main() -> None:
             print((f'| {name} | {rule} | {int(said.sum())} | {int(said_bad.sum())} | '
                    f'{int((real & ~said).sum())} | {med:.1f} | {p90:.1f} | {visit:.3f} |'
                    ).replace('.', ','))
-        miss[tp] = (present(d['t_clean'])[real],)
+        miss[tp] = (present(d['t_silent'])[real],)
 
     if args.year != config.VAL_END.year:
         # на проверочном годе прогноза теста нет: таблица правил выше считается по журналу и
