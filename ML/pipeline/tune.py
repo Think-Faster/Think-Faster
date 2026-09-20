@@ -5,6 +5,7 @@ XGBoost и CatBoost — на GPU. Матрицы квантуются один �
 Лучшие параметры — work/runs/tune/<модель>_<тип>.json, их подхватывает train.py --params tuned.
 
     python tune.py --model xgb --trials 60
+    python tune.py --model xgb --rounds 100 --early 20   # подбор под короткий бюджет (раздел 24)
     python tune.py --model cat --trials 30 --target _prim
 """
 import argparse
@@ -20,7 +21,7 @@ import train
 TUNE = config.WORK / 'runs' / 'tune'
 
 
-def xgb_study(Xt, Xv, labels, trials: int, storage: str, suffix: str) -> dict:
+def xgb_study(Xt, Xv, labels, trials: int, storage: str, suffix: str, budget=(4000, 200)) -> dict:
     import xgboost as xgb
     dt = xgb.QuantileDMatrix(Xt, max_bin=256)
     dv = xgb.QuantileDMatrix(Xv, ref=dt)
@@ -42,8 +43,8 @@ def xgb_study(Xt, Xv, labels, trials: int, storage: str, suffix: str) -> dict:
                  'reg_alpha': trial.suggest_float('reg_alpha', 1e-3, 10, log=True),
                  'gamma': trial.suggest_float('gamma', 0, 10),
                  'max_delta_step': trial.suggest_float('max_delta_step', 0, 5)}
-            b = xgb.train(p, dt, num_boost_round=4000, evals=[(dv, 'val')], early_stopping_rounds=200,
-                          verbose_eval=False)
+            b = xgb.train(p, dt, num_boost_round=budget[0], evals=[(dv, 'val')],
+                          early_stopping_rounds=budget[1], verbose_eval=False)
             trial.set_user_attr('iterations', b.best_iteration + 1)
             return float(b.best_score)
 
@@ -51,7 +52,7 @@ def xgb_study(Xt, Xv, labels, trials: int, storage: str, suffix: str) -> dict:
     return best
 
 
-def cat_study(Xt, Xv, labels, trials: int, storage: str, suffix: str) -> dict:
+def cat_study(Xt, Xv, labels, trials: int, storage: str, suffix: str, budget=(4000, 200)) -> dict:
     from catboost import CatBoostClassifier, Pool
     best = {}
     for tp, (yt, yv) in labels.items():
@@ -59,8 +60,8 @@ def cat_study(Xt, Xv, labels, trials: int, storage: str, suffix: str) -> dict:
 
         def objective(trial: optuna.Trial) -> float:
             from sklearn.metrics import average_precision_score
-            p = {'iterations': 4000, 'task_type': 'GPU', 'devices': '0', 'loss_function': 'Logloss',
-                 'od_type': 'Iter', 'od_wait': 200, 'use_best_model': True, 'verbose': False,
+            p = {'iterations': budget[0], 'task_type': 'GPU', 'devices': '0', 'loss_function': 'Logloss',
+                 'od_type': 'Iter', 'od_wait': budget[1], 'use_best_model': True, 'verbose': False,
                  'gpu_ram_part': 0.8, 'border_count': 254,
                  'depth': trial.suggest_int('depth', 4, 10),
                  'learning_rate': trial.suggest_float('learning_rate', 0.005, 0.2, log=True),
@@ -105,6 +106,8 @@ def main() -> None:
     ap.add_argument('--target', default='', choices=['', '_prim'])
     ap.add_argument('--step', type=int, default=3)
     ap.add_argument('--horizon', type=int, default=config.HORIZON)
+    ap.add_argument('--rounds', type=int, default=4000, help='предел числа деревьев (раздел 24)')
+    ap.add_argument('--early', type=int, default=200, help='запас ранней остановки (раздел 24)')
     args = ap.parse_args()
     meta = json.loads((train.FEAT / 'meta.json').read_text(encoding='utf-8'))
     features = meta['features']
@@ -118,8 +121,13 @@ def main() -> None:
     del tr, va
     print(f'подбор {args.model}{args.target}: обучение {Xt.shape}, проверка {Xv.shape}', flush=True)
     storage = f"sqlite:///{(config.WORK / 'optuna.db').as_posix()}"
-    suffix = args.target + ('' if args.horizon == config.HORIZON else f'_h{args.horizon}')
-    {'xgb': xgb_study, 'cat': cat_study}[args.model](Xt, Xv, labels, args.trials, storage, suffix)
+    # Раздел 24: подбор, сделанный при 4000 раундах, под короткий бюджет не годится — у него
+    # своё имя исследования и свой файл, чтобы прежний не затирался.
+    budget = '' if (args.rounds, args.early) == (4000, 200) else f'_r{args.rounds}e{args.early}'
+    suffix = (args.target + budget
+              + ('' if args.horizon == config.HORIZON else f'_h{args.horizon}'))
+    {'xgb': xgb_study, 'cat': cat_study}[args.model](Xt, Xv, labels, args.trials, storage, suffix,
+                                                     (args.rounds, args.early))
 
 
 if __name__ == '__main__':

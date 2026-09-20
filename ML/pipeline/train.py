@@ -111,7 +111,7 @@ def fit_lgbm(Xt, yt, Xv, yv, params: dict | None = None):
 FIT = {'xgb': fit_xgb, 'cat': fit_cat, 'lgbm': fit_lgbm}
 
 
-def tuned(name: str, tp: str, target: str, horizon: int) -> dict | None:
+def tuned(name: str, tp: str, target: str, horizon: int, budget: str = '') -> dict | None:
     """Параметры из tune.py; для LightGBM подбора нет — берутся умолчания.
 
     Подбор делался под обычную цель. Для `--target _conf/_prim` своего файла нет, и раньше эта
@@ -121,7 +121,13 @@ def tuned(name: str, tp: str, target: str, horizon: int) -> dict | None:
     """
     h = '' if horizon == config.HORIZON else f'_h{horizon}'
     d = config.WORK / 'runs' / 'tune'
-    path = d / f'{name}_{tp}{target}{h}.json'
+    path = d / f'{name}_{tp}{target}{budget}{h}.json'
+    if not path.exists() and budget:
+        # подбора под короткий бюджет нет — берём обычный, но говорим об этом (раздел 24)
+        path = d / f'{name}_{tp}{target}{h}.json'
+        if path.exists():
+            print(f'    {name}/{tp}: своего подбора под бюджет {budget[1:]} нет, '
+                  f'взяты параметры полного бюджета')
     if not path.exists() and target:
         path = d / f'{name}_{tp}{h}.json'
         if path.exists():
@@ -242,7 +248,8 @@ def main() -> None:
         scores['recency'] = (-Xv[:, fi[f'since_{tp}']], -Xs[:, fi[f'since_{tp}']])
         for name in models:
             t1 = time.time()
-            model, predict, iters = FIT[name](Xt, yt, Xv, yv, tuned(name, tp, tg, H) if args.params == 'tuned' else None)
+            model, predict, iters = FIT[name](Xt, yt, Xv, yv,
+                                              tuned(name, tp, tg, H, budget) if args.params == 'tuned' else None)
             scores[name] = (predict(Xv).astype(np.float32), predict(Xs).astype(np.float32))
             print(f'  {name}: {iters} деревьев за {time.time() - t1:.0f} с', flush=True)
             if name == 'xgb':
