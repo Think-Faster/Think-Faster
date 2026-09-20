@@ -27,7 +27,8 @@ import config
 import metrics
 
 SPLITS = {'main': [2022, 2023, 2024], 'long': [2019, 2020, 2022, 2023, 2024]}
-WEATHER_TAG = {'': '', 'base': '_weather', 'ext': '_weather_ext', 'both': '_weather_both'}
+WEATHER_TAG = {'': '', 'base': '_weather', 'ext': '_weather_ext', 'hum': '_weather_hum',
+               'both': '_weather_both'}
 COMBO_TAG = {'': '', 'pairs': '_combo', 'spread': '_spread', 'both': '_combo_spread'}
 FEAT = config.WORK / 'features'
 
@@ -122,10 +123,11 @@ def main() -> None:
     ap.add_argument('--types', default=','.join(config.TYPES))
     ap.add_argument('--step', type=int, default=3, help='шаг по часам в обучении: соседние часы почти одинаковы')
     ap.add_argument('--horizon', type=int, default=config.HORIZON)
-    ap.add_argument('--target', default='', choices=['', '_prim'],
-                    help='_prim — только первичные эпизоды: такого же не было 7 сут')
+    ap.add_argument('--target', default='', choices=['', '_prim', '_conf'],
+                    help='_prim — только первичные эпизоды: такого же не было 7 сут; '
+                         '_conf — только те, на которые приехала бригада')
     ap.add_argument('--params', default='default', choices=['default', 'tuned'])
-    ap.add_argument('--weather', default='', choices=['', 'base', 'ext', 'both'],
+    ap.add_argument('--weather', default='', choices=['', 'base', 'ext', 'hum', 'both'],
                     help='добавить признаки погоды из weather.py: набор ТЗ, расширенный или оба')
     ap.add_argument('--combo', default='', choices=['', 'pairs', 'spread', 'both'],
                     help='добавить связки соседних датчиков и/или разброс по пикетам из combo.py')

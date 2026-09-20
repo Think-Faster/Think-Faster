@@ -5,7 +5,12 @@
 - `base` — то, что записано в ТЗ: температура, осадки, приземное давление;
 - `ext` — то, что ближе к механике аварий в коллекторе: снег и его таяние, влажность грунта,
   порывы ветра, расход реки (GloFAS, суточный). Подтопление коллектора идёт не от дождя за сутки,
-  а от талой воды и насыщенного грунта; порывы ветра — от них рвётся питание.
+  а от талой воды и насыщенного грунта; порывы ветра — от них рвётся питание;
+- `hum` — конденсат и сухость: влажность, точка росы, солнечная радиация, дефицит давления пара, а
+  с ними производственный календарь (isdayoff.ru). Стенки коллектора держат температуру месячного
+  среднего, и когда точка росы выше неё — на них выпадает роса: это заливает контакты и даёт отказы
+  датчиков, не видные ни по дождю, ни по грунту. Обратный край того же ряда — сухой воздух, при
+  котором горит легче. Календарь отвечает за людей: в выходные и праздники на объектах никого.
 
 Признаки общие для всех объектов — зависят только от часа, поэтому лежат отдельной таблицей
 «час → погода» и приклеиваются к витрине по `h` (`train.py --weather base|ext|both`). Витрина при
@@ -39,10 +44,14 @@ ARCHIVE = ('https://archive-api.open-meteo.com/v1/archive?latitude={lat}&longitu
 FLOOD = ('https://flood-api.open-meteo.com/v1/flood?latitude={lat}&longitude={lon}'
          '&start_date={a}&end_date={b}&daily=river_discharge')
 PACKS = {'base': ['temperature_2m', 'precipitation', 'surface_pressure'],
-         'ext': ['snow_depth', 'soil_moisture_0_to_7cm', 'soil_moisture_7_to_28cm', 'wind_gusts_10m']}
+         'ext': ['snow_depth', 'soil_moisture_0_to_7cm', 'soil_moisture_7_to_28cm', 'wind_gusts_10m'],
+         'hum': ['relative_humidity_2m', 'dew_point_2m', 'shortwave_radiation',
+                 'vapour_pressure_deficit']}
 SHORT = {'temperature_2m': 'temp', 'precipitation': 'prec', 'surface_pressure': 'press',
          'snow_depth': 'snow', 'soil_moisture_0_to_7cm': 'soil0', 'soil_moisture_7_to_28cm': 'soil28',
-         'wind_gusts_10m': 'gust'}
+         'wind_gusts_10m': 'gust', 'relative_humidity_2m': 'rh', 'dew_point_2m': 'dew',
+         'shortwave_radiation': 'rad', 'vapour_pressure_deficit': 'vpd'}
+CALENDAR = 'https://isdayoff.ru/api/getdata?year={y}'   # производственный календарь России
 RAIN = 0.5  # мм/ч: ниже этого — морось, «дождь был» не считаем
 
 
@@ -60,10 +69,19 @@ def fetch(pack: str) -> dict:
     raw = get(ARCHIVE.format(lat=LAT, lon=LON, a=START.date(), b=END.date(), vars=','.join(PACKS[pack])))
     if pack == 'ext':
         raw['flood'] = get(FLOOD.format(lat=LAT, lon=LON, a=START.date(), b=END.date()))['daily']
+    if pack == 'hum':
+        raw['dayoff'] = {y: get_text(CALENDAR.format(y=y))
+                         for y in range(START.year, config.DATA_END.year + 1)}
     config.WORK.mkdir(parents=True, exist_ok=True)
     path(pack, 'json').write_text(json.dumps(raw, ensure_ascii=False), encoding='utf-8')
     print('скачано', len(raw['hourly']['time']), 'часов →', path(pack, 'json'), flush=True)
     return raw
+
+
+def get_text(url: str) -> str:
+    print('качаю', url, flush=True)
+    with urllib.request.urlopen(url, timeout=180) as r:
+        return r.read().decode('utf-8').strip()
 
 
 def series(raw: dict, pack: str) -> dict[str, np.ndarray]:
@@ -80,6 +98,15 @@ def series(raw: dict, pack: str) -> dict[str, np.ndarray]:
             x = x[idx]
             print(f'  {SHORT[src]}: заполнено {miss} пропусков', flush=True)
         out[SHORT[src]] = x
+    if 'dayoff' in raw:
+        # календарь по суткам: 1 — выходной или праздник; год START может начаться не с 1 января
+        by_year = {int(y): v for y, v in raw['dayoff'].items()}
+        days = []
+        for y in sorted(by_year):
+            days.extend(1.0 if c == '1' else 0.0 for c in by_year[y])
+        skip = (START - datetime(min(by_year), 1, 1)).days
+        x = np.repeat(np.array(days[skip:], np.float32), 24)
+        out['dayoff'] = np.concatenate([x, np.zeros(max(0, n - len(x)), np.float32)])[:n]
     if 'flood' in raw:
         # суточный расход: в час h берём значение за прошлые сутки, сегодняшнего система ещё не знает
         d = np.array([np.nan if v is None else v for v in raw['flood']['river_discharge']], np.float32)
@@ -145,11 +172,38 @@ def ext_features(s: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     return f
 
 
+def hum_features(s: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    rh, dew, rad, vpd, temp = s['rh'], s['dew'], s['rad'], s['vpd'], s['temp']
+    f = {'wx_rh': rh, 'wx_dew': dew, 'wx_rad': rad, 'wx_vpd': vpd}
+    # стенки коллектора под землёй держат температуру примерно месячного среднего воздуха; когда
+    # точка росы выше неё, на них выпадает конденсат — вода на контактах без единой капли дождя
+    wall = window_sum(temp, 720) / 720
+    cond = dew - wall
+    f['wx_cond'] = cond
+    f['wx_wall'] = wall
+    for w in (24, 72, 168):
+        f[f'wx_cond_hours_{w}h'] = window_sum((cond > 0).astype(np.float32), w)
+    f['wx_cond_max_24h'] = window_ext(cond, 24, np.max)
+    f['wx_rh_mean_24h'] = window_sum(rh, 24) / 24
+    f['wx_rh_max_24h'] = window_ext(rh, 24, np.max)
+    f['wx_vpd_mean_24h'] = window_sum(vpd, 24) / 24
+    f['wx_vpd_max_72h'] = window_ext(vpd, 72, np.max)
+    f['wx_rad_24h'] = window_sum(rad, 24)
+    if 'dayoff' in s:
+        off = s['dayoff']
+        f['wx_dayoff'] = off
+        f['wx_dayoff_run'] = window_sum(off, 72)          # сколько нерабочих часов подряд позади
+        back = np.zeros_like(off)
+        back[24:] = ((off[24:] == 0) & (off[:-24] == 1)).astype(np.float32)
+        f['wx_back_to_work'] = window_sum(back, 24)       # первый рабочий день после выходных
+    return f
+
+
 def build(raw: dict, pack: str) -> None:
     s = series(raw, pack)
-    if pack == 'ext' and path('base', 'json').exists():  # температура нужна для отопительного сезона
+    if pack in ('ext', 'hum') and path('base', 'json').exists():   # нужна температура
         s.update(series(json.loads(path('base', 'json').read_text(encoding='utf-8')), 'base'))
-    f = base_features(s) if pack == 'base' else ext_features(s)
+    f = {'base': base_features, 'ext': ext_features, 'hum': hum_features}[pack](s)
     lo = BACK * 24  # первые 60 суток были нужны только для окон
     cols = {'h': np.arange(NH, dtype=np.int32)}
     cols.update({k: v[lo:lo + NH].astype(np.float32) for k, v in f.items()})

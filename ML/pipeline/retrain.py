@@ -1,0 +1,178 @@
+"""Шаг 16. Дообучение на новых данных: как часто, на каком окне и каким способом (ТЗ §8).
+
+ТЗ требует модуль дообучения, но не говорит, как именно дообучать. Вариантов несколько, и они
+дают разный результат: копить все данные, держать скользящее окно, взвешивать старое меньше или
+достраивать деревья поверх прошлой модели. Здесь они сравниваются честно — прогоном вперёд по
+времени, как это будет работать в эксплуатации.
+
+**Прогон вперёд.** Время режется на отрезки по `--fold` суток. Перед каждым отрезком модель
+переобучается на данных, доступных к этому моменту, и прогнозирует весь отрезок. Между обучением и
+прогнозом остаётся разрыв в горизонт H: иначе метка обучающей строки заглядывает в отрезок, который
+мы ещё не видели. Порог выбирается на последних двух неделях перед переобучением и идёт на отрезок
+без изменений — ровно так, как это будет в проде.
+
+**Стратегии.**
+
+| ключ | что делает |
+|---|---|
+| `all` | всё накопленное прошлое (окно растёт) |
+| `d90`, `d180`, `d365` | скользящее окно в 90/180/365 суток, старое отрезается |
+| `decay90`, `decay180` | всё прошлое, но вес строки падает вдвое каждые 90/180 суток |
+| `warm` | деревья достраиваются поверх модели прошлого отрезка, только на новых данных |
+
+Считается не PR-AUC, а то, что видит диспетчер: сколько сигналов за прогон, сколько из них ложных,
+сколько эпизодов поймано. Итог — таблица «какая стратегия для какого типа лучше».
+
+    python retrain.py --types fire,equipment --fold 90
+    python retrain.py --strategies all,d365,warm --model xgb
+"""
+import argparse
+import json
+import time
+
+import numpy as np
+import polars as pl
+
+import config
+import metrics
+import train
+
+FEAT = config.WORK / 'features'
+DAY = 24
+VAL_DAYS = 14          # последние сутки перед переобучением — на раннюю остановку и порог
+STRATEGIES = ['all', 'd90', 'd180', 'd365', 'decay90', 'decay180', 'warm']
+
+
+def pick(h: np.ndarray, lo: int | None, hi: int) -> np.ndarray:
+    m = h < hi
+    return m if lo is None else m & (h >= lo)
+
+
+def weights(h: np.ndarray, now: int, half_life_days: int) -> np.ndarray:
+    """Вес строки падает вдвое каждые half_life суток — старое забывается плавно."""
+    age = (now - h) / (half_life_days * DAY)
+    return np.exp2(-age).astype(np.float32)
+
+
+def fold_fit(name, Xt, yt, wt, Xv, yv, params, prev):
+    """Обучение одного отрезка. prev — модель прошлого отрезка для стратегии warm."""
+    if name != 'xgb':
+        return train.FIT[name](Xt, yt, Xv, yv, params)
+    import xgboost as xgb
+    p = {'objective': 'binary:logistic', 'eval_metric': 'aucpr', 'tree_method': 'hist',
+         'device': 'cuda', 'max_depth': 8, 'learning_rate': 0.05, 'subsample': 0.8,
+         'colsample_bytree': 0.6, 'min_child_weight': 5, 'max_bin': 256, 'reg_lambda': 1.0}
+    p.update(params or {})
+    dt = xgb.QuantileDMatrix(Xt, yt, weight=wt, max_bin=p['max_bin'])
+    dv = xgb.QuantileDMatrix(Xv, yv, ref=dt)
+    rounds = 300 if prev is not None else 4000
+    booster = xgb.train(p, dt, num_boost_round=rounds, evals=[(dv, 'val')],
+                        early_stopping_rounds=200, verbose_eval=False, xgb_model=prev)
+    best = booster.best_iteration + 1
+    return booster, lambda X: booster.inplace_predict(X, iteration_range=(0, best)), best
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--types', default=','.join(config.TYPES))
+    ap.add_argument('--model', default='xgb')
+    ap.add_argument('--strategies', default=','.join(STRATEGIES))
+    ap.add_argument('--fold', type=int, default=90, help='как часто переобучаем, суток')
+    ap.add_argument('--horizon', type=int, default=config.HORIZON)
+    ap.add_argument('--start', default='2025-01-01', help='с какого дня идёт прогон вперёд')
+    ap.add_argument('--step', type=int, default=3, help='прореживание обучающих часов')
+    ap.add_argument('--budget', type=float, default=10.0, help='тревог в сутки для порога')
+    args = ap.parse_args()
+    H, types = args.horizon, args.types.split(',')
+    meta = json.loads((FEAT / 'meta.json').read_text(encoding='utf-8'))
+    feats = meta['features']
+    tcols = [f'next_{tp}' for tp in types]
+
+    t0 = time.time()
+    years = [2022, 2023, 2024, 2025, 2026]
+    pool = train.load(years, args.step, ['object_id', 'h'] + tcols + feats)
+    ev = train.load([2025, 2026], 1, ['object_id', 'h'] + tcols + feats)
+    Xp, Xe = train.matrix(pool, feats), train.matrix(ev, feats)
+    pool, ev = pool.select(['object_id', 'h'] + tcols), ev.select(['object_id', 'h'] + tcols)
+    hp, he = pool['h'].to_numpy(), ev['h'].to_numpy()
+    oe = ev['object_id'].to_numpy()
+    start = int((np.datetime64(args.start) - np.datetime64('2019-01-01')) / np.timedelta64(1, 'h'))
+    edges = list(range(start, int(he.max()) - args.fold * DAY // 2, args.fold * DAY))
+    print(f'обучающий пул {Xp.shape}, прогон {Xe.shape}, отрезков {len(edges)}, '
+          f'{round(time.time() - t0)} с', flush=True)
+
+    rows = []
+    for tp in types:
+        yp, ye = (pool[f'next_{tp}'].to_numpy() <= H), (ev[f'next_{tp}'].to_numpy() <= H)
+        yp, ye = yp.astype(np.int8), ye.astype(np.int8)
+        nxt_e = ev[f'next_{tp}'].to_numpy()
+        params = train.tuned(args.model, tp, '', H) or {}
+        for st in args.strategies.split(','):
+            pred = np.zeros(len(he), np.float32)
+            alarm = np.zeros(len(he), bool)
+            prev, trees, fitted = None, [], 0
+            for t in edges:
+                cut = t - H                       # метка обучающей строки не должна видеть отрезок
+                lo = None
+                if st.startswith('d') and st[1:].isdigit():
+                    lo = cut - int(st[1:]) * DAY
+                elif st == 'warm' and prev is not None:
+                    lo = cut - args.fold * DAY    # только то, что появилось с прошлого раза
+                vlo = cut - VAL_DAYS * DAY
+                tr = pick(hp, lo, vlo)
+                va = pick(hp, vlo, cut)
+                if tr.sum() < 5000 or va.sum() < 500 or yp[tr].sum() < 20 or yp[va].sum() < 5:
+                    continue
+                w = weights(hp[tr], cut, int(st[5:])) if st.startswith('decay') else None
+                model, predict, n = fold_fit(args.model, Xp[tr], yp[tr], w, Xp[va], yp[va],
+                                             params, prev if st == 'warm' else None)
+                trees.append(n)
+                fitted += 1
+                if st == 'warm':
+                    prev = model
+                # порог по бюджету диспетчера, снятый на тех же последних двух неделях
+                pv = predict(Xp[va])
+                thr = metrics.threshold_for_rate(pv, args.budget, int(va.sum()),
+                                                 VAL_DAYS * (args.step if args.step else 1))
+                sl = (he >= t) & (he < t + args.fold * DAY)
+                if not sl.any():
+                    continue
+                ps = predict(Xe[sl])
+                pred[sl] = ps
+                alarm[sl] = ps >= thr
+            if not fitted:
+                print(f'  {config.TYPE_NAMES[tp]:18} {st:9} нет данных', flush=True)
+                continue
+            seen = pred > 0
+            m = metrics.evaluate(oe[seen], he[seen], nxt_e[seen], pred[seen],
+                                 float(np.min(pred[alarm & seen])) if (alarm & seen).any() else 1.1,
+                                 H, metrics.RUN_CAP)
+            sig, true = metrics.signals(oe[seen], he[seen], ye[seen], alarm[seen])
+            days = float(seen.sum()) / max(len(np.unique(oe)), 1) / DAY
+            rows.append({'тип': config.TYPE_NAMES[tp], 'стратегия': st, 'переобучений': fitted,
+                         'деревьев': int(np.mean(trees)), 'PR-AUC': round(float(
+                             metrics.average_precision_score(ye[seen], pred[seen])), 3),
+                         'сигналов': sig, 'ложных': sig - true,
+                         'ложных в сутки': round((sig - true) / max(days, 1), 2),
+                         'доля верных': round(true / sig, 3) if sig else float('nan'),
+                         'поймано эпизодов': m['caught'], 'эпизодов': m['episodes']})
+            r = rows[-1]
+            print(f"  {r['тип']:18} {st:9} PR-AUC {r['PR-AUC']:.3f} | сигналов {r['сигналов']:5} "
+                  f"ложных {r['ложных']:5} ({r['ложных в сутки']}/сут) | доля верных "
+                  f"{r['доля верных']:.3f} | эпизодов {r['поймано эпизодов']}/{r['эпизодов']} | "
+                  f"{r['переобучений']} переобучений, {r['деревьев']} дер.", flush=True)
+
+    out = pl.DataFrame(rows)
+    out.write_csv(config.WORK / 'retrain.csv')
+    with open(config.WORK / 'retrain.md', 'w', encoding='utf-8') as f:
+        f.write(f'Прогон вперёд с {args.start}, переобучение раз в {args.fold} суток, '
+                f'модель {args.model}, порог под {args.budget} тревог в сутки.\n\n')
+        f.write('| ' + ' | '.join(out.columns) + ' |\n')
+        f.write('|' + '---|' * len(out.columns) + '\n')
+        for r in out.iter_rows():
+            f.write('| ' + ' | '.join(str(x).replace('.', ',') for x in r) + ' |\n')
+    print(f'готово за {round(time.time() - t0)} с → retrain.md', flush=True)
+
+
+if __name__ == '__main__':
+    main()
