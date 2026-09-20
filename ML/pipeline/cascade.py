@@ -19,6 +19,7 @@
 
     python cascade.py --run main_h24_tuned
     python cascade.py --types fire,equipment --keep 0.95,0.9,0.8
+    python cascade.py --scale insample          # отброшенный вариант выбора рабочей точки
 """
 import argparse
 import json
@@ -100,6 +101,34 @@ def mart(year: int, rows: np.ndarray, feats: list[str]) -> np.ndarray:
     return np.ascontiguousarray(df.to_numpy(), dtype=np.float32)
 
 
+def oof(X: np.ndarray, y: np.ndarray, cols: list[str], p: dict, folds: int) -> np.ndarray:
+    """Оценки второй ступени, полученные вне собственного обучения.
+
+    Рабочая точка задаётся квантилью оценок истинных тревог: «сохранить 0,95» — это порог, ниже
+    которого остаются 5% истинных. Брать эту квантиль по тем же тревогам, на которых модель
+    училась, нельзя: своим обучающим примерам она ставит оценки выше, чем чужим, порог уезжает
+    вверх, и на тесте гасится больше истинных, чем обещано. Поэтому шкала строится по блокам:
+    модель учится на четырёх пятых тревог и оценивает оставшуюся пятую.
+
+    Блоки идут подряд по времени, а не вперемешку: тревоги одного объекта в соседние часы почти
+    одинаковы, и при случайном разбиении половина серии оказалась бы в обучении, а половина в
+    оценке — это то же подглядывание, только незаметное.
+    """
+    import xgboost as xgb
+    out = np.zeros(len(y), np.float32)
+    bounds = np.linspace(0, len(y), folds + 1).astype(int)
+    for a, b_ in zip(bounds[:-1], bounds[1:]):
+        te = np.zeros(len(y), bool)
+        te[a:b_] = True
+        if y[~te].sum() < 5 or not te.any():
+            out[te] = np.nan
+            continue
+        d = xgb.DMatrix(X[~te], y[~te], feature_names=cols)
+        m = xgb.train(p, d, num_boost_round=300, verbose_eval=False)
+        out[te] = m.predict(xgb.DMatrix(X[te], feature_names=cols))
+    return out
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument('--run', default='main_h24_tuned')
@@ -107,6 +136,9 @@ def main() -> None:
     ap.add_argument('--horizon', type=int, default=config.HORIZON)
     ap.add_argument('--keep', default='1.0,0.95,0.9,0.8,0.7',
                     help='какую долю истинных тревог проверки сохраняем')
+    ap.add_argument('--scale', default='oof', choices=['oof', 'insample'],
+                    help='по каким оценкам выбирать рабочую точку: вне обучения или по обучающим')
+    ap.add_argument('--folds', type=int, default=5, help='блоков для оценок вне обучения')
     args = ap.parse_args()
     import xgboost as xgb
     H = args.horizon
@@ -115,8 +147,11 @@ def main() -> None:
     sp = pl.read_parquet(spread) if spread.exists() else None
     con = duckdb.connect(str(config.WORK / 'tf.duckdb'), read_only=True)
 
+    how = ('по оценкам вне обучения, блоками по времени' if args.scale == 'oof'
+           else 'по обучающим оценкам — вариант с подглядыванием, оставлен для сверки')
     print(f'Вторая ступень обучена на тревогах проверки 2025, применена к тесту 2026, прогон '
-          f'{args.run}. Порог первой ступени — по лучшему F1 на проверке.\n')
+          f'{args.run}. Порог первой ступени — по лучшему F1 на проверке. '
+          f'Рабочая точка выбрана {how}.\n')
     print('| тип | рабочая точка | сигналов | из них ложных | доля верных | поймано эпизодов |')
     print('|---|---|---:|---:|---:|---:|')
     for tp in args.types.split(','):
@@ -142,7 +177,11 @@ def main() -> None:
              'min_child_weight': 20, 'reg_lambda': 5.0}
         d = xgb.DMatrix(Xv, yv[iv], feature_names=cols)
         b = xgb.train(p, d, num_boost_round=300, verbose_eval=False)
-        qv = b.predict(d)
+        if args.scale == 'oof':
+            o = np.argsort(hv[iv], kind='stable')      # блоки должны идти подряд по времени
+            qv, yq = oof(Xv[o], yv[iv][o], cols, p, args.folds), yv[iv][o]
+        else:
+            qv, yq = b.predict(d), yv[iv]
         qs = b.predict(xgb.DMatrix(Xs, feature_names=cols))
 
         base = metrics.evaluate(os_, hs, ns, ps, thr, H, metrics.RUN_CAP)
@@ -150,7 +189,7 @@ def main() -> None:
         print(f'| {name} | без второй ступени | {sig} | {sig - true} | '
               f"{1 - (sig - true) / sig:.3f} | {base['caught']} из {base['episodes']} |"
               .replace('.', ','))
-        pos = qv[yv[iv] == 1]
+        pos = qv[(yq == 1) & np.isfinite(qv)]
         for keep in [float(x) for x in args.keep.split(',')]:
             t2 = float(np.quantile(pos, 1 - keep)) if keep < 1 else float(pos.min())
             mask = np.zeros(len(as_), bool)

@@ -25,6 +25,7 @@
 
     python retrain.py --types fire,equipment --fold 90
     python retrain.py --strategies all,d365,warm --model xgb
+    python retrain.py --fold 30 --rounds 1500 --early 100   # быстрее, если отрезков много
 """
 import argparse
 import json
@@ -54,7 +55,7 @@ def weights(h: np.ndarray, now: int, half_life_days: int) -> np.ndarray:
     return np.exp2(-age).astype(np.float32)
 
 
-def fold_fit(name, Xt, yt, wt, Xv, yv, params, prev):
+def fold_fit(name, Xt, yt, wt, Xv, yv, params, prev, rounds_max, early):
     """Обучение одного отрезка. prev — модель прошлого отрезка для стратегии warm."""
     if name != 'xgb':
         return train.FIT[name](Xt, yt, Xv, yv, params)
@@ -65,11 +66,29 @@ def fold_fit(name, Xt, yt, wt, Xv, yv, params, prev):
     p.update(params or {})
     dt = xgb.QuantileDMatrix(Xt, yt, weight=wt, max_bin=p['max_bin'])
     dv = xgb.QuantileDMatrix(Xv, yv, ref=dt)
-    rounds = 300 if prev is not None else 4000
+    rounds = 300 if prev is not None else rounds_max
     booster = xgb.train(p, dt, num_boost_round=rounds, evals=[(dv, 'val')],
-                        early_stopping_rounds=200, verbose_eval=False, xgb_model=prev)
+                        early_stopping_rounds=early, verbose_eval=False, xgb_model=prev)
     best = booster.best_iteration + 1
     return booster, lambda X: booster.inplace_predict(X, iteration_range=(0, best)), best
+
+
+def dump(rows: list[dict], args) -> None:
+    """Сохранить то, что уже посчитано.
+
+    Прогон вперёд идёт часами, а писать результат только в конце нельзя: сбой или нехватка
+    времени посередине оставляют пустой файл и ночь впустую. Таблица переписывается после каждой
+    досчитанной стратегии, так что в файле всегда лежит всё, что успело сойтись.
+    """
+    out = pl.DataFrame(rows)
+    out.write_csv(config.WORK / 'retrain.csv')
+    head = (f'Прогон вперёд с {args.start}, переобучение раз в {args.fold} суток, '
+            f'модель {args.model}, порог под {args.budget} тревог в сутки.')
+    with open(config.WORK / 'retrain.md', 'w', encoding='utf-8') as f:
+        f.write(head + '\n\n| ' + ' | '.join(out.columns) + ' |\n')
+        f.write('|' + '---|' * len(out.columns) + '\n')
+        for r in out.iter_rows():
+            f.write('| ' + ' | '.join(str(x).replace('.', ',') for x in r) + ' |\n')
 
 
 def main() -> None:
@@ -82,6 +101,9 @@ def main() -> None:
     ap.add_argument('--start', default='2025-01-01', help='с какого дня идёт прогон вперёд')
     ap.add_argument('--step', type=int, default=3, help='прореживание обучающих часов')
     ap.add_argument('--budget', type=float, default=10.0, help='тревог в сутки для порога')
+    ap.add_argument('--rounds', type=int, default=4000, help='потолок деревьев на отрезок')
+    ap.add_argument('--early', type=int, default=200,
+                    help='ранняя остановка: раундов без улучшения')
     args = ap.parse_args()
     H, types = args.horizon, args.types.split(',')
     meta = json.loads((FEAT / 'meta.json').read_text(encoding='utf-8'))
@@ -125,7 +147,8 @@ def main() -> None:
                     continue
                 w = weights(hp[tr], cut, int(st[5:])) if st.startswith('decay') else None
                 model, predict, n = fold_fit(args.model, Xp[tr], yp[tr], w, Xp[va], yp[va],
-                                             params, prev if st == 'warm' else None)
+                                             params, prev if st == 'warm' else None,
+                                             args.rounds, args.early)
                 trees.append(n)
                 fitted += 1
                 if st == 'warm':
@@ -161,16 +184,8 @@ def main() -> None:
                   f"ложных {r['ложных']:5} ({r['ложных в сутки']}/сут) | доля верных "
                   f"{r['доля верных']:.3f} | эпизодов {r['поймано эпизодов']}/{r['эпизодов']} | "
                   f"{r['переобучений']} переобучений, {r['деревьев']} дер.", flush=True)
+            dump(rows, args)
 
-    out = pl.DataFrame(rows)
-    out.write_csv(config.WORK / 'retrain.csv')
-    with open(config.WORK / 'retrain.md', 'w', encoding='utf-8') as f:
-        f.write(f'Прогон вперёд с {args.start}, переобучение раз в {args.fold} суток, '
-                f'модель {args.model}, порог под {args.budget} тревог в сутки.\n\n')
-        f.write('| ' + ' | '.join(out.columns) + ' |\n')
-        f.write('|' + '---|' * len(out.columns) + '\n')
-        for r in out.iter_rows():
-            f.write('| ' + ' | '.join(str(x).replace('.', ',') for x in r) + ' |\n')
     print(f'готово за {round(time.time() - t0)} с → retrain.md', flush=True)
 
 
