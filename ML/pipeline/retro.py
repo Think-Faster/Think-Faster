@@ -116,6 +116,21 @@ def load_models(run: str) -> dict:
     return out
 
 
+def thresholds(run: str) -> dict:
+    """Пороги прогона из всех его отчётов сразу.
+
+    Раньше читался единственный файл `report_xgb_cat.json` — имя, которое получается только у
+    прогона, обученного командой `--models xgb,cat`. У короткой базы (раздел 24) семейства
+    обучались порознь, и файлов два. Собираем из всех, что есть.
+    """
+    out: dict = {}
+    for p in sorted((config.WORK / 'runs' / run).glob('report_*.json')):
+        for tp, block in json.loads(p.read_text(encoding='utf-8')).items():
+            out.setdefault(tp, {'scores': {}})['scores'].update(block['scores'])
+    assert out, f'у прогона {run} нет ни одного отчёта'
+    return out
+
+
 def md(df: pl.DataFrame) -> str:
     fmt = lambda v: f'{v:.3f}' if isinstance(v, float) else str(v)
     return '\n'.join(['| ' + ' | '.join(df.columns) + ' |', '|' + '---|' * len(df.columns)] +
@@ -130,7 +145,7 @@ def main() -> None:
     t = time.time()
     meta = json.loads((config.WORK / 'features' / 'meta.json').read_text(encoding='utf-8'))
     feats = meta['features']
-    report = json.loads((config.WORK / 'runs' / args.run / 'report_xgb_cat.json').read_text(encoding='utf-8'))
+    report = thresholds(args.run)
     H = config.HORIZON
     ts = cutoffs(args.days)
     hours = [int((x - ft.T0).total_seconds() // 3600) - 1 for x in ts]
