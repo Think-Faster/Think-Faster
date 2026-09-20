@@ -226,8 +226,9 @@ python horizon.py --models xgb --hours 6,12,24,48,72   # 12. свой гориз
 Рабочая точка — `results/models.md`, раздел 11:
 
 ```bash
-python operating.py --run main_h24_tuned --model xgb
-python operating.py --match main_h24,main_h24_conf  # раздел 21: цели обучения при равной полноте --precision 0.5,0.7 --budget 10 --topk 3
+python operating.py --run main_h24_tuned --model xgb --precision 0.5,0.7 --budget 10 --topk 3
+python operating.py --match main_h24,main_h24_conf   # раздел 21: цели обучения при равной полноте
+python operating.py --match main_h24,main_h24+main_h24_conf   # раздел 21: смесь рангов
 python operating.py --run main_h24_tuned --model recency --topk 3 --target _prim
 ```
 
@@ -242,7 +243,7 @@ python maintenance.py --mode suppress --window 2
 
 Зависимости — `ML/requirements.txt` (torch со сборкой под CUDA 12.4).
 
-Снижение ложных и дообучение — `results/analytics.md`, разделы 10–21:
+Снижение ложных и дообучение — `results/analytics.md`, разделы 10–22:
 
 ```bash
 python factalert.py                                # 13. канал «по факту»: правила объявления
@@ -255,4 +256,5 @@ python retrain.py --fold 90                        # 17. прогон вперё
 python weather.py hum                              #     влажность, конденсат, календарь
 python train.py --models xgb,cat --params tuned --weather hum
 python train.py --models xgb,cat --target _conf    #     цель «подтверждено выездом»
+python train.py --models xgb --soft 0.5            #     раздел 22: мягкая цель
 ```

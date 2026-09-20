@@ -14,6 +14,7 @@
     python train.py --models lgbm --branch long
     python train.py --models xgb,cat --params tuned --weather base   # то же с погодой (weather.py)
     python train.py --models xgb,cat --params tuned --combo pairs   # …и со связками датчиков (combo.py)
+    python train.py --models xgb --soft 0.5   # мягкая цель: неподтверждённый эпизод весит половину
 """
 import argparse
 import json
@@ -126,6 +127,9 @@ def main() -> None:
     ap.add_argument('--target', default='', choices=['', '_prim', '_conf'],
                     help='_prim — только первичные эпизоды: такого же не было 7 сут; '
                          '_conf — только те, на которые приехала бригада')
+    ap.add_argument('--soft', type=float, default=1.0,
+                    help='вес неподтверждённых выездом эпизодов в обучении: 1 — обычная цель, '
+                         '0 — как --target _conf, промежуточные — мягкая метка (раздел 22)')
     ap.add_argument('--params', default='default', choices=['default', 'tuned'])
     ap.add_argument('--weather', default='', choices=['', 'base', 'ext', 'hum', 'both'],
                     help='добавить признаки погоды из weather.py: набор ТЗ, расширенный или оба')
@@ -136,7 +140,10 @@ def main() -> None:
     types = args.types.split(',')
     H = args.horizon
     tg = args.target
-    tag = (f'{args.branch}_h{H}{tg}' + ('_tuned' if args.params == 'tuned' else '')
+    soft = args.soft
+    assert soft == 1.0 or not tg, '--soft задаёт вес внутри обычной цели, с --target не сочетается'
+    tag = (f'{args.branch}_h{H}{tg}' + ('' if soft == 1.0 else f'_soft{int(round(soft * 100)):02d}')
+           + ('_tuned' if args.params == 'tuned' else '')
            + WEATHER_TAG[args.weather] + COMBO_TAG[args.combo])
 
     meta = json.loads((FEAT / 'meta.json').read_text(encoding='utf-8'))
@@ -175,6 +182,11 @@ def main() -> None:
     for tp in types:
         yt = (tr[f'next_{tp}{tg}'].to_numpy() <= H).astype(np.float32)
         yv = (va[f'next_{tp}{tg}'].to_numpy() <= H).astype(np.float32)
+        if soft != 1.0:
+            # мягкая метка: подтверждённый выездом эпизод — 1, остальные — soft. Проверка остаётся
+            # обычной: ранняя остановка и порог считаются по той же разметке, по которой идёт оценка
+            conf = (tr[f'next_{tp}_conf'].to_numpy() <= H)
+            yt = np.where(yt > 0, np.where(conf, 1.0, soft), 0.0).astype(np.float32)
         print(f'\n== {tp}: доля положительных train {yt.mean():.4f}, val {yv.mean():.4f}', flush=True)
         scores: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         # базовые уровни
