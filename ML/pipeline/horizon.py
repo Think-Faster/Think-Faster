@@ -46,7 +46,7 @@ def main() -> None:
     keys = ['object_id', 'h']
     cols = keys + features + meta['targets']
     t = time.time()
-    tr = train.load(train.SPLITS['main'], args.step, cols)
+    tr = train.load(train.SPLITS['main'][0], args.step, cols)
     va = train.load([2025], 1, cols)
     te = train.load([2026], 1, cols)
     Xt, Xv, Xs = train.matrix(tr, features), train.matrix(va, features), train.matrix(te, features)

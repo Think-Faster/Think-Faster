@@ -63,7 +63,8 @@ def main() -> None:
         base = None
         for run in runs:
             try:
-                va = persist.prepare(run, 'val', 2025, tp, args.model, args.horizon)
+                va = persist.prepare(run, 'val', persist.op.years(run, 'val'), tp, args.model,
+                                     args.horizon)
                 te = persist.prepare(run, 'test', 2026, tp, args.model, args.horizon)
             except FileNotFoundError:
                 continue

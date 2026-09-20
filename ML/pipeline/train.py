@@ -1,7 +1,9 @@
 """Шаг 4. Бустинг по типам инцидентов и базовые уровни (Ф5-1).
 
 Валидация по времени: обучение — 2022–2024 (ветка long добавляет 2019–2020), проверка — 2025
-(ранняя остановка, порог, калибровка), тест — 2026 один раз. По каждому типу своя бинарная модель
+(ранняя остановка, порог, калибровка), тест — 2026 один раз. Ветка `wide` сдвигает границу:
+обучение 2022–2023, проверка 2024–2025 — два года вместо одного, чтобы на проверке нашлись
+кандидаты для рабочей полноты редких и трудных типов (раздел 31). По каждому типу своя бинарная модель
 «начнётся ли эпизод в ближайшие H часов». На GPU — XGBoost и CatBoost, LightGBM — на CPU
 (в pip-сборке нет CUDA), его можно пускать параллельно отдельным процессом.
 
@@ -31,7 +33,14 @@ from sklearn.isotonic import IsotonicRegression
 import config
 import metrics
 
-SPLITS = {'main': [2022, 2023, 2024], 'long': [2019, 2020, 2022, 2023, 2024]}
+# Нарезка по годам: обучение и проверка. Тест всегда 2026 и трогать его нельзя. Ветка `wide`
+# отдаёт проверке два года вместо одного — этого просит раздел 31: на одном 2025 годе отказ
+# оборудования не добирает рабочей полноты 80% ни у одного кандидата, и выбирать не из чего.
+# Цена — два года обучения вместо трёх, так что сравнивать `wide` с `main` честно только между
+# собой, а не с числами остальных разделов.
+SPLITS = {'main': ([2022, 2023, 2024], [2025]),
+          'long': ([2019, 2020, 2022, 2023, 2024], [2025]),
+          'wide': ([2022, 2023], [2024, 2025])}
 WEATHER_TAG = {'': '', 'base': '_weather', 'ext': '_weather_ext', 'hum': '_weather_hum',
                'both': '_weather_both'}
 COMBO_TAG = {'': '', 'pairs': '_combo', 'spread': '_spread', 'both': '_combo_spread'}
@@ -231,8 +240,9 @@ def main() -> None:
     t = time.time()
     keys = ['object_id', 'h']
     cols = keys + meta['features'] + meta['targets']
-    tr = load(SPLITS[args.branch], args.step, cols, wx, cb)
-    va = load([2025], 1, cols, wx, cb)
+    tr_years, va_years = SPLITS[args.branch]
+    tr = load(tr_years, args.step, cols, wx, cb)
+    va = load(va_years, 1, cols, wx, cb)
     te = load([2026], 1, cols, wx, cb)
     Xt, Xv, Xs = matrix(tr, features), matrix(va, features), matrix(te, features)
     tr, va, te = (df.select(keys + meta['targets']) for df in (tr, va, te))  # признаки уже в матрицах

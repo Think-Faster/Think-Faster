@@ -37,10 +37,22 @@ import metrics
 FEAT = config.WORK / 'features'
 
 
-def split(run: str, name: str, year: int, tp: str, model: str, target: str = '') -> tuple:
+def years(run: str, name: str) -> list:
+    """Годы нарезки для прогона. Ветка зашита в начало имени (`main_h24…`, `wide_h24…`), а какие
+    годы она отдаёт проверке — знает train.SPLITS. Тест всегда 2026 и от ветки не зависит."""
+    import train
+    if name == 'test':
+        return [2026]
+    branch = run.partition('/')[0].split('_')[0]
+    return train.SPLITS.get(branch, train.SPLITS['main'])[1]
+
+
+def split(run: str, name: str, year, tp: str, model: str, target: str = '') -> tuple:
+    yy = [year] if isinstance(year, int) else list(year)
     idx = np.load(config.WORK / 'runs' / run / 'preds' / f'index_{name}.npz')
     p = np.load(config.WORK / 'runs' / run / 'preds' / f'{model}_{tp}_{name}.npy')
-    df = pl.scan_parquet(FEAT / f'{year}.parquet').select(['object_id', 'h', f'next_{tp}{target}']).collect()
+    df = pl.concat([pl.scan_parquet(FEAT / f'{y}.parquet')
+                    .select(['object_id', 'h', f'next_{tp}{target}']) for y in yy]).collect()
     obj, h = idx['object_id'], idx['h']
     assert len(df) == len(p) == len(obj), (len(df), len(p), len(obj))
     assert np.array_equal(df['object_id'].to_numpy(), obj) and np.array_equal(df['h'].to_numpy(), h)
@@ -113,7 +125,7 @@ def match(runs: list[str], model: str, H: int, levels: list[float], steps: int,
     оно одинаково выгодно всем прогонам. Чтобы выигрыш не оказался следствием подглядывания,
     тот же расчёт повторяется на проверке (`--on val`): настоящее преимущество держится на обоих.
     """
-    year = {'val': 2025, 'test': 2026}[on]
+    year = years(runs[0], on)
     print('| тип | поймано эпизодов | ' + ' | '.join(f'`{r}`' for r in runs) + ' |')
     print('|---|---|' + '---:|' * len(runs))
     for tp in config.TYPES:
@@ -173,7 +185,7 @@ def main() -> None:
           'доля верных | Recall (эп.) | часов тревоги в сутки | упреждение, ч |')
     print('|---|---|---:|---:|---:|---:|---:|---:|---:|')
     for tp in config.TYPES:
-        ov, hv, nv, pv = split(args.run, 'val', 2025, tp, args.model, args.target)
+        ov, hv, nv, pv = split(args.run, 'val', years(args.run, 'val'), tp, args.model, args.target)
         os_, hs, ns, ps = split(args.run, 'test', 2026, tp, args.model, args.target)
         yv = (nv <= H).astype(np.int8)
         days_v = (hv.max() - hv.min() + 1) / 24

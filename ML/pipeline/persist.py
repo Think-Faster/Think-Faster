@@ -193,7 +193,7 @@ def point(args) -> None:
     days = 181
     for tp in config.TYPES:
         try:
-            va = prepare(args.run, 'val', 2025, tp, args.model, args.horizon)
+            va = prepare(args.run, 'val', op.years(args.run, 'val'), tp, args.model, args.horizon)
             te = prepare(args.run, 'test', 2026, tp, args.model, args.horizon)
         except FileNotFoundError:
             continue
@@ -227,7 +227,8 @@ def main() -> None:
     if args.mode == 'point':
         point(args)
         return
-    part, year = ('test', 2026) if args.on == 'test' else ('val', 2025)
+    part = 'test' if args.on == 'test' else 'val'
+    year = op.years(args.run, part)
 
     names = list(variants(np.zeros((1, 1), np.float32)))
     head = f'Прогон {args.run}, модель {args.model}, ' + ('тест 2026' if args.on == 'test' else 'проверка 2025')

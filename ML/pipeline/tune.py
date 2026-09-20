@@ -113,7 +113,7 @@ def main() -> None:
     features = meta['features']
     types = args.types.split(',')
     cols = features + [f'next_{t}{args.target}' for t in types]
-    tr = train.load(train.SPLITS['main'], args.step, cols)
+    tr = train.load(train.SPLITS['main'][0], args.step, cols)
     va = train.load([2025], 1, cols)
     Xt, Xv = train.matrix(tr, features), train.matrix(va, features)
     labels = {t: tuple((df[f'next_{t}{args.target}'].to_numpy() <= args.horizon).astype(np.float32)

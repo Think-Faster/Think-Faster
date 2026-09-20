@@ -117,7 +117,7 @@ def main() -> None:
     def to_idx(obj, h):
         return (torch.tensor([oi[int(x)] for x in obj], device=dev), torch.tensor(h, device=dev, dtype=torch.long))
 
-    tr_o, tr_h = to_idx(*index(SPLITS[args.branch]))
+    tr_o, tr_h = to_idx(*index(SPLITS[args.branch][0]))
     out_dir = config.WORK / 'runs' / f'{args.branch}_h{H}'
     idx = {s: np.load(out_dir / 'preds' / f'index_{s}.npz') for s in ('val', 'test')}
     ev = {s: to_idx(idx[s]['object_id'], idx[s]['h']) for s in idx}
