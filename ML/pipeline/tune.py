@@ -8,6 +8,7 @@ XGBoost и CatBoost — на GPU. Матрицы квантуются один �
     python tune.py --model xgb --rounds 100 --early 20   # подбор под короткий бюджет (раздел 24)
     python tune.py --model cat --trials 30 --target _prim
     python tune.py --model cat --trials 40 --objective hours   # цель — ложные часы (раздел 34)
+    python tune.py --model cat --trials 40 --objective hours --holdout 2024   # подбор на отдельном годе
 
 `--objective hours` меряет то же, что `operating.py --match --cost hours`: сколько часов ложной
 тревоги стоит поймать 40, 50, 60 и 75% эпизодов проверки. PR-AUC — площадь под всей кривой, и
@@ -175,13 +176,18 @@ def main() -> None:
     ap.add_argument('--early', type=int, default=200, help='запас ранней остановки (раздел 24)')
     ap.add_argument('--objective', default='prauc', choices=['prauc', 'hours'],
                     help='что максимизировать на проверке: PR-AUC или минус ложные часы при 40–75%% эпизодов')
+    ap.add_argument('--holdout', type=int, default=2025, choices=[2024, 2025],
+                    help='год, на котором подбирать. 2025 — тот же, что проверка у train.py, и тогда '
+                         'проверка подобранного прогона уже не честная. 2024 — обучение на 2022–23, '
+                         'и 2025 с 2026 остаются вне подбора (раздел 34)')
     args = ap.parse_args()
     meta = json.loads((train.FEAT / 'meta.json').read_text(encoding='utf-8'))
     features = meta['features']
     types = args.types.split(',')
     cols = features + [f'next_{t}{args.target}' for t in types]
-    tr = train.load(train.SPLITS['main'][0], args.step, cols)
-    va = train.load([2025], 1, cols + ['object_id', 'h'])
+    fit_years = [y for y in train.SPLITS['main'][0] if y < args.holdout]
+    tr = train.load(fit_years, args.step, cols)
+    va = train.load([args.holdout], 1, cols + ['object_id', 'h'])
     Xt, Xv = train.matrix(tr, features), train.matrix(va, features)
     labels = {t: tuple((df[f'next_{t}{args.target}'].to_numpy() <= args.horizon).astype(np.float32)
                        for df in (tr, va)) for t in types}
@@ -198,7 +204,8 @@ def main() -> None:
     budget = '' if (args.rounds, args.early) == (4000, 200) else f'_r{args.rounds}e{args.early}'
     suffix = (args.target + budget
               + ('' if args.horizon == config.HORIZON else f'_h{args.horizon}')
-              + ('' if args.objective == 'prauc' else '_hours'))
+              + ('' if args.objective == 'prauc' else '_hours')
+              + ('' if args.holdout == 2025 else f'_v{args.holdout}'))
     {'xgb': xgb_study, 'cat': cat_study}[args.model](Xt, Xv, labels, args.trials, storage, suffix,
                                                      (args.rounds, args.early), hours)
 

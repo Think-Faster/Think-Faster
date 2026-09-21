@@ -181,8 +181,9 @@ def main() -> None:
     ap.add_argument('--soft', type=float, default=1.0,
                     help='вес неподтверждённых выездом эпизодов в обучении: 1 — обычная цель, '
                          '0 — как --target _conf, промежуточные — мягкая метка (раздел 22)')
-    ap.add_argument('--params', default='default', choices=['default', 'tuned', 'tunedh'],
-                    help='tunedh — параметры подбора по ложным часам (tune.py --objective hours)')
+    ap.add_argument('--params', default='default', choices=['default', 'tuned', 'tunedh', 'tunedh24'],
+                    help='tunedh — параметры подбора по ложным часам (tune.py --objective hours); '
+                         'tunedh24 — то же, подобранное на 2024 (--holdout 2024)')
     ap.add_argument('--weather', default='', choices=['', 'base', 'ext', 'hum', 'air', 'both', 'humair'],
                     help='добавить признаки из weather.py: набор ТЗ, расширенный, конденсат, '
                          'качество воздуха, база вместе с расширенным или конденсат с воздухом')
@@ -217,7 +218,7 @@ def main() -> None:
     budget = '' if (args.rounds, args.early) == (4000, 200) else f'_r{args.rounds}e{args.early}'
     pw = '' if args.pw == 1.0 else f'_pw{int(round(args.pw * 100)):03d}'
     tag = (f'{args.branch}_h{H}{tg}' + ('' if soft == 1.0 else f'_soft{int(round(soft * 100)):02d}')
-           + {'default': '', 'tuned': '_tuned', 'tunedh': '_tunedh'}[args.params]
+           + {'default': '', 'tuned': '_tuned', 'tunedh': '_tunedh', 'tunedh24': '_tunedh24'}[args.params]
            + WEATHER_TAG[args.weather] + ('_fleet' if args.fleet else '')
            + COMBO_TAG[args.combo] + DROP_TAG[args.drop] + budget + pw
            + ('' if args.seed == 0 else f'_s{args.seed}')
@@ -293,7 +294,7 @@ def main() -> None:
             scores['recency'] = (-Xv[:, fi[f'since_{tp}']], -Xs[:, fi[f'since_{tp}']])
         for name in models:
             t1 = time.time()
-            par = (tuned(name, tp, tg, H, budget, '_hours' if args.params == 'tunedh' else '')
+            par = (tuned(name, tp, tg, H, budget, {'tunedh': '_hours', 'tunedh24': '_hours_v2024'}.get(args.params, ''))
                    if args.params != 'default' else None)
             if args.pw != 1.0 and name in ('xgb', 'cat'):
                 # Цена ошибки несимметрична: у диспетчера ложный выезд дороже, чем узнать
