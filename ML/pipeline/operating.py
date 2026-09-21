@@ -54,6 +54,15 @@ def split(run: str, name: str, year, tp: str, model: str, target: str = '') -> t
     df = pl.concat([pl.scan_parquet(FEAT / f'{y}.parquet')
                     .select(['object_id', 'h', f'next_{tp}{target}']) for y in yy]).collect()
     obj, h = idx['object_id'], idx['h']
+    own = years(run, name)
+    if len(p) != len(df) and set(yy) < set(own):
+        # Ветки проверяются на разных годах (wide — 2024 и 2025, main — только 2025). При сравнении
+        # берутся годы первого прогона, а из предсказаний другой ветки вырезаются строки этих лет:
+        # нарезка идёт по годам подряд, в порядке train.SPLITS.
+        sizes = {y: pl.scan_parquet(FEAT / f'{y}.parquet').select(pl.len()).collect().item() for y in own}
+        start = np.cumsum([0] + [sizes[y] for y in own])
+        keep = np.concatenate([np.arange(start[i], start[i + 1]) for i, y in enumerate(own) if y in yy])
+        p, obj, h = p[keep], obj[keep], h[keep]
     assert len(df) == len(p) == len(obj), (len(df), len(p), len(obj))
     assert np.array_equal(df['object_id'].to_numpy(), obj) and np.array_equal(df['h'].to_numpy(), h)
     return obj, h, df[f'next_{tp}{target}'].to_numpy(), p
@@ -118,7 +127,7 @@ def load_mix(name: str, on: str, year: int, tp: str, model: str, label: str = ''
 
 
 def match(runs: list[str], model: str, H: int, levels: list[float], steps: int,
-          on: str = 'test', label: str = '', low: float = 0.90) -> None:
+          on: str = 'test', label: str = '', low: float = 0.90, cost: str = 'sig') -> None:
     """Сколько ложных сигналов стоит одна и та же доля пойманных эпизодов у разных прогонов.
 
     Точка на кривой выбирается по тому же году, на котором считается, — это подглядывание, и
@@ -130,12 +139,17 @@ def match(runs: list[str], model: str, H: int, levels: list[float], steps: int,
     в такой перебор не попадает: в таблице появляется прочерк.
 
     Опускать `low` ниже 0,90 можно только чтобы посмотреть, где проходит эта граница, но не
-    чтобы сравнивать прогоны. Ложные считаются блоками подряд идущих часов тревоги, и ниже
-    примерно 10% часов под тревогой блоки начинают склеиваться между собой: число ложных проходит
-    максимум и **падает**, хотя тревога висит всё дольше. У отказа оборудования на проверке 2025:
-    569 ложных при 10% часов, 696 при 20%, 244 при 50% — и в последней точке средний сигнал
-    длится 651 час. Метрика в этой области немонотонна по порогу, и выбор по ней едет в её слепое
-    пятно (раздел 31). Кривая снимается `curve.py`.
+    чтобы сравнивать прогоны при `cost='sig'`. Ложные там считаются блоками подряд идущих часов
+    тревоги, и ниже некоторой доли часов блоки начинают склеиваться между собой: число ложных
+    проходит максимум и **падает**, хотя тревога висит всё дольше. У отказа оборудования на
+    проверке 2025: 569 ложных при 10% часов, 696 при 20%, 244 при 50% — и в последней точке
+    средний сигнал длится 651 час. Граница у каждого типа своя и между периодами уезжает: от 2%
+    у пожара до 50% у отказа датчика (раздел 31). Кривая снимается `curve.py`.
+
+    `cost='hours'` считает ту же таблицу в часах ложной тревоги вместо блоков. Часы монотонны по
+    порогу по построению — опуская порог, тревожных часов можно только добавить, — поэтому такая
+    таблица сравнима в любой точке и слепого пятна у неё нет. Блоки остаются эксплуатационной
+    ценой (диспетчер ходит на сигнал), часы — мерой сравнения.
     """
     year = years(runs[0], on)
     print('| тип | поймано эпизодов | ' + ' | '.join(f'`{r}`' for r in runs) + ' |')
@@ -156,7 +170,9 @@ def match(runs: list[str], model: str, H: int, levels: list[float], steps: int,
                     continue
                 sig, true = metrics.signals(obj, h, y, a)
                 m = metrics.evaluate(obj, h, nxt, p, t, H, metrics.RUN_CAP)
-                pts.append((m['caught'], sig - true))
+                # Часы ложной тревоги — часы выше порога, в горизонте которых происшествия нет.
+                pts.append((m['caught'], sig - true if cost == 'sig'
+                            else int((a & (y == 0)).sum())))
                 total = m['episodes']
             curves[run] = pts
         for lv in levels:
@@ -179,6 +195,8 @@ def main() -> None:
     ap.add_argument('--match', default='', help='прогоны через запятую: сравнить при равной полноте')
     ap.add_argument('--levels', default='0.4,0.5,0.6,0.7,0.75', help='доли эпизодов для --match')
     ap.add_argument('--steps', type=int, default=70, help='сколько порогов перебрать для --match')
+    ap.add_argument('--cost', default='sig', choices=['sig', 'hours'],
+                    help='чем мерить ложные: блоками сигналов или часами тревоги (раздел 31)')
     ap.add_argument('--low', type=float, default=0.90,
                     help='нижний квантиль перебора порогов: 0,90 значит «тревога не чаще чем '
                          'в десятой части часов». Типам с частыми происшествиями нужен ниже')
@@ -191,7 +209,7 @@ def main() -> None:
     if args.match:
         match([r for r in args.match.split(',') if r], args.model, H,
               [float(x) for x in args.levels.split(',')], args.steps, args.on, args.target,
-              args.low)
+              args.low, args.cost)
         return
     cap = json.loads((FEAT / 'meta.json').read_text(encoding='utf-8'))['next_cap']
 

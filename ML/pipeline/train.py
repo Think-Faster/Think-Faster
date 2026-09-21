@@ -40,9 +40,11 @@ import metrics
 # собой, а не с числами остальных разделов.
 SPLITS = {'main': ([2022, 2023, 2024], [2025]),
           'long': ([2019, 2020, 2022, 2023, 2024], [2025]),
-          'wide': ([2022, 2023], [2024, 2025])}
+          'wide': ([2022, 2023], [2024, 2025]),
+          'recent': ([2023, 2024], [2025])}
 WEATHER_TAG = {'': '', 'base': '_weather', 'ext': '_weather_ext', 'hum': '_weather_hum',
-               'air': '_weather_air', 'both': '_weather_both'}
+               'air': '_weather_air', 'both': '_weather_both', 'humair': '_weather_humair'}
+WEATHER_PACKS = {'both': ['base', 'ext'], 'humair': ['hum', 'air']}
 COMBO_TAG = {'': '', 'pairs': '_combo', 'spread': '_spread', 'both': '_combo_spread'}
 
 # Что именно модель помнит об объекте (раздел 23). `ident` — статический состав объекта: сколько
@@ -178,9 +180,9 @@ def main() -> None:
                     help='вес неподтверждённых выездом эпизодов в обучении: 1 — обычная цель, '
                          '0 — как --target _conf, промежуточные — мягкая метка (раздел 22)')
     ap.add_argument('--params', default='default', choices=['default', 'tuned'])
-    ap.add_argument('--weather', default='', choices=['', 'base', 'ext', 'hum', 'air', 'both'],
+    ap.add_argument('--weather', default='', choices=['', 'base', 'ext', 'hum', 'air', 'both', 'humair'],
                     help='добавить признаки из weather.py: набор ТЗ, расширенный, конденсат, '
-                         'качество воздуха или база вместе с расширенным')
+                         'качество воздуха, база вместе с расширенным или конденсат с воздухом')
     ap.add_argument('--combo', default='', choices=['', 'pairs', 'spread', 'both'],
                     help='добавить связки соседних датчиков и/или разброс по пикетам из combo.py')
     ap.add_argument('--fleet', action='store_true',
@@ -218,7 +220,7 @@ def main() -> None:
     features, cap = meta['features'], meta['next_cap']
     wx = cb = None
     if args.weather:
-        for pack in (['base', 'ext'] if args.weather == 'both' else [args.weather]):
+        for pack in WEATHER_PACKS.get(args.weather, [args.weather]):
             w = pl.read_parquet(config.WORK / ('weather.parquet' if pack == 'base' else f'weather_{pack}.parquet'))
             wx = w if wx is None else wx.join(w, on='h')
         features = features + [c for c in wx.columns if c != 'h']
