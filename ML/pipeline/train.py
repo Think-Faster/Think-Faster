@@ -200,6 +200,9 @@ def main() -> None:
                     help='приписка к имени прогона: те же ключи, но другой подбор параметров — '
                          'иначе прогон лёг бы поверх прежнего и затёр базу, на которой считаны '
                          'разделы 15 и 16')
+    ap.add_argument('--seed', type=int, default=0,
+                    help='зерно случайности XGBoost и CatBoost. Прогоны, отличающиеся только им, '
+                         'дают порог шума для счёта клеток «N из 8» и материал для усреднения')
     ap.add_argument('--pw', type=float, default=1.0,
                     help='вес положительного класса: <1 делает пропуск дешевле ложной тревоги '
                          '(cost-sensitive learning, раздел 26)')
@@ -217,6 +220,7 @@ def main() -> None:
            + {'default': '', 'tuned': '_tuned', 'tunedh': '_tunedh'}[args.params]
            + WEATHER_TAG[args.weather] + ('_fleet' if args.fleet else '')
            + COMBO_TAG[args.combo] + DROP_TAG[args.drop] + budget + pw
+           + ('' if args.seed == 0 else f'_s{args.seed}')
            + (f'_{args.note}' if args.note else ''))
 
     meta = json.loads((FEAT / 'meta.json').read_text(encoding='utf-8'))
@@ -296,6 +300,8 @@ def main() -> None:
                 # о происшествии не за сутки, а в момент, — канал «по факту» всё равно объявит
                 # (раздел 26). scale_pos_weight < 1 записывает это прямо в функцию потерь.
                 par = dict(par or {}, scale_pos_weight=args.pw)
+            if args.seed and name in ('xgb', 'cat'):
+                par = dict(par or {}, **{'xgb': {'seed': args.seed}, 'cat': {'random_seed': args.seed}}[name])
             model, predict, iters = FIT[name](Xt, yt, Xv, yv, par)
             scores[name] = (predict(Xv).astype(np.float32), predict(Xs).astype(np.float32))
             print(f'  {name}: {iters} деревьев за {time.time() - t1:.0f} с', flush=True)
