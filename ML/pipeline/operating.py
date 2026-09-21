@@ -110,7 +110,14 @@ def load_mix(name: str, on: str, year: int, tp: str, model: str, label: str = ''
     Семейство пишется через косую черту: `main_h24_r100e20/cat`. Без неё берётся `--model`.
     Это нужно, чтобы сравнивать не только цели обучения, но и семейства между собой: у них
     порог по F1 встаёт в разные точки кривой, и сравнение по нему выходит про порог.
+
+    Свой прогон каждому типу — через `тип~прогон`, разделитель `;`, `*` — для остальных:
+    `fire~main_h24/cat;equipment~main_h24_tuned;*~main_h24/cat` (раздел 34: база — смесь по типам).
     """
+    if '~' in name:
+        table = dict(part.split('~', 1) for part in name.split(';') if part)
+        name = table.get(tp, table.get('*', ''))
+        assert name, f'в смеси нет прогона для {tp}'
     parts = []
     for part in name.split('+'):
         if part:
