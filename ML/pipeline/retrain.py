@@ -42,6 +42,7 @@
     python retrain.py --fold 30 --rounds 1500 --early 100   # быстрее, если отрезков много
     python retrain.py --fold 14 --out retrain_f14           # параллельным прогонам — разные --out
     python retrain.py --fold 30 --pw 0.1 --gap 6           # лучшее из разделов 26 и 27 сразу
+    python retrain.py --model cat --params mix --strategies all,d365,decay180,frozen  # база раздела 34
 """
 import argparse
 import json
@@ -58,6 +59,11 @@ FEAT = config.WORK / 'features'
 DAY = 24
 VAL_DAYS = 14          # последние сутки перед переобучением — на раннюю остановку и порог
 STRATEGIES = ['all', 'd90', 'd180', 'd365', 'decay90', 'decay180', 'warm', 'frozen', 'thrfix']
+# Параметры каждого типа в смеси раздела 34: подбор по ложным часам на 2024 (`tunedh24`),
+# подбор по PR-AUC (`tuned`) или умолчания. Отказ датчика в смеси — XGBoost, поэтому для
+# `--model cat --params mix` его строка про другую модель и сравнивать её с базой нельзя.
+MIX_PARAMS = {'fire': 'tunedh24', 'gas': 'default', 'flood': 'tuned', 'equipment': 'tunedh24',
+              'sensor': 'tuned', 'intrusion': 'default'}
 
 
 def pick(h: np.ndarray, lo: int | None, hi: int) -> np.ndarray:
@@ -73,6 +79,11 @@ def weights(h: np.ndarray, now: int, half_life_days: int) -> np.ndarray:
 
 def fold_fit(name, Xt, yt, wt, Xv, yv, params, prev, rounds_max, early):
     """Обучение одного отрезка. prev — модель прошлого отрезка для стратегии warm."""
+    if name == 'cat':
+        # Веса нужны стратегиям decay: без них decay молча совпадал бы с all.
+        assert prev is None, 'warm для CatBoost не сделан'
+        return train.fit_cat(Xt, yt, Xv, yv, dict(params or {}, iterations=rounds_max,
+                                                  od_wait=early), weight=wt)
     if name != 'xgb':
         return train.FIT[name](Xt, yt, Xv, yv, params)
     import xgboost as xgb
@@ -104,7 +115,7 @@ def dump(rows: list[dict], args) -> None:
     out = pl.DataFrame(rows)
     out.write_csv(config.WORK / f'{args.out}.csv')
     head = (f'Прогон вперёд с {args.start}, переобучение раз в {args.fold} суток, '
-            f'модель {args.model}, порог под {args.budget} тревог в сутки, '
+            f'модель {args.model} ({args.params}), порог под {args.budget} тревог в сутки, '
             f'потолок {args.rounds} деревьев (остановка {args.early})'
             + (f', вес положительного класса {args.pw}' if args.pw != 1.0 else '')
             + (f', склейка дребезга {args.gap} ч.' if args.gap else '.'))
@@ -139,6 +150,9 @@ def main() -> None:
                     help='вес положительного класса: <1 делает пропуск дешевле ложной тревоги '
                          '(раздел 26). Тот же ключ, что у train.py, — иначе прогон вперёд '
                          'проверял бы не ту модель, которую ставим в работу')
+    ap.add_argument('--params', default='tuned', choices=['tuned', 'default', 'tunedh24', 'mix'],
+                    help='те же параметры, что у train.py --params; `mix` — свои каждому типу, '
+                         'как в итоговой смеси раздела 34')
     ap.add_argument('--weather', default='', choices=['', 'base', 'ext', 'hum', 'air', 'both'],
                     help='пакет признаков из weather.py; `air` взят под загазованность (раздел 23)')
     args = ap.parse_args()
@@ -177,7 +191,10 @@ def main() -> None:
         yp, ye = (pool[f'next_{tp}'].to_numpy() <= H), (ev[f'next_{tp}'].to_numpy() <= H)
         yp, ye = yp.astype(np.int8), ye.astype(np.int8)
         nxt_e = ev[f'next_{tp}'].to_numpy()
-        params = train.tuned(args.model, tp, '', H) or {}
+        kind = MIX_PARAMS[tp] if args.params == 'mix' else args.params
+        objective = '_hours_v2024' if kind == 'tunedh24' else ''
+        params = {} if kind == 'default' else train.tuned(args.model, tp, '', H,
+                                                          objective=objective) or {}
         if args.pw != 1.0:
             params = dict(params, scale_pos_weight=args.pw)
         for st in args.strategies.split(','):

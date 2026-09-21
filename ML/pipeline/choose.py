@@ -16,6 +16,7 @@
 
     python choose.py
     python choose.py --level 0.5 --gap 6
+    python choose.py --cost hours --low 0.6        # в часах ложной тревоги (раздел 34)
 """
 import argparse
 
@@ -28,7 +29,7 @@ SMOOTHS = (1, 3, 6, 12)
 
 
 def name(run: str, m: int) -> str:
-    short = run.replace('main_h24_tuned_', '')
+    short = 'смесь' if '~' in run else run.replace('main_h24_tuned_', '')
     if m == 0:
         return short + ' + ансамбль окон'
     return short + (f' + среднее {m} ч' if m > 1 else ' + как есть')
@@ -49,13 +50,19 @@ def main() -> None:
     ap.add_argument('--smooths', default=','.join(str(m) for m in SMOOTHS),
                     help='набор окон сглаживания: он сам по себе гиперпараметр, раздел 30')
     ap.add_argument('--horizon', type=int, default=config.HORIZON)
+    ap.add_argument('--cost', default='sig', choices=['sig', 'hours'],
+                    help='чем мерить ложные: блоками сигналов или часами тревоги (раздел 34)')
+    ap.add_argument('--low', type=float, default=0.90,
+                    help='нижний квантиль перебора порогов; в часах оборудованию нужна тревога '
+                         'дольше десятой доли времени, и 0,90 до его точки не дотягивается')
     args = ap.parse_args()
     runs = args.runs.split(',')
     smooths = [int(m) for m in args.smooths.split(',')]
 
     print(f'Выбор по проверке 2025, числа по тесту 2026. Уровень: поймано '
           f'{args.level:.0%} эпизодов, склейка дребезга {args.gap} ч.\n')
-    print('| тип | выбрано по проверке | ложных на тесте | лучшее возможное на тесте | цена выбора |')
+    unit = 'ложных часов' if args.cost == 'hours' else 'ложных сигналов'
+    print(f'| тип | выбрано по проверке | {unit} на тесте | лучшее возможное на тесте | цена выбора |')
     print('|---|---|---:|---:|---:|')
     picked_sum = oracle_sum = base_sum = 0
     for tp in config.TYPES:
@@ -73,8 +80,8 @@ def main() -> None:
                 for ctx, store in ((va, val_f), (te, test_f)):
                     score = persist.smoothed(ctx, m)
                     flat = score[~np.isnan(score)]
-                    thr = np.quantile(flat, np.linspace(0.90, 0.99999, args.steps))
-                    pts = persist.curve(score, 1, thr, ctx, args.gap)
+                    thr = np.quantile(flat, np.linspace(args.low, 0.99999, args.steps))
+                    pts = persist.curve(score, 1, thr, ctx, args.gap, args.cost == 'hours')
                     got = best_at(pts, args.level * ctx['episodes'])
                     if got is not None:
                         store[key] = got
@@ -82,8 +89,8 @@ def main() -> None:
                     # прежнее состояние: та же база, но без склейки и без сглаживания
                     raw = persist.curve(te['grid'], 1,
                                         np.quantile(te['grid'][~np.isnan(te['grid'])],
-                                                    np.linspace(0.90, 0.99999, args.steps)),
-                                        te, 0)
+                                                    np.linspace(args.low, 0.99999, args.steps)),
+                                        te, 0, args.cost == 'hours')
                     base = best_at(raw, args.level * te['episodes'])
         common = [k for k in val_f if k in test_f]
         if not common:
@@ -96,7 +103,7 @@ def main() -> None:
         base_sum += base if base is not None else test_f[pick]
         print(f'| {config.TYPE_NAMES[tp]} | {pick} | {test_f[pick]} | {oracle} | '
               f'+{test_f[pick] - oracle} |')
-    print(f'\nИтого ложных сигналов на тесте: выбранное {picked_sum}, '
+    print(f'\nИтого {unit} на тесте: выбранное {picked_sum}, '
           f'лучшее возможное {oracle_sum}, цена слепого выбора '
           f'{picked_sum - oracle_sum} ({(picked_sum - oracle_sum) / max(oracle_sum, 1):.0%}).')
     print(f'Для сравнения, тот же уровень полноты на прежней базе без постобработки: {base_sum}.')

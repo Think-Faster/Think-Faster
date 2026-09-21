@@ -97,14 +97,14 @@ def fit_xgb(Xt, yt, Xv, yv, params: dict | None = None):
     return booster, predict, booster.best_iteration + 1
 
 
-def fit_cat(Xt, yt, Xv, yv, params: dict | None = None):
+def fit_cat(Xt, yt, Xv, yv, params: dict | None = None, weight=None):
     from catboost import CatBoostClassifier
     p = {'iterations': ROUNDS, 'learning_rate': 0.05, 'depth': 8, 'task_type': 'GPU', 'devices': '0',
          'loss_function': 'Logloss', 'border_count': 254, 'od_type': 'Iter', 'od_wait': EARLY,
          'use_best_model': True, 'verbose': False, 'gpu_ram_part': 0.8}
     p.update(params or {})
     m = CatBoostClassifier(**p)
-    m.fit(Xt, yt, eval_set=(Xv, yv))
+    m.fit(Xt, yt, sample_weight=weight, eval_set=(Xv, yv))
     return m, lambda X: m.predict_proba(X)[:, 1], m.get_best_iteration() + 1
 
 

@@ -121,8 +121,12 @@ def signals_fast(order_obj: np.ndarray, order_h: np.ndarray, order_y: np.ndarray
     return total, true
 
 
-def curve(score, k, thr_grid, ctx, gap):
-    """Для каждого порога: (поймано эпизодов, ложных сигналов, медианное упреждение)."""
+def curve(score, k, thr_grid, ctx, gap, hours=False):
+    """Для каждого порога: (поймано эпизодов, ложных сигналов, медианное упреждение).
+
+    `hours=True` ставит на место ложных сигналов часы ложной тревоги — часы под тревогой, после
+    которых в горизонт эпизода нет (раздел 34: счёт блоков вознаграждает гладкую оценку, часы — нет).
+    Склейка дребезга часов не меняет, сглаживание — меняет."""
     oi, hi, eo, ec, horizon = ctx['oi'], ctx['hi'], ctx['eo'], ctx['ec'], ctx['horizon']
     pts = []
     for t in thr_grid:
@@ -139,14 +143,17 @@ def curve(score, k, thr_grid, ctx, gap):
             lead = float(np.median((horizon - first + 1)[got > 0]))
         else:
             lead = float('nan')
+        if hours:
+            pts.append((caught, int((a[oi, hi] & (ctx['y'] == 0)).sum()), lead))
+            continue
         sig, true = signals_fast(ctx['oo'], ctx['oh'], ctx['oy'], a[oi, hi][ctx['order']], gap)
         pts.append((caught, sig - true, lead))
     return pts
 
 
 def prepare(run, part, year, tp, model, horizon):
-    run, _, m = run.partition('/')      # `прогон/семейство`, иначе семейство из --model
-    obj, h, nxt, p = op.split(run, part, year, tp, m or model)
+    # `прогон/семейство`, среднее рангов `a+b` и своя модель каждому типу `тип~прогон;…` (раздел 34)
+    obj, h, nxt, p = op.load_mix(run, part, year, tp, model)
     grid, objs, oi, hi, h0 = dense(obj, h, p, horizon)
     y = (nxt <= horizon).astype(np.float64)
     order = np.lexsort((h, obj))
