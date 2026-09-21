@@ -125,7 +125,7 @@ def envelope(run: str, on: str, tp: str, model: str, H: int, steps: int) -> tupl
 
 
 def split(run: str, on: str, model: str, H: int, steps: int, budgets: list[int],
-          floors: dict[str, float] | None = None, target: str = '') -> None:
+          floors: dict[str, float] | None = None, target: str = '', gap: int = 6) -> None:
     """Как делить общий бюджет ложной тревоги между шестью типами.
 
     В отчёте бюджет всегда задавался «тревог в сутки» и раздавался типам по одному правилу на
@@ -155,6 +155,10 @@ def split(run: str, on: str, model: str, H: int, steps: int, budgets: list[int],
     `target` — период, на котором раздача **оценивается**, если он другой. Выбранной считается
     доля часов под тревогой у каждого типа: её и переносим, как в разделе 32. Без переноса
     раздача подобрана на том же периоде, где мерится, и выигрыш читается как верхняя граница.
+
+    Под раздачей на последнем бюджете печатается сводка для диспетчера: сигналы после склейки
+    дребезга `gap` (раздел 27), ложные сигналы в сутки на весь парк и упреждение. Часы — мера
+    выбора, сигналы — то, на что ходит диспетчер; обе нужны итоговой конфигурации (раздел 38).
 
     Разная полнота по типам нужна потому, что ТЗ их не уравнивает: критическим там названо
     «событие, угрожающее жизни человека», и уведомления в реальном времени требуются именно о
@@ -264,6 +268,30 @@ def split(run: str, on: str, model: str, H: int, steps: int, budgets: list[int],
         c, k = at[tp].get(sh, (0, 0)) if sh is not None else (0, 0)
         print(f'| {config.TYPE_NAMES[tp]} | {0 if sh is None else sh:.1%} | {c} | {k} |')
 
+    where = target or on
+    year = operating.years(run, where)
+    print()
+    print(f'Для диспетчера, та же раздача на {where}, склейка дребезга {gap} ч:')
+    print('| тип | эпизодов | поймано заранее | остаётся каналу «по факту» | сигналов | '
+          'ложных сигналов | ложных в сутки | медиана упреждения, ч |')
+    print('|---|---:|---:|---:|---:|---:|---:|---:|')
+    tot = [0] * 5
+    days = 0.0
+    for tp in env:
+        obj, h, nxt, p = operating.load_mix(run, where, year, tp, model, '')
+        days = max(days, (float(h.max()) - float(h.min()) + 1) / 24)
+        sh = pick_greedy[tp]
+        t = float(np.quantile(p, 1 - sh)) if sh else float('inf')
+        m = metrics.evaluate(obj, h, nxt, p, t, H, metrics.RUN_CAP)
+        y = (nxt <= H).astype(np.int8)
+        sig, sig_true = metrics.signals(obj, h, y, p >= t, gap)
+        row = [m['episodes'], m['caught'], m['episodes'] - m['caught'], sig, sig - sig_true]
+        tot = [a + b for a, b in zip(tot, row)]
+        lead = m['lead_median_h']
+        print(f'| {config.TYPE_NAMES[tp]} | ' + ' | '.join(map(str, row))
+              + f' | {row[4] / days:.1f} | {"—" if lead != lead else f"{lead:.0f}"} |')
+    print(f'| **итого** | ' + ' | '.join(map(str, tot)) + f' | {tot[4] / days:.1f} | |')
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -281,6 +309,7 @@ def main() -> None:
                          'либо «0.4,fire=0.6,gas=0.6»')
     ap.add_argument('--target', default='', choices=['', 'val', 'test'],
                     help='период оценки раздачи, выбранной на --on; пусто — тот же')
+    ap.add_argument('--gap', type=int, default=6, help='склейка дребезга для сводки сигналов')
     args = ap.parse_args()
 
     if args.mode == 'split':
@@ -289,7 +318,7 @@ def main() -> None:
             key, _, val = part.rpartition('=')
             floors[key.strip()] = float(val)
         split(args.run, args.on, args.model, args.horizon, args.steps,
-              [int(x) for x in args.budgets.split(',')], floors, args.target)
+              [int(x) for x in args.budgets.split(',')], floors, args.target, args.gap)
         return
 
     types = [args.tp] if args.tp else list(config.TYPES)
