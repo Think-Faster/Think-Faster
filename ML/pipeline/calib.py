@@ -19,6 +19,7 @@
     python calib.py                    # окна калибровки против фиксированного порога
     python calib.py --smooth 6         # поверх сглаживания оценки (раздел 29)
     python calib.py --transfer         # перенос порога с проверки на тест: держится ли бюджет
+    python calib.py --run "$MIX5" --cost hours   # на смеси раздела 34, в ложных часах (раздел 37)
 """
 import argparse
 
@@ -39,8 +40,9 @@ def prepare_union(run, tp, model, horizon):
     Калибровке нужна история до начала теста, а метрикам — только тест. Поэтому сетка общая,
     а индексы строк, порядок и эпизоды берутся из теста.
     """
-    ov, hv, nv, pv = op.split(run, 'val', 2025, tp, model)
-    ot, ht, nt, pt = op.split(run, 'test', 2026, tp, model)
+    # общая шкала для двух периодов: у смеси — доли оценок зерна на проверке 2025
+    ov, hv, nv, pv = op.load_mix(run, 'val', 2025, tp, model, ref=('val', 2025))
+    ot, ht, nt, pt = op.load_mix(run, 'test', 2026, tp, model, ref=('val', 2025))
     obj = np.concatenate([ov, ot])
     h = np.concatenate([hv, ht])
     p = np.concatenate([pv, pt])
@@ -92,6 +94,7 @@ def transfer(args) -> None:
     каждые сутки по последним 90. Проверяется не полнота, а обещание — сколько тревог в сутки.
     """
     q = args.q
+    hours = args.cost == 'hours'
     print(f'Прогон {args.run}, модель {args.model}. Порог снят на проверке 2025 по доле {q:.3f} '
           f'и перенесён на тест 2026 вслепую'
           + (f', сглаживание {args.smooth} ч' if args.smooth > 1 else '') + '.\n')
@@ -119,13 +122,14 @@ def transfer(args) -> None:
               f'(разброс {df.std():.1f}) | {dr.mean():.1f} (разброс {dr.std():.1f}) |', flush=True)
 
     print('\nЧто это даёт на тесте при том же переносе:\n')
-    print('| тип | фикс: поймано | фикс: ложных | скольз 90: поймано | скольз 90: ложных |')
+    unit = 'ложных часов' if hours else 'ложных'
+    print(f'| тип | фикс: поймано | фикс: {unit} | скольз 90: поймано | скольз 90: {unit} |')
     print('|---|---:|---:|---:|---:|')
     for tp, (ctx, score, fix, roll) in keep.items():
         ev = score.copy()
         ev[:, :ctx['test_from']] = np.nan
-        cf, ff, _ = persist.curve(ev, 1, [fix], ctx, args.gap)[0]
-        cr, fr, _ = persist.curve(ev - roll[None, :], 1, [0.0], ctx, args.gap)[0]
+        cf, ff, _ = persist.curve(ev, 1, [fix], ctx, args.gap, hours)[0]
+        cr, fr, _ = persist.curve(ev - roll[None, :], 1, [0.0], ctx, args.gap, hours)[0]
         n = ctx['episodes']
         print(f'| {config.TYPE_NAMES[tp]} | {cf} из {n} | {ff} | {cr} из {n} | {fr} |', flush=True)
 
@@ -141,15 +145,19 @@ def main() -> None:
     ap.add_argument('--transfer', action='store_true',
                     help='перенос порога с проверки на тест вместо кривых')
     ap.add_argument('--q', type=float, default=0.995, help='доля для переноса')
+    ap.add_argument('--cost', choices=['sig', 'hours'], default='sig',
+                    help='мера ложных: сигналы или часы ложной тревоги (раздел 34)')
     args = ap.parse_args()
     if args.transfer:
         transfer(args)
         return
 
+    hours = args.cost == 'hours'
+    unit = 'часов ложной тревоги' if hours else 'ложных сигналов'
     names = ['фиксированный'] + [f'скользящий {d} сут' for d in DAYS]
     head = f'Прогон {args.run}, модель {args.model}, тест 2026, склейка дребезга {args.gap} ч'
     print(head + (f', сглаживание {args.smooth} ч' if args.smooth > 1 else '')
-          + '. В ячейках — ложных сигналов при равной доле пойманных эпизодов.\n')
+          + f'. В ячейках — {unit} при равной доле пойманных эпизодов.\n')
     print('| тип | поймано эпизодов | ' + ' | '.join(names) + ' |')
     print('|---|---|' + '---:|' * len(names))
     for tp in config.TYPES:
@@ -163,12 +171,12 @@ def main() -> None:
         ev[:, :ctx['test_from']] = np.nan
         qs = np.linspace(0.90, 0.99999, args.steps)
         flat = ev[~np.isnan(ev)]
-        curves = {'фиксированный': persist.curve(ev, 1, np.quantile(flat, qs), ctx, args.gap)}
+        curves = {'фиксированный': persist.curve(ev, 1, np.quantile(flat, qs), ctx, args.gap, hours)}
         for d in DAYS:
             thr = rolling_threshold(score, d, qs, ctx['test_from'])
             # порог зависит от часа, поэтому вычитаем его из оценки и режем по нулю
             curves[f'скользящий {d} сут'] = [
-                persist.curve(ev - thr[i][None, :], 1, [0.0], ctx, args.gap)[0]
+                persist.curve(ev - thr[i][None, :], 1, [0.0], ctx, args.gap, hours)[0]
                 for i in range(len(qs))]
         total = ctx['episodes']
         for lv in LEVELS:
