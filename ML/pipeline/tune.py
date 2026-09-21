@@ -1,4 +1,4 @@
-"""Шаг 5. Подбор гиперпараметров Optuna по PR-AUC на проверке 2025 (тест 2026 не трогаем).
+"""Шаг 5. Подбор гиперпараметров Optuna по PR-AUC или ложным часам на проверке 2025 (тест 2026 не трогаем).
 
 XGBoost и CatBoost — на GPU. Матрицы квантуются один раз, между типами меняется только метка.
 Исследования пишутся в work/optuna.db: прерванный подбор продолжается с того же места.
@@ -7,6 +7,12 @@ XGBoost и CatBoost — на GPU. Матрицы квантуются один �
     python tune.py --model xgb --trials 60
     python tune.py --model xgb --rounds 100 --early 20   # подбор под короткий бюджет (раздел 24)
     python tune.py --model cat --trials 30 --target _prim
+    python tune.py --model cat --trials 40 --objective hours   # цель — ложные часы (раздел 34)
+
+`--objective hours` меряет то же, что `operating.py --match --cost hours`: сколько часов ложной
+тревоги стоит поймать 40, 50, 60 и 75% эпизодов проверки. PR-AUC — площадь под всей кривой, и
+её выигрыш может прийтись на область, где никто не работает: подбор по PR-AUC у CatBoost
+проиграл умолчаниям 8 из 8 клеток у пожара (раздел 34).
 """
 import argparse
 import json
@@ -16,12 +22,56 @@ import numpy as np
 import optuna
 
 import config
+import metrics
 import train
 
 TUNE = config.WORK / 'runs' / 'tune'
+LEVELS = (0.4, 0.5, 0.6, 0.75)
 
 
-def xgb_study(Xt, Xv, labels, trials: int, storage: str, suffix: str, budget=(4000, 200)) -> dict:
+class Hours:
+    """Ложные часы при заданной доле пойманных эпизодов — точно, без перебора порогов.
+
+    Эпизод пойман при пороге t, если в одном из H часов перед его началом оценка не ниже t.
+    Значит, у каждого эпизода есть своя «лучшая оценка окна», и порог для доли L — это
+    L-я сверху из них. Ложные часы при этом пороге — часы без происшествия в горизонте с оценкой
+    не ниже него. Эпизоды — те же, что в `metrics.evaluate`: начало видно из витрины, в окне есть
+    хотя бы одна строка.
+
+    `operating.py --match` перебирает пороги только в верхней десятой части часов и глубже ставит
+    прочерк; здесь такая клетка считается честно, по своему порогу, — дороже любой достижимой.
+    Цель — среднее логарифмов по четырём клеткам: каждая клетка весит одинаково, как в таблицах.
+    """
+
+    def __init__(self, obj: np.ndarray, h: np.ndarray, nxt: np.ndarray, horizon: int, cap: int):
+        key = obj.astype(np.int64) * (1 << 32) + h.astype(np.int64)
+        self.order = np.argsort(key, kind='stable')
+        skey = key[self.order]
+        m = nxt < cap
+        ep = np.unique(key[m] + nxt[m].astype(np.int64))       # (объект, час начала)
+        lo = np.searchsorted(skey, ep - horizon, 'left')
+        hi = np.searchsorted(skey, ep - 1, 'right')
+        keep = hi > lo
+        # окна соседних эпизодов одного объекта перекрываются, поэтому строки окна берутся
+        # явно: не больше H штук на эпизод
+        idx = lo[keep, None] + np.arange(horizon)[None, :]
+        self.valid = idx < hi[keep, None]
+        self.idx = np.minimum(idx, len(key) - 1)
+        self.neg = nxt > horizon
+        self.episodes = int(keep.sum())
+
+    def __call__(self, p: np.ndarray) -> tuple[float, list[int]]:
+        sp = p[self.order]
+        best = np.sort(np.where(self.valid, sp[self.idx], -np.inf).max(axis=1))[::-1]
+        neg = np.sort(p[self.neg])
+        cells = []
+        for lv in LEVELS:
+            t = best[max(int(np.ceil(lv * len(best))) - 1, 0)]
+            cells.append(int(len(neg) - np.searchsorted(neg, t, 'left')))
+        return float(np.mean(np.log1p(cells))), cells
+
+
+def xgb_study(Xt, Xv, labels, trials: int, storage: str, suffix: str, budget=(4000, 200), hours=None) -> dict:
     import xgboost as xgb
     dt = xgb.QuantileDMatrix(Xt, max_bin=256)
     dv = xgb.QuantileDMatrix(Xv, ref=dt)
@@ -46,13 +96,15 @@ def xgb_study(Xt, Xv, labels, trials: int, storage: str, suffix: str, budget=(40
             b = xgb.train(p, dt, num_boost_round=budget[0], evals=[(dv, 'val')],
                           early_stopping_rounds=budget[1], verbose_eval=False)
             trial.set_user_attr('iterations', b.best_iteration + 1)
-            return float(b.best_score)
+            if hours is None:
+                return float(b.best_score)
+            return score(trial, hours[tp], b.predict(dv, iteration_range=(0, b.best_iteration + 1)))
 
         best[tp] = run_study(f'xgb_{tp}{suffix}', objective, trials, storage)
     return best
 
 
-def cat_study(Xt, Xv, labels, trials: int, storage: str, suffix: str, budget=(4000, 200)) -> dict:
+def cat_study(Xt, Xv, labels, trials: int, storage: str, suffix: str, budget=(4000, 200), hours=None) -> dict:
     from catboost import CatBoostClassifier, Pool
     best = {}
     for tp, (yt, yv) in labels.items():
@@ -74,10 +126,19 @@ def cat_study(Xt, Xv, labels, trials: int, storage: str, suffix: str, budget=(40
             m = CatBoostClassifier(**p)
             m.fit(pt, eval_set=pv)
             trial.set_user_attr('iterations', m.get_best_iteration() + 1)
-            return float(average_precision_score(yv, m.predict_proba(pv)[:, 1]))
+            if hours is None:
+                return float(average_precision_score(yv, m.predict_proba(pv)[:, 1]))
+            return score(trial, hours[tp], m.predict_proba(pv)[:, 1])
 
         best[tp] = run_study(f'cat_{tp}{suffix}', objective, trials, storage)
     return best
+
+
+def score(trial: optuna.Trial, hours: Hours, p: np.ndarray) -> float:
+    """Цель по часам: Optuna максимизирует, поэтому знак обратный."""
+    value, cells = hours(p)
+    trial.set_user_attr('false_hours', cells)
+    return -value
 
 
 def run_study(name: str, objective, trials: int, storage: str) -> dict:
@@ -90,9 +151,13 @@ def run_study(name: str, objective, trials: int, storage: str) -> dict:
     b = study.best_trial
     out = {'value': b.value, 'params': b.params, 'iterations': b.user_attrs.get('iterations'),
            'trials': len(study.trials)}
+    if 'false_hours' in b.user_attrs:
+        out['false_hours'] = dict(zip(map(str, LEVELS), b.user_attrs['false_hours']))
     TUNE.mkdir(parents=True, exist_ok=True)
     (TUNE / f'{name}.json').write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding='utf-8')
-    print(f'{name}: PR-AUC на проверке {b.value:.4f} после {len(study.trials)} попыток, '
+    what = (f'ложные часы {b.user_attrs["false_hours"]}' if 'false_hours' in b.user_attrs
+            else f'PR-AUC {b.value:.4f}')
+    print(f'{name}: {what} на проверке после {len(study.trials)} попыток, '
           f'{time.time() - t:.0f} с, {b.params}', flush=True)
     return out
 
@@ -108,16 +173,23 @@ def main() -> None:
     ap.add_argument('--horizon', type=int, default=config.HORIZON)
     ap.add_argument('--rounds', type=int, default=4000, help='предел числа деревьев (раздел 24)')
     ap.add_argument('--early', type=int, default=200, help='запас ранней остановки (раздел 24)')
+    ap.add_argument('--objective', default='prauc', choices=['prauc', 'hours'],
+                    help='что максимизировать на проверке: PR-AUC или минус ложные часы при 40–75%% эпизодов')
     args = ap.parse_args()
     meta = json.loads((train.FEAT / 'meta.json').read_text(encoding='utf-8'))
     features = meta['features']
     types = args.types.split(',')
     cols = features + [f'next_{t}{args.target}' for t in types]
     tr = train.load(train.SPLITS['main'][0], args.step, cols)
-    va = train.load([2025], 1, cols)
+    va = train.load([2025], 1, cols + ['object_id', 'h'])
     Xt, Xv = train.matrix(tr, features), train.matrix(va, features)
     labels = {t: tuple((df[f'next_{t}{args.target}'].to_numpy() <= args.horizon).astype(np.float32)
                        for df in (tr, va)) for t in types}
+    hours = None
+    if args.objective == 'hours':
+        obj, h = va['object_id'].to_numpy(), va['h'].to_numpy()
+        hours = {t: Hours(obj, h, va[f'next_{t}{args.target}'].to_numpy(), args.horizon, metrics.RUN_CAP)
+                 for t in types}
     del tr, va
     print(f'подбор {args.model}{args.target}: обучение {Xt.shape}, проверка {Xv.shape}', flush=True)
     storage = f"sqlite:///{(config.WORK / 'optuna.db').as_posix()}"
@@ -125,9 +197,10 @@ def main() -> None:
     # своё имя исследования и свой файл, чтобы прежний не затирался.
     budget = '' if (args.rounds, args.early) == (4000, 200) else f'_r{args.rounds}e{args.early}'
     suffix = (args.target + budget
-              + ('' if args.horizon == config.HORIZON else f'_h{args.horizon}'))
+              + ('' if args.horizon == config.HORIZON else f'_h{args.horizon}')
+              + ('' if args.objective == 'prauc' else '_hours'))
     {'xgb': xgb_study, 'cat': cat_study}[args.model](Xt, Xv, labels, args.trials, storage, suffix,
-                                                     (args.rounds, args.early))
+                                                     (args.rounds, args.early), hours)
 
 
 if __name__ == '__main__':

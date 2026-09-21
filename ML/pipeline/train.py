@@ -124,7 +124,7 @@ def fit_lgbm(Xt, yt, Xv, yv, params: dict | None = None):
 FIT = {'xgb': fit_xgb, 'cat': fit_cat, 'lgbm': fit_lgbm}
 
 
-def tuned(name: str, tp: str, target: str, horizon: int, budget: str = '') -> dict | None:
+def tuned(name: str, tp: str, target: str, horizon: int, budget: str = '', objective: str = '') -> dict | None:
     """Параметры из tune.py; для LightGBM подбора нет — берутся умолчания.
 
     Подбор делался под обычную цель. Для `--target _conf/_prim` своего файла нет, и раньше эта
@@ -134,7 +134,9 @@ def tuned(name: str, tp: str, target: str, horizon: int, budget: str = '') -> di
     """
     h = '' if horizon == config.HORIZON else f'_h{horizon}'
     d = config.WORK / 'runs' / 'tune'
-    path = d / f'{name}_{tp}{target}{budget}{h}.json'
+    path = d / f'{name}_{tp}{target}{budget}{h}{objective}.json'
+    if objective:  # подбор по часам (раздел 34) подменять обычным нельзя — иначе сравнение пустое
+        assert path.exists(), f'нет подбора {path.name}: сначала tune.py --objective hours'
     if not path.exists() and budget:
         # подбора под короткий бюджет нет — берём обычный, но говорим об этом (раздел 24)
         path = d / f'{name}_{tp}{target}{h}.json'
@@ -179,7 +181,8 @@ def main() -> None:
     ap.add_argument('--soft', type=float, default=1.0,
                     help='вес неподтверждённых выездом эпизодов в обучении: 1 — обычная цель, '
                          '0 — как --target _conf, промежуточные — мягкая метка (раздел 22)')
-    ap.add_argument('--params', default='default', choices=['default', 'tuned'])
+    ap.add_argument('--params', default='default', choices=['default', 'tuned', 'tunedh'],
+                    help='tunedh — параметры подбора по ложным часам (tune.py --objective hours)')
     ap.add_argument('--weather', default='', choices=['', 'base', 'ext', 'hum', 'air', 'both', 'humair'],
                     help='добавить признаки из weather.py: набор ТЗ, расширенный, конденсат, '
                          'качество воздуха, база вместе с расширенным или конденсат с воздухом')
@@ -211,7 +214,7 @@ def main() -> None:
     budget = '' if (args.rounds, args.early) == (4000, 200) else f'_r{args.rounds}e{args.early}'
     pw = '' if args.pw == 1.0 else f'_pw{int(round(args.pw * 100)):03d}'
     tag = (f'{args.branch}_h{H}{tg}' + ('' if soft == 1.0 else f'_soft{int(round(soft * 100)):02d}')
-           + ('_tuned' if args.params == 'tuned' else '')
+           + {'default': '', 'tuned': '_tuned', 'tunedh': '_tunedh'}[args.params]
            + WEATHER_TAG[args.weather] + ('_fleet' if args.fleet else '')
            + COMBO_TAG[args.combo] + DROP_TAG[args.drop] + budget + pw
            + (f'_{args.note}' if args.note else ''))
@@ -286,7 +289,8 @@ def main() -> None:
             scores['recency'] = (-Xv[:, fi[f'since_{tp}']], -Xs[:, fi[f'since_{tp}']])
         for name in models:
             t1 = time.time()
-            par = tuned(name, tp, tg, H, budget) if args.params == 'tuned' else None
+            par = (tuned(name, tp, tg, H, budget, '_hours' if args.params == 'tunedh' else '')
+                   if args.params != 'default' else None)
             if args.pw != 1.0 and name in ('xgb', 'cat'):
                 # Цена ошибки несимметрична: у диспетчера ложный выезд дороже, чем узнать
                 # о происшествии не за сутки, а в момент, — канал «по факту» всё равно объявит
