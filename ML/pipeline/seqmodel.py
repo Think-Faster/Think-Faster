@@ -11,6 +11,13 @@
 
     python seqmodel.py --epochs 12
     python seqmodel.py --epochs 12 --seed 1   # второе зерно: прогнозы tcn_s1_*, семейство main_h24/tcn_s1
+
+Прогон вперёд (раздел 43): `--cutoff` обучает на строках до даты минус горизонт, без выбора эпохи
+по проверке, и пишет прогноз теста 2026 в work/roll/<tag>_<дата>_<тип>.npy. `--window` отрезает
+старое, `--init` начинает с сети прошлого отрезка (дообучение на свежем окне).
+
+    python seqmodel.py --epochs 3 --cutoff 2026-01-31 --tag all_s0
+    python seqmodel.py --epochs 1 --cutoff 2026-01-31 --tag ft_s0 --init all_s0_2026-01-01 --window 30 --lr 2e-4
 """
 import argparse
 import json
@@ -76,6 +83,10 @@ def main() -> None:
     ap.add_argument('--horizon', type=int, default=config.HORIZON)
     ap.add_argument('--seed', type=int, default=0,
                     help='зерно; при ненулевом файлы пишутся как tcn_s<зерно>, чтобы не затереть нулевое')
+    ap.add_argument('--cutoff', default='', help='прогон вперёд: дата переобучения, обучение до неё минус H')
+    ap.add_argument('--window', type=int, default=0, help='прогон вперёд: окно обучения в сутках, 0 — всё')
+    ap.add_argument('--init', default='', help='прогон вперёд: начать с work/roll/<init>.pt')
+    ap.add_argument('--tag', default='roll', help='прогон вперёд: имя стратегии в файлах')
     args = ap.parse_args()
     torch.manual_seed(args.seed)
     rng = np.random.default_rng(args.seed)
@@ -119,13 +130,24 @@ def main() -> None:
     def to_idx(obj, h):
         return (torch.tensor([oi[int(x)] for x in obj], device=dev), torch.tensor(h, device=dev, dtype=torch.long))
 
-    tr_o, tr_h = to_idx(*index(SPLITS[args.branch][0]))
+    roll = bool(args.cutoff)
+    if roll:
+        # метка строки смотрит на H часов вперёд, поэтому обучение кончается за H до даты переобучения
+        hi = int((np.datetime64(args.cutoff) - np.datetime64('2019-01-01')) / np.timedelta64(1, 'h')) - H
+        o_, h_ = index([2022, 2023, 2024, 2025, 2026])
+        m = (h_ < hi) & ((h_ >= hi - args.window * 24) if args.window else True)
+        tr_o, tr_h = to_idx(o_[m], h_[m])
+    else:
+        tr_o, tr_h = to_idx(*index(SPLITS[args.branch][0]))
     out_dir = config.WORK / 'runs' / f'{args.branch}_h{H}'
     idx = {s: np.load(out_dir / 'preds' / f'index_{s}.npz') for s in ('val', 'test')}
     ev = {s: to_idx(idx[s]['object_id'], idx[s]['h']) for s in idx}
 
     x0, s0 = batch(tr_o[:2], tr_h[:2])
     net = Net(x0.shape[-1], s0.shape[-1], len(types), args.width, args.dropout).to(dev)
+    roll_dir = config.WORK / 'roll'
+    if args.init:
+        net.load_state_dict(torch.load(roll_dir / f'{args.init}.pt'))
     p = y_all[tr_o, tr_h].float().mean(0)
     pos_weight = ((1 - p) / p.clamp(min=1e-4)).sqrt().clamp(1, 10)
     opt = torch.optim.AdamW(net.parameters(), lr=args.lr, weight_decay=1e-2)
@@ -149,7 +171,8 @@ def main() -> None:
     yv = y_all[vo, vh].cpu().numpy()
     for epoch in range(args.epochs):
         t1 = time.time()
-        perm = torch.from_numpy(rng.choice(len(tr_o), args.per_epoch, replace=False)).to(dev)
+        perm = torch.from_numpy(rng.choice(len(tr_o), args.per_epoch,
+                                           replace=len(tr_o) < args.per_epoch)).to(dev)
         total = torch.zeros((), device=dev)
         for i in range(0, args.per_epoch - args.batch + 1, args.batch):
             j = perm[i:i + args.batch]
@@ -164,6 +187,10 @@ def main() -> None:
             opt.step()
             sched.step()
             total += loss.detach()
+        if roll:
+            print(f'эпоха {epoch + 1}: loss {total.item() / (args.per_epoch // args.batch):.4f}, '
+                  f'{time.time() - t1:.0f} с', flush=True)
+            continue
         pv = predict(vo[::3], vh[::3])
         aps = [average_precision_score(yv[::3, k], pv[:, k]) for k in range(len(types))]
         score = float(np.mean(aps))
@@ -172,6 +199,16 @@ def main() -> None:
               f'{time.time() - t1:.0f} с, пик {torch.cuda.max_memory_allocated() / 2 ** 30:.2f} ГБ', flush=True)
         if score > best:
             best, best_state = score, {k: v.detach().clone() for k, v in net.state_dict().items()}
+    if roll:
+        # проверка 2025 здесь уже в обучении, эпоха не выбирается: берётся последняя
+        roll_dir.mkdir(exist_ok=True)
+        name = f'{args.tag}_{args.cutoff}'
+        torch.save(net.state_dict(), roll_dir / f'{name}.pt')
+        ps = predict(*ev['test'])
+        for k, tp in enumerate(types):
+            np.save(roll_dir / f'{name}_{tp}.npy', ps[:, k])
+        print(f'{name}: строк {len(tr_o):,}, готово за {time.time() - t:.0f} с', flush=True)
+        return
     net.load_state_dict(best_state)
     tag = 'tcn' if args.seed == 0 else f'tcn_s{args.seed}'
     (out_dir / 'models').mkdir(parents=True, exist_ok=True)

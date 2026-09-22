@@ -155,6 +155,9 @@ def main() -> None:
                          'как в итоговой смеси раздела 34')
     ap.add_argument('--weather', default='', choices=['', 'base', 'ext', 'hum', 'air', 'both'],
                     help='пакет признаков из weather.py; `air` взят под загазованность (раздел 23)')
+    ap.add_argument('--save', action='store_true',
+                    help='сохранить прогноз прогона вперёд в work/roll/<out>_<тип>_<стратегия>.npz '
+                         '(объект, час, оценка, тревога) — для сравнения с TCN в часах (раздел 43)')
     args = ap.parse_args()
     H, types = args.horizon, args.types.split(',')
     meta = json.loads((FEAT / 'meta.json').read_text(encoding='utf-8'))
@@ -240,6 +243,9 @@ def main() -> None:
                 ps = predict(Xe[sl])
                 pred[sl] = ps
                 alarm[sl] = ps >= thr
+            if args.save:
+                (config.WORK / 'roll').mkdir(exist_ok=True)
+                np.savez(config.WORK / 'roll' / f'{args.out}_{tp}_{st}.npz', o=oe, h=he, p=pred, alarm=alarm)
             if not fitted:
                 print(f'  {config.TYPE_NAMES[tp]:18} {st:9} нет данных', flush=True)
                 continue
