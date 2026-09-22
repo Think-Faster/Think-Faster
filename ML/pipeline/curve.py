@@ -268,14 +268,47 @@ def split(run: str, on: str, model: str, H: int, steps: int, budgets: list[int],
         c, k = at[tp].get(sh, (0, 0)) if sh is not None else (0, 0)
         print(f'| {config.TYPE_NAMES[tp]} | {0 if sh is None else sh:.1%} | {c} | {k} |')
 
+    def durations(obj, h, alarm):
+        """Сколько часов длится каждый сигнал после склейки: от первого часа тревоги до последнего."""
+        if not alarm.any():
+            return np.zeros(0)
+        o, hh = obj[alarm], h[alarm]
+        order = np.lexsort((hh, o))
+        o, hh = o[order], hh[order]
+        start = np.r_[True, (o[1:] != o[:-1]) | (hh[1:] - hh[:-1] > gap + 1)]
+        first = hh[start]
+        last = np.maximum.reduceat(hh, np.flatnonzero(start))
+        return (last - first + 1).astype(np.float64)
+
+    def watchlist(tp, obj, h, share):
+        """Правило без модели: тревога всё время горит у объектов с худшей историей на проверке.
+
+        Объекты ранжируются по доле часов «инцидент в горизонте» на val, тревога включается
+        целиком на верхних, пока не набрана та же доля часов. Если модель на большом бюджете ловит
+        не больше этого правила, она работает как список проблемных объектов, а не как прогноз.
+        """
+        ov, _, nv, _ = operating.load_mix(run, 'val', operating.years(run, 'val'), tp, model, '')
+        size = max(int(ov.max()), int(obj.max())) + 1
+        cnt = np.bincount(ov, minlength=size)
+        pos = np.bincount(ov, weights=(nv <= H), minlength=size)
+        rate = (pos + 0.5) / (cnt + 50)          # объект без истории тянется к среднему
+        # равенство внутри объекта — сплошным блоком по времени. Случайный разрыв рассыпал бы
+        # тревогу по часам объекта, а россыпь в треть часов накрывает почти каждое окно 24 ч:
+        # правило «поймало» бы 39 проникновений из 41 на одном объекте, ничего не зная о времени
+        score = rate[obj] + 1e-12 * (h - h.min())
+        return score, float(np.quantile(score, 1 - share))
+
     where = target or on
     year = operating.years(run, where)
     print()
     print(f'Для диспетчера, та же раздача на {where}, склейка дребезга {gap} ч:')
     print('| тип | эпизодов | поймано заранее | остаётся каналу «по факту» | сигналов | '
-          'ложных сигналов | ложных в сутки | медиана упреждения, ч |')
-    print('|---|---:|---:|---:|---:|---:|---:|---:|')
+          'ложных сигналов | ложных в сутки | медиана упреждения, ч | сигнал длится, ч: медиана / 90% | '
+          'пойманы тревогой, горевшей ≥ 7 сут | правило «худшие объекты»: поймано |')
+    print('|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|')
     tot = [0] * 5
+    all_dur = []
+    stand = wl = 0
     days = 0.0
     for tp in env:
         obj, h, nxt, p = operating.load_mix(run, where, year, tp, model, '')
@@ -288,9 +321,19 @@ def split(run: str, on: str, model: str, H: int, steps: int, budgets: list[int],
         row = [m['episodes'], m['caught'], m['episodes'] - m['caught'], sig, sig - sig_true]
         tot = [a + b for a, b in zip(tot, row)]
         lead = m['lead_median_h']
+        d = durations(obj, h, p >= t)
+        all_dur.append(d)
+        dur = f'{np.median(d):.0f} / {np.quantile(d, 0.9):.0f}' if len(d) else '—'
+        # alarm_run_capped — доля пойманных, у которых тревога к началу эпизода горела RUN_CAP часов
+        st = round(m['caught'] * m['alarm_run_capped']) if m['caught'] else 0
+        ws, wt = watchlist(tp, obj, h, sh) if sh else (p, float('inf'))
+        wc = metrics.evaluate(obj, h, nxt, ws, wt, H, metrics.RUN_CAP)['caught']
+        stand, wl = stand + st, wl + wc
         print(f'| {config.TYPE_NAMES[tp]} | ' + ' | '.join(map(str, row))
-              + f' | {row[4] / days:.1f} | {"—" if lead != lead else f"{lead:.0f}"} |')
-    print(f'| **итого** | ' + ' | '.join(map(str, tot)) + f' | {tot[4] / days:.1f} | |')
+              + f' | {row[4] / days:.1f} | {"—" if lead != lead else f"{lead:.0f}"} | {dur} | {st} | {wc} |')
+    d = np.concatenate(all_dur)
+    dur = f'{np.median(d):.0f} / {np.quantile(d, 0.9):.0f}' if len(d) else '—'
+    print(f'| **итого** | ' + ' | '.join(map(str, tot)) + f' | {tot[4] / days:.1f} | | {dur} | {stand} | {wl} |')
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,

@@ -21,6 +21,7 @@
     python cascade.py --types fire,equipment --keep 0.95,0.9,0.8
     python cascade.py --scale insample          # отброшенный вариант выбора рабочей точки
     python cascade.py --run "$MIX5" --gap 6     # на смеси раздела 34 (раздел 39)
+    python cascade.py --run "$MIX5" --gap 6 --shares fire=0.04,equipment=0.12   # другой бюджет
 
 На смеси (`тип~прогоны`) первая ступень — оценка смеси на шкале проверки 2025 (`operating.load_mix`,
 `ref`), порог — доля часов под тревогой по типу из раздела 38, снятая на своём периоде, как там.
@@ -98,6 +99,35 @@ def extras(con, run, name, year, tp, obj, h, feats_sp) -> dict[str, np.ndarray]:
     return out
 
 
+def false_hours(obj, h, y, alarm, shown=None) -> int:
+    """Часы тревоги в показанных ложных сигналах: сколько часов пустая тревога висит у диспетчера.
+
+    Счёт сигналов поощряет длинные тревоги: на большой доле часов объект подолгу стоит под тревогой
+    одним сигналом. Часы это показывают. Сигнал, у которого не погашен хотя бы один час, диспетчер
+    видит целиком (как в `maintenance.shown_signals`), поэтому в счёт идут все его часы.
+    """
+    if not alarm.any():
+        return 0
+    o, hh, yy = obj[alarm], h[alarm], y[alarm]
+    mm = np.ones(len(o), bool) if shown is None else shown[alarm]
+    order = np.lexsort((hh, o))
+    o, hh, yy, mm = o[order], hh[order], yy[order], mm[order]
+    start = np.r_[True, (o[1:] != o[:-1]) | (hh[1:] - hh[:-1] > GAP[0] + 1)]
+    run = np.cumsum(start) - 1
+    n = int(run[-1]) + 1
+    bad = (np.bincount(run, weights=yy, minlength=n) == 0) & (np.bincount(run, weights=mm, minlength=n) > 0)
+    return int(bad[run].sum())
+
+
+def standing(m: dict) -> int:
+    """Сколько пойманных эпизодов пришлось на тревогу, горевшую к их началу неделю и дольше.
+
+    Такая тревога — статус объекта, а не прогноз: правило «тревога всегда у худших объектов»
+    ловит так почти всё (раздел 40).
+    """
+    return round(m['caught'] * m['alarm_run_capped']) if m['caught'] else 0
+
+
 def stricter(obj, h, y, nxt, p, thr0, target_sig, H):
     """Контроль: тот же результат, но простым подъёмом порога первой ступени.
 
@@ -115,7 +145,7 @@ def stricter(obj, h, y, nxt, p, thr0, target_sig, H):
             best = (sig, sig - true, t)
     sig, false, t = best
     m = metrics.evaluate(obj, h, nxt, p, t, H, metrics.RUN_CAP)
-    return sig, false, m['caught']
+    return sig, false, m['caught'], false_hours(obj, h, y, p >= t), standing(m)
 
 
 def mart(year: int, rows: np.ndarray, feats: list[str]) -> np.ndarray:
@@ -167,7 +197,10 @@ def main() -> None:
     ap.add_argument('--gap', type=int, default=0,
                     help='склейка дребезга: повтор на том же объекте в пределах gap '
                          'часов — продолжение прежней тревоги, а не новая (раздел 27)')
+    ap.add_argument('--shares', default='',
+                    help='смесь: доли часов по типам вместо раздела 38, например fire=0.04,gas=0.03')
     args = ap.parse_args()
+    SHARES.update({k: float(v) for k, v in (x.split('=') for x in args.shares.split(',') if x)})
     GAP[0] = args.gap
     import xgboost as xgb
     H = args.horizon
@@ -182,8 +215,8 @@ def main() -> None:
     print(f'Вторая ступень обучена на тревогах проверки 2025, применена к тесту 2026, прогон '
           f'{args.run}. Порог первой ступени — {first}. '
           f'Рабочая точка выбрана {how}.\n')
-    print('| тип | рабочая точка | сигналов | из них ложных | доля верных | поймано эпизодов |')
-    print('|---|---|---:|---:|---:|---:|')
+    print('| тип | рабочая точка | сигналов | из них ложных | доля верных | поймано эпизодов | часов в ложных | пойманы тревогой ≥ 7 сут |')
+    print('|---|---|---:|---:|---:|---:|---:|---:|')
     for tp in args.types.split(','):
         ov, hv, nv, pv, thv = first_stage(args.run, 'val', 2025, tp)
         os_, hs, ns, ps, thr = first_stage(args.run, 'test', 2026, tp)
@@ -191,7 +224,7 @@ def main() -> None:
         yv, ys = (nv <= H).astype(np.int8), (ns <= H).astype(np.int8)
         name = config.TYPE_NAMES[tp]
         if av.sum() < 200 or as_.sum() < 10:
-            print(f'| {name} | тревог слишком мало ({int(av.sum())} / {int(as_.sum())}) | | | | |')
+            print(f'| {name} | тревог слишком мало ({int(av.sum())} / {int(as_.sum())}) | | | | | | |')
             continue
         ev = extras(con, args.run, 'val', 2025, tp, ov, hv, sp)
         es = extras(con, args.run, 'test', 2026, tp, os_, hs, sp)
@@ -216,8 +249,8 @@ def main() -> None:
         base = metrics.evaluate(os_, hs, ns, ps, thr, H, metrics.RUN_CAP)
         sig, true = metrics.signals(os_, hs, ys, as_, GAP[0])
         print(f'| {name} | без второй ступени | {sig} | {sig - true} | '
-              f"{1 - (sig - true) / sig:.3f} | {base['caught']} из {base['episodes']} |"
-              .replace('.', ','))
+              f"{1 - (sig - true) / sig:.3f} | {base['caught']} из {base['episodes']} | "
+              f"{false_hours(os_, hs, ys, as_)} | {standing(base)} |".replace('.', ','))
         pos = qv[(yq == 1) & np.isfinite(qv)]
         for keep in [float(x) for x in args.keep.split(',')]:
             t2 = float(np.quantile(pos, 1 - keep)) if keep < 1 else float(pos.min())
@@ -230,15 +263,16 @@ def main() -> None:
             m2 = metrics.evaluate(os_, hs, ns, np.where(mask, ps, 0.0), thr, H, metrics.RUN_CAP)
             good = f'{1 - (sig2 - true2) / sig2:.3f}' if sig2 else '—'
             print(f'| {name} | сохранить {keep:.2f} истинных | {sig2} | {sig2 - true2} | {good} | '
-                  f"{m2['caught']} из {m2['episodes']} |".replace('.', ','))
+                  f"{m2['caught']} из {m2['episodes']} | {false_hours(os_, hs, ys, as_, mask)} | {standing(m2)} |"
+                  .replace('.', ','))
             if keep < 1:
-                s3, f3, c3 = stricter(os_, hs, ys, ns, ps, thr, sig2, H)
+                s3, f3, c3, fh3, st3 = stricter(os_, hs, ys, ns, ps, thr, sig2, H)
                 g3 = f'{1 - f3 / s3:.3f}' if s3 else '—'
                 print(f'| {name} | …то же числом сигналов, но просто порогом выше | {s3} | {f3} | '
-                      f"{g3} | {c3} из {base['episodes']} |".replace('.', ','))
+                      f"{g3} | {c3} из {base['episodes']} | {fh3} | {st3} |".replace('.', ','))
         imp = sorted(b.get_score(importance_type='gain').items(), key=lambda kv: -kv[1])[:5]
         print(f"| {name} | *что смотрит вторая ступень* | "
-              f"{', '.join(k for k, _ in imp)} | | | |")
+              f"{', '.join(k for k, _ in imp)} | | | | | |")
     con.close()
 
 
