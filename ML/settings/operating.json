@@ -1,0 +1,15 @@
+{
+  "$schema": "./operating.schema.json",
+  "version": 3,
+  "changed": "2026-09-22",
+  "changed_by": "ML",
+  "reason": "правило отклонения только у газа и подтопления: у остальных типов оно добавляет пропусков больше, чем убирает ложных сигналов (analytics.md, раздел 46)",
+  "types": {
+    "fire":      {"share": 0.025, "reject_k": null},
+    "gas":       {"share": 0.026, "reject_k": 0.2},
+    "flood":     {"share": 0.018, "reject_k": 0.2},
+    "equipment": {"share": 0.059, "reject_k": null},
+    "sensor":    {"share": 0.009, "reject_k": null},
+    "intrusion": {"share": 0.005, "reject_k": null}
+  }
+}

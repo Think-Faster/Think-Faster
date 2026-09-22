@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "think-faster/ML/settings/operating.schema.json",
+  "title": "Рабочие параметры прогноза",
+  "description": "Что главный диспетчер может менять без переобучения модели. Границы — исследованный диапазон (analytics.md, разделы 44, 46); за ними поведение не проверено.",
+  "type": "object",
+  "required": ["version", "changed", "changed_by", "reason", "types"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {"type": "string"},
+    "version": {"type": "integer", "minimum": 1, "description": "Растёт на 1 при каждом сохранении"},
+    "changed": {"type": "string", "format": "date", "description": "Дата изменения"},
+    "changed_by": {"type": "string", "description": "Кто изменил"},
+    "reason": {"type": "string", "minLength": 1, "description": "Зачем изменили"},
+    "types": {
+      "type": "object",
+      "required": ["fire", "gas", "flood", "equipment", "sensor", "intrusion"],
+      "additionalProperties": false,
+      "properties": {
+        "fire": {"$ref": "#/$defs/type", "title": "Пожар", "additionalProperties": false,
+          "properties": {
+            "share": {"$ref": "#/$defs/share", "default": 0.030, "minimum": 0.015, "maximum": 0.045, "x-step": 0.001},
+            "reject_k": {"$ref": "#/$defs/reject_k", "default": null,
+                         "x-warning": "У пожара правило добавляет пропусков больше, чем убирает ложных сигналов (тест 2026: −8 ложных, +23 пропуска)"}}},
+        "gas": {"$ref": "#/$defs/type", "title": "Загазованность", "additionalProperties": false,
+          "properties": {
+            "share": {"$ref": "#/$defs/share", "default": 0.026, "minimum": 0.013, "maximum": 0.039, "x-step": 0.001,
+                      "x-warning": "Полнота газа на тесте 2026 уже 57% при минимуме ТЗ 60% (раздел 38): снижать долю нельзя, повышение — единственный путь к минимуму"},
+            "reject_k": {"$ref": "#/$defs/reject_k", "default": 0.2,
+                         "x-warning": "При 0,2 поймано 35 из 74 (47%), при 0,5 — 40 (54%) и 137 ложных сигналов против 81; без правила 42 и 182"}}},
+        "flood": {"$ref": "#/$defs/type", "title": "Подтопление", "additionalProperties": false,
+          "properties": {
+            "share": {"$ref": "#/$defs/share", "default": 0.018, "minimum": 0.009, "maximum": 0.027, "x-step": 0.001},
+            "reject_k": {"$ref": "#/$defs/reject_k", "default": 0.2}}},
+        "equipment": {"$ref": "#/$defs/type", "title": "Отказ оборудования", "additionalProperties": false,
+          "properties": {
+            "share": {"$ref": "#/$defs/share", "default": 0.072, "minimum": 0.036, "maximum": 0.108, "x-step": 0.001},
+            "reject_k": {"$ref": "#/$defs/reject_k", "default": null,
+                         "x-warning": "У отказа оборудования правило дробит длинные тревоги: ложных сигналов больше, а не меньше (тест 2026: +18 ложных, +42 пропуска)"}}},
+        "sensor": {"$ref": "#/$defs/type", "title": "Отказ датчика", "additionalProperties": false,
+          "properties": {
+            "share": {"$ref": "#/$defs/share", "default": 0.009, "minimum": 0.0045, "maximum": 0.0135, "x-step": 0.0005},
+            "reject_k": {"$ref": "#/$defs/reject_k", "default": null}}},
+        "intrusion": {"$ref": "#/$defs/type", "title": "Проникновение", "additionalProperties": false,
+          "properties": {
+            "share": {"$ref": "#/$defs/share", "default": 0.005, "minimum": 0.0025, "maximum": 0.0075, "x-step": 0.0005,
+                      "x-warning": "Полнота проникновения 16% при минимуме ТЗ 30% (раздел 38): доля его не спасает, пропуски глубокие (раздел 44)"},
+            "reject_k": {"$ref": "#/$defs/reject_k", "default": null,
+                         "x-warning": "Правило теряет треть поимок проникновения (тест 2026: 15 → 10 из 92)"}}}
+      }
+    }
+  },
+  "$defs": {
+    "type": {"type": "object", "required": ["share", "reject_k"]},
+    "share": {
+      "type": "number", "title": "Доля часов под тревогой",
+      "description": "Какая доля часов объекта может гореть тревогой по этому типу. Порог пересчитывается каждый час по оценкам за последние 90 суток. Меньше доля — меньше ложных, но и меньше пойманных"
+    },
+    "reject_k": {
+      "type": ["number", "null"], "title": "Порог после отклонения", "minimum": 0, "maximum": 0.5, "x-step": 0.05,
+      "description": "null — правило выключено. Число — после отклонения прогноза диспетчером объект по этому типу «маловероятен» до следующего настоящего эпизода: тревога горит, только если оценка в верхней части k обычной доли. 0 — полное молчание, 0,5 — половина обычной доли"
+    }
+  }
+}

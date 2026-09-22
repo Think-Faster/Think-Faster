@@ -175,9 +175,10 @@ def main() -> None:
     ap.add_argument('--types', default=','.join(config.TYPES))
     ap.add_argument('--step', type=int, default=3, help='шаг по часам в обучении: соседние часы почти одинаковы')
     ap.add_argument('--horizon', type=int, default=config.HORIZON)
-    ap.add_argument('--target', default='', choices=['', '_prim', '_conf'],
+    ap.add_argument('--target', default='', choices=['', '_prim', '_conf', '_nopw'],
                     help='_prim — только первичные эпизоды: такого же не было 7 сут; '
-                         '_conf — только те, на которые приехала бригада')
+                         '_conf — только те, на которые приехала бригада; '
+                         '_nopw — без перезапусков после питания (restart.py, раздел 45)')
     ap.add_argument('--soft', type=float, default=1.0,
                     help='вес неподтверждённых выездом эпизодов в обучении: 1 — обычная цель, '
                          '0 — как --target _conf, промежуточные — мягкая метка (раздел 22)')

@@ -123,8 +123,8 @@ def load_models(run: str) -> dict:
     return out
 
 
-# Доли часов под тревогой по типам на бюджете 80 тыс. ложных часов (раздел 38)
-SHARES = 'fire=0.030,gas=0.026,flood=0.022,equipment=0.097,sensor=0.026,intrusion=0.005'
+# Доли часов под тревогой по типам — рабочие, из settings/operating.json (раздел 46)
+SHARES = ','.join(f'{k}={v}' for k, v in config.shares().items())
 
 
 def mix_parts(name: str, tp: str) -> list:

@@ -70,56 +70,62 @@ def simulate(d, ons_by, share, r, N, k):
     return out
 
 
-ALL = {}
-for on in ('val', 'test'):
-    data, obo = {}, {}
-    for tp in SHARE:
-        d = load(tp, on)
-        data[tp] = d
-        by = {}
-        for a, b in d['eps']:
-            by.setdefault(a, []).append(b)
-        obo[tp] = {a: np.array(sorted(b), np.int64) for a, b in by.items()}
-    curves = {}
-    for name, r, N, k in VARIANTS:
-        pts = np.zeros((len(F), 5))
-        for tp, s in SHARE.items():
-            for i, f in enumerate(F):
-                al = simulate(data[tp], obo[tp], min(s * f, 0.5), r, N, k)
-                m = measure(data[tp], al)
-                pts[i] += [m['fh'], m['false_sig'], m['caught'], m['fresh'], m['sig']]
-        curves[name] = pts
-        print(f'{on} {name} f=1: лч {pts[3, 0]:.0f} лс {pts[3, 1]:.0f} поймано {pts[3, 2]:.0f} свежих {pts[3, 3]:.0f}',
-              file=sys.stderr, flush=True)
-    ALL[on] = curves
-    ref = curves['raw'][3]
-    print(f'\n### {on}: raw при долях как есть — ложных ч {ref[0]:.0f}, ложных сигналов {ref[1]:.0f}, '
-          f'поймано {ref[2]:.0f}, свежих {ref[3]:.0f}\n')
-    print('| вариант | при тех же долях: ложных ч / ложных сигн. / поймано / свежих | при равных ложных ч: '
-          'поймано / свежих / ложных сигн. | при равных ложных сигн.: поймано / свежих / ложных ч | '
-          'raw с тем же числом ложных ч (снижение бюджета): поймано / свежих / ложных сигн. |')
-    print('|---|---|---|---|---|')
-    for name, pts in curves.items():
-        a = pts[3]
-        o1 = np.argsort(pts[:, 0])
-        b = [np.interp(ref[0], pts[o1, 0], pts[o1, j]) for j in (2, 3, 1)]
-        o2 = np.argsort(pts[:, 1])
-        c = [np.interp(ref[1], pts[o2, 1], pts[o2, j]) for j in (2, 3, 0)]
-        rw = curves['raw']
-        o3 = np.argsort(rw[:, 0])
-        e = [np.interp(a[0], rw[o3, 0], rw[o3, j]) for j in (2, 3, 1)]
-        print(f'| {name} | {a[0]:.0f} / {a[1]:.0f} / {a[2]:.0f} / {a[3]:.0f} | {b[0]:.0f} / {b[1]:.0f} / {b[2]:.0f} | '
-              f'{c[0]:.0f} / {c[1]:.0f} / {c[2]:.0f} | {e[0]:.0f} / {e[1]:.0f} / {e[2]:.0f} |', flush=True)
 
-# раздел 44: при равных ложных часах вокруг рабочей точки «168 ч, молчание»
-for on, curves in ALL.items():
-    base = curves['r1_N168_k0.0'][3]
-    print(f'\n### {on}: при равных ложных часах, доли рабочей точки r1_N168_k0.0 ({base[0]:.0f})\n')
-    tg = [0.8, 1.0, 1.15, 1.3]
-    print('| вариант | ' + ' | '.join(f'{t:g}: свежих / ложных сигн.' for t in tg) + ' |')
-    print('|---|' + '---|' * len(tg))
-    for name, pts in curves.items():
-        o1 = np.argsort(pts[:, 0])
-        cells = [f'{np.interp(base[0] * t, pts[o1, 0], pts[o1, 3]):.0f} / {np.interp(base[0] * t, pts[o1, 0], pts[o1, 1]):.0f}'
-                 for t in tg]
-        print(f'| {name} | ' + ' | '.join(cells) + ' |')
+def main():
+    ALL = {}
+    for on in ('val', 'test'):
+        data, obo = {}, {}
+        for tp in SHARE:
+            d = load(tp, on)
+            data[tp] = d
+            by = {}
+            for a, b in d['eps']:
+                by.setdefault(a, []).append(b)
+            obo[tp] = {a: np.array(sorted(b), np.int64) for a, b in by.items()}
+        curves = {}
+        for name, r, N, k in VARIANTS:
+            pts = np.zeros((len(F), 5))
+            for tp, s in SHARE.items():
+                for i, f in enumerate(F):
+                    al = simulate(data[tp], obo[tp], min(s * f, 0.5), r, N, k)
+                    m = measure(data[tp], al)
+                    pts[i] += [m['fh'], m['false_sig'], m['caught'], m['fresh'], m['sig']]
+            curves[name] = pts
+            print(f'{on} {name} f=1: лч {pts[3, 0]:.0f} лс {pts[3, 1]:.0f} поймано {pts[3, 2]:.0f} свежих {pts[3, 3]:.0f}',
+                  file=sys.stderr, flush=True)
+        ALL[on] = curves
+        ref = curves['raw'][3]
+        print(f'\n### {on}: raw при долях как есть — ложных ч {ref[0]:.0f}, ложных сигналов {ref[1]:.0f}, '
+              f'поймано {ref[2]:.0f}, свежих {ref[3]:.0f}\n')
+        print('| вариант | при тех же долях: ложных ч / ложных сигн. / поймано / свежих | при равных ложных ч: '
+              'поймано / свежих / ложных сигн. | при равных ложных сигн.: поймано / свежих / ложных ч | '
+              'raw с тем же числом ложных ч (снижение бюджета): поймано / свежих / ложных сигн. |')
+        print('|---|---|---|---|---|')
+        for name, pts in curves.items():
+            a = pts[3]
+            o1 = np.argsort(pts[:, 0])
+            b = [np.interp(ref[0], pts[o1, 0], pts[o1, j]) for j in (2, 3, 1)]
+            o2 = np.argsort(pts[:, 1])
+            c = [np.interp(ref[1], pts[o2, 1], pts[o2, j]) for j in (2, 3, 0)]
+            rw = curves['raw']
+            o3 = np.argsort(rw[:, 0])
+            e = [np.interp(a[0], rw[o3, 0], rw[o3, j]) for j in (2, 3, 1)]
+            print(f'| {name} | {a[0]:.0f} / {a[1]:.0f} / {a[2]:.0f} / {a[3]:.0f} | {b[0]:.0f} / {b[1]:.0f} / {b[2]:.0f} | '
+                  f'{c[0]:.0f} / {c[1]:.0f} / {c[2]:.0f} | {e[0]:.0f} / {e[1]:.0f} / {e[2]:.0f} |', flush=True)
+
+    # раздел 44: при равных ложных часах вокруг рабочей точки «168 ч, молчание»
+    for on, curves in ALL.items():
+        base = curves['r1_N168_k0.0'][3]
+        print(f'\n### {on}: при равных ложных часах, доли рабочей точки r1_N168_k0.0 ({base[0]:.0f})\n')
+        tg = [0.8, 1.0, 1.15, 1.3]
+        print('| вариант | ' + ' | '.join(f'{t:g}: свежих / ложных сигн.' for t in tg) + ' |')
+        print('|---|' + '---|' * len(tg))
+        for name, pts in curves.items():
+            o1 = np.argsort(pts[:, 0])
+            cells = [f'{np.interp(base[0] * t, pts[o1, 0], pts[o1, 3]):.0f} / {np.interp(base[0] * t, pts[o1, 0], pts[o1, 1]):.0f}'
+                     for t in tg]
+            print(f'| {name} | ' + ' | '.join(cells) + ' |')
+
+
+if __name__ == '__main__':
+    main()

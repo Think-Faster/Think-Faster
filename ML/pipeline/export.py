@@ -79,9 +79,8 @@ def fit(model: str, X, y, params: dict, n: int, seed: int):
     return m
 
 
-# Доли часов под тревогой по типам на бюджете 80 тыс. ложных часов (раздел 38)
-SHARES = {'fire': 0.030, 'gas': 0.026, 'flood': 0.022, 'equipment': 0.097, 'sensor': 0.026,
-          'intrusion': 0.005}
+# Доли часов под тревогой по типам — рабочие, из settings/operating.json (раздел 46)
+SHARES = config.shares()
 
 
 def mix_name(tp: str) -> str:
