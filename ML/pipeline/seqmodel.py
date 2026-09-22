@@ -10,6 +10,7 @@
 пишутся рядом с прогнозами бустинга (work/runs/<ветка>/preds/tcn_*), чтобы их можно было смешивать.
 
     python seqmodel.py --epochs 12
+    python seqmodel.py --epochs 12 --seed 1   # второе зерно: прогнозы tcn_s1_*, семейство main_h24/tcn_s1
 """
 import argparse
 import json
@@ -73,7 +74,8 @@ def main() -> None:
     ap.add_argument('--lr', type=float, default=1e-3)
     ap.add_argument('--branch', default='main', choices=list(SPLITS))
     ap.add_argument('--horizon', type=int, default=config.HORIZON)
-    ap.add_argument('--seed', type=int, default=0)
+    ap.add_argument('--seed', type=int, default=0,
+                    help='зерно; при ненулевом файлы пишутся как tcn_s<зерно>, чтобы не затереть нулевое')
     args = ap.parse_args()
     torch.manual_seed(args.seed)
     rng = np.random.default_rng(args.seed)
@@ -171,16 +173,17 @@ def main() -> None:
         if score > best:
             best, best_state = score, {k: v.detach().clone() for k, v in net.state_dict().items()}
     net.load_state_dict(best_state)
+    tag = 'tcn' if args.seed == 0 else f'tcn_s{args.seed}'
     (out_dir / 'models').mkdir(parents=True, exist_ok=True)
-    torch.save(best_state, out_dir / 'models' / 'tcn.pt')
+    torch.save(best_state, out_dir / 'models' / f'{tag}.pt')
 
     preds = {s: predict(*ev[s]) for s in ev}
     report = {}
     cap = int(z['next_' + types[0]].max())
     for k, tp in enumerate(types):
         pv, ps = preds['val'][:, k], preds['test'][:, k]
-        np.save(out_dir / 'preds' / f'tcn_{tp}_val.npy', pv)
-        np.save(out_dir / 'preds' / f'tcn_{tp}_test.npy', ps)
+        np.save(out_dir / 'preds' / f'{tag}_{tp}_val.npy', pv)
+        np.save(out_dir / 'preds' / f'{tag}_{tp}_test.npy', ps)
         yv_k = (z[f'next_{tp}'][ev['val'][0].cpu().numpy(), idx['val']['h']] <= H).astype(np.float32)
         thr = metrics.best_threshold(yv_k, pv)
         row = {}
@@ -189,11 +192,11 @@ def main() -> None:
             oo = ev[split][0].cpu().numpy()
             for target in ('', '_prim', '_conf'):
                 row[f'{split}{target}'] = metrics.evaluate(obj, hh, z[f'next_{tp}{target}'][oo, hh], pr, thr, H, cap)
-        report[tp] = {'scores': {'tcn': row}}
+        report[tp] = {'scores': {tag: row}}
         s_, sp = row['test'], row['test_prim']
         print(f'  {tp:9s} tcn test PR-AUC {s_["pr_auc"]:.3f} P {s_["precision"]:.3f} R(эп) {s_["recall_episodes"]:.3f}'
               f' | первичные PR-AUC {sp["pr_auc"]:.3f}', flush=True)
-    (out_dir / 'report_tcn.json').write_text(json.dumps(report, ensure_ascii=False, indent=1), encoding='utf-8')
+    (out_dir / f'report_{tag}.json').write_text(json.dumps(report, ensure_ascii=False, indent=1), encoding='utf-8')
     print(f'готово за {time.time() - t:.0f} с')
 
 
