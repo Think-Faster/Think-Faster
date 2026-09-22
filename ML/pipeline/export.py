@@ -18,6 +18,11 @@
 
     python export.py
     python export.py --types fire --seeds 0   # проба
+    python export.py --check                  # проверка допущения (раздел 39)
+
+`--check` проверяет само допущение «больше лет при том же числе деревьев — не хуже». Смесь
+обучается так же, но на 2022–2025, то есть с годом проверки внутри, и сравнивается с рабочими
+прогонами на тесте 2026 при долях часов раздела 38. Модели кладутся в `work/export_check/`.
 """
 import argparse
 import json
@@ -27,6 +32,8 @@ from datetime import date
 import numpy as np
 
 import config
+import metrics
+import operating as op
 import train
 
 # Смесь раздела 34: тип -> (префикс прогона, семейство, параметры в train.tuned)
@@ -72,25 +79,49 @@ def fit(model: str, X, y, params: dict, n: int, seed: int):
     return m
 
 
+# Доли часов под тревогой по типам на бюджете 80 тыс. ложных часов (раздел 38)
+SHARES = {'fire': 0.030, 'gas': 0.026, 'flood': 0.022, 'equipment': 0.097, 'sensor': 0.026,
+          'intrusion': 0.005}
+
+
+def mix_name(tp: str) -> str:
+    run, model, _ = MIX[tp]
+    tail = '' if model == 'xgb' else f'/{model}'
+    return '+'.join((run if s == 0 else f'{run}_s{s}') + tail for s in range(5))
+
+
+def check_row(tp: str, obj, h, nxt, p, H: int) -> str:
+    t = float(np.quantile(p, 1 - SHARES[tp]))
+    m = metrics.evaluate(obj, h, nxt, p, t, H, metrics.RUN_CAP)
+    sig, true = metrics.signals(obj, h, (nxt <= H).astype(np.int8), p >= t, 6)
+    return f"{m['pr_auc']:.3f} · {m['caught']} из {m['episodes']} · {sig - true} ложных"
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument('--types', default=','.join(config.TYPES))
     ap.add_argument('--seeds', default='0,1,2,3,4')
     ap.add_argument('--step', type=int, default=3, help='шаг по часам, как в train.py')
+    ap.add_argument('--check', action='store_true', help='обучить на 2022–2025 и сравнить на тесте 2026')
     args = ap.parse_args()
+    years = YEARS[:-1] if args.check else YEARS
     H = config.HORIZON
     meta = json.loads((train.FEAT / 'meta.json').read_text(encoding='utf-8'))
     features = meta['features']
     t = time.time()
-    df = train.load(YEARS, args.step, ['object_id', 'h'] + features + meta['targets'])
+    df = train.load(years, args.step, ['object_id', 'h'] + features + meta['targets'])
     df = df.filter(df['h'] <= df['h'].max() - H)
     X = train.matrix(df, features)
-    print(f'обучение {X.shape}, годы {YEARS[0]}–{YEARS[-1]}: {time.time() - t:.0f} с', flush=True)
+    print(f'обучение {X.shape}, годы {years[0]}–{years[-1]}: {time.time() - t:.0f} с', flush=True)
+    if args.check:
+        test = train.load([2026], 1, ['object_id', 'h'] + features + meta['targets'])
+        Xs = train.matrix(test, features)
+        rows = []
 
-    out = config.WORK / 'export'
+    out = config.WORK / ('export_check' if args.check else 'export')
     path = out / 'manifest.json'
     manifest = json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
-    manifest.update({'features': features, 'years': YEARS, 'horizon': H, 'step': args.step,
+    manifest.update({'features': features, 'years': years, 'horizon': H, 'step': args.step,
                      'rows': int(X.shape[0]), 'built': date.today().isoformat(),
                      'score': 'среднее рангов зёрен по типу', 'threshold': 'доля часов, окно 90 суток'})
     for tp in args.types.split(','):
@@ -99,6 +130,7 @@ def main() -> None:
         objective = '_hours_v2024' if kind == 'tunedh24' else ''
         params = {} if kind == 'default' else train.tuned(model, tp, '', H, objective=objective) or {}
         (out / tp).mkdir(parents=True, exist_ok=True)
+        ranks = 0
         for seed in (int(s) for s in args.seeds.split(',')):
             ref = run if seed == 0 else f'{run}_s{seed}'
             n = trees(ref, tp, model)
@@ -111,6 +143,21 @@ def main() -> None:
             print(f'{tp} {model} зерно {seed}: {n} деревьев, доля положительных {y.mean():.4f}, '
                   f'{time.time() - t1:.0f} с', flush=True)
             path.write_text(json.dumps(manifest, ensure_ascii=False, indent=1), encoding='utf-8')
+            if args.check:
+                q = (m.inplace_predict(Xs) if model == 'xgb' else m.predict_proba(Xs)[:, 1])
+                ranks = ranks + q.argsort().argsort()
+        if args.check:
+            obj, h, nxt = (test[c].to_numpy() for c in ('object_id', 'h', f'next_{tp}'))
+            o, hh, nn, pw = op.load_mix(f'{tp}~{mix_name(tp)}', 'test', 2026, tp, model)
+            assert np.array_equal(o, obj) and np.array_equal(hh, h)
+            rows.append(f'| {config.TYPE_NAMES[tp]} | {SHARES[tp]:.1%} | {check_row(tp, obj, h, nxt, pw, H)} | '
+                        f'{check_row(tp, obj, h, nxt, ranks.astype(np.float64), H)} |')
+            print(rows[-1], flush=True)
+    if args.check:
+        print('\nТест 2026, доли часов раздела 38, склейка 6 ч. В клетке: PR-AUC · поймано · ложных сигналов.\n')
+        print('| тип | доля часов | рабочие прогоны (2022–2024) | те же деревья на 2022–2025 |')
+        print('|---|---:|---|---|')
+        print('\n'.join(rows))
 
 
 if __name__ == '__main__':

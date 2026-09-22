@@ -20,6 +20,12 @@
     python cascade.py --run main_h24_tuned
     python cascade.py --types fire,equipment --keep 0.95,0.9,0.8
     python cascade.py --scale insample          # отброшенный вариант выбора рабочей точки
+    python cascade.py --run "$MIX5" --gap 6     # на смеси раздела 34 (раздел 39)
+
+На смеси (`тип~прогоны`) первая ступень — оценка смеси на шкале проверки 2025 (`operating.load_mix`,
+`ref`), порог — доля часов под тревогой по типу из раздела 38, снятая на своём периоде, как там.
+Вместо вероятностей двух семейств второй ступени даётся сама оценка смеси, «соседи» — тревоги
+остальных типов при их долях.
 """
 import argparse
 import json
@@ -38,6 +44,20 @@ GAP = [0]
 
 FEAT = config.WORK / 'features'
 
+# Доли часов под тревогой по типам на бюджете 80 тыс. ложных часов (раздел 38)
+SHARES = {'fire': 0.030, 'gas': 0.026, 'flood': 0.022, 'equipment': 0.097, 'sensor': 0.026,
+          'intrusion': 0.005}
+
+
+def first_stage(run, name, year, tp):
+    """Оценка первой ступени и порог: у смеси — доля часов, у прогона — лучший F1 на проверке."""
+    if '~' in run:
+        obj, h, nxt, p = op.load_mix(run, name, year, tp, 'xgb', ref=('val', 2025))
+        return obj, h, nxt, p, float(np.quantile(p, 1 - SHARES[tp]))
+    obj, h, nxt, p = op.split(run, name, year, tp, 'xgb')
+    _, _, nv, pv = op.split(run, 'val', 2025, tp, 'xgb')
+    return obj, h, nxt, p, metrics.best_threshold((nv <= config.HORIZON).astype(np.int8), pv)
+
 
 def runlen(obj: np.ndarray, h: np.ndarray, a: np.ndarray) -> np.ndarray:
     """Сколько часов тревога горит подряд к этому часу (0 — тревоги нет)."""
@@ -55,15 +75,17 @@ def extras(con, run, name, year, tp, obj, h, feats_sp) -> dict[str, np.ndarray]:
     """Признаки второй ступени поверх прогноза первой."""
     H = config.HORIZON
     out = {}
-    for m in ('xgb', 'cat'):
-        out[f'p_{m}'] = np.load(config.WORK / 'runs' / run / 'preds' / f'{m}_{tp}_{name}.npy')
+    if '~' in run:
+        out['p_mix'] = first_stage(run, name, year, tp)[3].astype(np.float32)
+    else:
+        for m in ('xgb', 'cat'):
+            out[f'p_{m}'] = np.load(config.WORK / 'runs' / run / 'preds' / f'{m}_{tp}_{name}.npy')
     near = np.zeros(len(h), np.float32)
     for other in config.TYPES:
         if other == tp:
             continue
-        _, _, nv, pv = op.split(run, 'val', 2025, other, 'xgb')
-        _, _, _, ps = op.split(run, name, year, other, 'xgb')
-        near += (ps >= metrics.best_threshold((nv <= H).astype(np.int8), pv)).astype(np.float32)
+        _, _, _, ps, t = first_stage(run, name, year, other)
+        near += (ps >= t).astype(np.float32)
     out['near'] = near
     if feats_sp is not None:
         j = (pl.DataFrame({'object_id': obj, 'h': h}).join(feats_sp, on=['object_id', 'h'], how='left')
@@ -156,16 +178,16 @@ def main() -> None:
 
     how = ('по оценкам вне обучения, блоками по времени' if args.scale == 'oof'
            else 'по обучающим оценкам — вариант с подглядыванием, оставлен для сверки')
+    first = ('доля часов по типу из раздела 38' if '~' in args.run else 'по лучшему F1 на проверке')
     print(f'Вторая ступень обучена на тревогах проверки 2025, применена к тесту 2026, прогон '
-          f'{args.run}. Порог первой ступени — по лучшему F1 на проверке. '
+          f'{args.run}. Порог первой ступени — {first}. '
           f'Рабочая точка выбрана {how}.\n')
     print('| тип | рабочая точка | сигналов | из них ложных | доля верных | поймано эпизодов |')
     print('|---|---|---:|---:|---:|---:|')
     for tp in args.types.split(','):
-        ov, hv, nv, pv = op.split(args.run, 'val', 2025, tp, 'xgb')
-        os_, hs, ns, ps = op.split(args.run, 'test', 2026, tp, 'xgb')
-        thr = metrics.best_threshold((nv <= H).astype(np.int8), pv)
-        av, as_ = pv >= thr, ps >= thr
+        ov, hv, nv, pv, thv = first_stage(args.run, 'val', 2025, tp)
+        os_, hs, ns, ps, thr = first_stage(args.run, 'test', 2026, tp)
+        av, as_ = pv >= thv, ps >= thr
         yv, ys = (nv <= H).astype(np.int8), (ns <= H).astype(np.int8)
         name = config.TYPE_NAMES[tp]
         if av.sum() < 200 or as_.sum() < 10:
@@ -203,7 +225,7 @@ def main() -> None:
             mask[is_] = qs >= t2
             # гасятся часы, а сигнал — серия часов: считаем так же, как в maintenance.py, иначе
             # погашенная середина серии разрежет один сигнал на два и их станет больше, а не меньше
-            sig2, false2 = mt.shown_signals(os_, hs, ys, as_, as_ & ~mask)
+            sig2, false2 = mt.shown_signals(os_, hs, ys, as_, as_ & ~mask, GAP[0])
             true2 = sig2 - false2
             m2 = metrics.evaluate(os_, hs, ns, np.where(mask, ps, 0.0), thr, H, metrics.RUN_CAP)
             good = f'{1 - (sig2 - true2) / sig2:.3f}' if sig2 else '—'

@@ -88,11 +88,15 @@ def at_work(con, obj: np.ndarray, h: np.ndarray, window: int) -> dict[str, np.nd
             f'визит < {window} ч': d['visiting'][back].astype(bool)}
 
 
-def shown_signals(obj, h, y, alarm, mask) -> tuple[int, int]:
+def shown_signals(obj, h, y, alarm, mask, gap: int = 0) -> tuple[int, int]:
     """Сигналы, которые диспетчер всё-таки увидит, и сколько из них ложные.
 
     Сигнал — подряд идущие часы тревоги на объекте. Молчание не дробит сигнал на части: если хотя бы
     один его час не погашен, диспетчер этот сигнал увидит целиком; если погашены все — не увидит.
+
+    `gap` — склейка дребезга, как в `metrics.signals`. Без неё счёт расходится с базой, посчитанной
+    со склейкой: при `--gap 6` вторая ступень, не погасившая ни одного часа, давала в полтора раза
+    больше сигналов, чем без неё.
     """
     if not alarm.any():
         return 0, 0
@@ -101,7 +105,7 @@ def shown_signals(obj, h, y, alarm, mask) -> tuple[int, int]:
     o, hh, yy, mm = o[order], hh[order], yy[order], mm[order]
     start = np.empty(len(o), bool)
     start[0] = True
-    start[1:] = (o[1:] != o[:-1]) | (hh[1:] != hh[:-1] + 1)
+    start[1:] = (o[1:] != o[:-1]) | (hh[1:] - hh[:-1] > gap + 1)
     run = np.cumsum(start) - 1
     n = int(run[-1]) + 1
     true = np.bincount(run, weights=yy, minlength=n) > 0

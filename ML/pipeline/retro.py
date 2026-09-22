@@ -13,7 +13,13 @@
 Журнал для каждого момента — 100 суток до него (самое длинное окно признаков — 90 суток) плюс вся
 история режима охраны: для проникновения нужно знать, стоит ли объект на охране.
 
+Смесь раздела 34 (`--run "$MIX5"`, тип~прогоны) считается так же, как в эксплуатации: оценка
+каждого зерна переводится в долю его же оценок на проверке 2025 (`operating.load_mix`, `ref`),
+доли складываются, а порог — доля часов под тревогой по оценкам всего парка за 90 суток до
+момента прогноза (раздел 32). Доли по типам — из раздела 38 (`--shares`).
+
     python retro.py [--run main_h24] [--days N] > ../work/retro.md
+    python retro.py --run "$MIX5" > ../work/retro_mix5.md
 """
 import argparse
 import contextlib
@@ -31,6 +37,7 @@ import polars as pl
 import config
 import features as ft
 import labels
+import operating as op
 
 HOUR = 7            # момент прогноза — 07:00, начало смены
 LOOK_DAYS = 100     # сут журнала перед моментом прогноза
@@ -116,6 +123,66 @@ def load_models(run: str) -> dict:
     return out
 
 
+# Доли часов под тревогой по типам на бюджете 80 тыс. ложных часов (раздел 38)
+SHARES = 'fire=0.030,gas=0.026,flood=0.022,equipment=0.097,sensor=0.026,intrusion=0.005'
+
+
+def mix_parts(name: str, tp: str) -> list:
+    """Прогоны смеси для типа: [(прогон, семейство, вес)], разбор как в `operating.load_mix`."""
+    table = dict(part.split('~', 1) for part in name.split(';') if part)
+    name = table.get(tp, table.get('*', ''))
+    out = []
+    for part in name.split('+'):
+        if part:
+            run, _, w = part.partition(':')
+            run, _, m = run.partition('/')
+            out.append((run, m or 'xgb', float(w) if w else 1.0))
+    return out
+
+
+def load_mix_models(name: str) -> dict:
+    """Для каждого типа — функция X -> оценка смеси на шкале проверки 2025."""
+    import xgboost as xgb
+    from catboost import CatBoostClassifier
+    out = {}
+    for tp in config.TYPES:
+        fns = []
+        for run, m, w in mix_parts(name, tp):
+            d = config.WORK / 'runs' / run / 'models'
+            if m == 'xgb':
+                b = xgb.Booster()
+                b.load_model(d / f'xgb_{tp}.json')
+                b.set_param({'device': 'cpu'})
+                f = lambda X, b=b: b.inplace_predict(X)
+            else:
+                c = CatBoostClassifier()
+                c.load_model(str(d / f'cat_{tp}.cbm'))
+                f = lambda X, c=c: c.predict_proba(X)[:, 1]
+            base = np.sort(op.split(run, 'val', 2025, tp, m)[3])
+            fns.append((f, base, w))
+        out[tp] = lambda X, fns=fns: sum(w * np.searchsorted(base, f(X), side='right') / len(base)
+                                         for f, base, w in fns)
+    return out
+
+
+def mix_history(name: str, tp: str) -> tuple:
+    """Оценки смеси по витрине за 2025 и 2026 — история для скользящего порога."""
+    _, hv, _, pv = op.load_mix(name, 'val', 2025, tp, 'xgb', ref=('val', 2025))
+    _, ht, _, pt = op.load_mix(name, 'test', 2026, tp, 'xgb', ref=('val', 2025))
+    h, p = np.concatenate([hv, ht]), np.concatenate([pv, pt])
+    order = np.argsort(h, kind='stable')
+    return h[order], p[order]
+
+
+def rolling(h_hist: np.ndarray, p_hist: np.ndarray, hours: np.ndarray, share: float) -> np.ndarray:
+    """Порог на каждый момент: квантиль оценок парка за 90 суток строго до часа прогноза."""
+    thr = {}
+    for x in np.unique(hours):
+        lo, hi = np.searchsorted(h_hist, [x - 90 * 24 + 1, x + 1])
+        thr[x] = float(np.quantile(p_hist[lo:hi], 1 - share))
+    return np.array([thr[x] for x in hours])
+
+
 def thresholds(run: str) -> dict:
     """Пороги прогона из всех его отчётов сразу.
 
@@ -141,11 +208,13 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument('--run', default='main_h24')
     ap.add_argument('--days', type=int, default=None, help='только первые N суток — для пробы')
+    ap.add_argument('--shares', default=SHARES, help='смесь: доля часов под тревогой по типам')
     args = ap.parse_args()
+    mix = '~' in args.run
     t = time.time()
     meta = json.loads((config.WORK / 'features' / 'meta.json').read_text(encoding='utf-8'))
     feats = meta['features']
-    report = thresholds(args.run)
+    report = None if mix else thresholds(args.run)
     H = config.HORIZON
     ts = cutoffs(args.days)
     hours = [int((x - ft.T0).total_seconds() // 3600) - 1 for x in ts]
@@ -186,7 +255,8 @@ def main() -> None:
                   f'ретро {R[i, j]}, витрина {B[i, j]}')
 
     # 2. прогнозы: тот же вход — тот же выход; сутки за сутками
-    models = load_models(args.run)
+    models = load_mix_models(args.run) if mix else load_models(args.run)
+    shares = {k: float(v) for k, v in (x.split('=') for x in args.shares.split(','))}
     Xr = np.ascontiguousarray(R, dtype=np.float32)
     Xb = np.ascontiguousarray(B, dtype=np.float32)
     day = (retro['h'].to_numpy() + 1) // 24
@@ -195,7 +265,11 @@ def main() -> None:
         nxt = batch[f'next_{tp}'].to_numpy()
         y = nxt <= H
         scores = {'rules': (Xr[:, feats.index(f'trig_{tp}_24h')] > 0, None)}
-        for name in ('xgb', 'cat'):
+        if mix:
+            pr, pb = models[tp](Xr), models[tp](Xb)
+            thr = rolling(*mix_history(args.run, tp), retro['h'].to_numpy(), shares[tp])
+            scores['смесь'] = (pr >= thr, float(np.abs(pr - pb).max()))
+        for name in () if mix else ('xgb', 'cat'):
             if (name, tp) in models:
                 pr, pb = models[(name, tp)](Xr), models[(name, tp)](Xb)
                 thr = report[tp]['scores'][name]['test']['threshold']
