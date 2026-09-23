@@ -18,8 +18,13 @@
 доли складываются, а порог — доля часов под тревогой по оценкам всего парка за 90 суток до
 момента прогноза (раздел 32). Доли по типам — из раздела 38 (`--shares`).
 
+У отказа оборудования в смеси стоит сеть (раздел 48). Ей нужна не строка витрины, а 168 ч часовых
+рядов объекта и его коллектора плюс статика — всё это пересобирается из того же обрезанного
+журнала (`seq_pack`), и сверка идёт не с витриной, а с прогнозом сети из рабочего прогона: вход
+собран верно, если вероятности совпали.
+
     python retro.py [--run main_h24] [--days N] > ../work/retro.md
-    python retro.py --run "$MIX5" > ../work/retro_mix5.md
+    python retro.py --run "$MIXT" > ../work/retro_mixt.md
 """
 import argparse
 import contextlib
@@ -44,6 +49,10 @@ LOOK_DAYS = 100     # сут журнала перед моментом прог
 LOOK_H = ft.CAP + 168   # ч часовых рядов: окна до 90 сут плюс запас
 TOL = 1e-4
 MONTHS = ['янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек']
+SEQ_L = 168         # ч окна сети (seqmodel.L)
+# Календарь в статике сети — в том же порядке и с теми же делителями, что в `seqmodel.py`
+CAL_SEQ = [('hour', 23), ('dow', 6), ('month', 12), ('doy_sin', 1), ('doy_cos', 1),
+           ('holiday', 1), ('long_holiday', 1), ('may9', 1), ('days_to_holiday', 60)]
 
 
 def cutoffs(days: int | None) -> list[datetime]:
@@ -69,7 +78,28 @@ def open_db(first: datetime, last: datetime) -> duckdb.DuckDBPyConnection:
     return con
 
 
-def snapshot(con, t: datetime, meta: dict, cal: dict) -> pl.DataFrame:
+def seq_pack(base: np.ndarray, collectors: np.ndarray, comp: np.ndarray, cal: dict, h: int) -> tuple:
+    """Вход сети (`seqmodel.py`) из того же окна журнала: ряды объекта, ряды коллектора и статика.
+
+    Ряды приводятся к тому же виду, что в `work/seq.npz`: nan → 0, знаковый log1p, float16 —
+    иначе оценка разойдётся с обучением уже на третьем знаке. Окно сети — 168 ч, но часы с
+    прошлого эпизода и счётчики эпизодов за 30 и 90 суток считаются по всему окну ретропрогона:
+    в обучении они считались по всей истории объекта и там, и там насыщаются на 90 сутках.
+    """
+    x = np.nan_to_num(base, nan=0.0)
+    x = (np.sign(x) * np.log1p(np.abs(x))).astype(np.float16).astype(np.float32)
+    mean = {c: x[collectors == c].mean(0) for c in np.unique(collectors)}
+    xin = np.concatenate([x[:, -SEQ_L:], np.stack([mean[c] for c in collectors])[:, -SEQ_L:]], -1)
+    ep = np.expm1(x[:, :, [ft.IDX[k] for k in ft.ONSETS]])
+    long = [np.log1p(ep[:, -w:].sum(1)) for w in (720, ft.CAP)]
+    since = np.log1p(np.stack([[ft.since_last(np.expm1(b[:, ft.IDX[f'onset_{tp}']]))[-1]
+                                for tp in config.TYPES] for b in x]))
+    day = np.array([cal[k][h] / d for k, d in CAL_SEQ], np.float32)
+    s = np.concatenate([np.log1p(comp), np.broadcast_to(day, (len(x), len(day))), since] + long, 1)
+    return xin.astype(np.float32), s.astype(np.float32)
+
+
+def snapshot(con, t: datetime, meta: dict, cal: dict, seq: bool = False):
     """Строки признаков всех объектов на момент t, собранные только из журнала до t."""
     con.sql(f"""CREATE OR REPLACE VIEW ev AS SELECT * FROM ev_all WHERE ts < TIMESTAMP '{t}'
                 AND (ts >= TIMESTAMP '{t - timedelta(days=LOOK_DAYS)}' OR stype = 'Состояние охраны')""")
@@ -102,7 +132,11 @@ def snapshot(con, t: datetime, meta: dict, cal: dict) -> pl.DataFrame:
         row.update({f'comp_{i}': float(x) for i, x in enumerate(comp[o])})
         row.update({k: float(v[-1]) for k, v in f.items()})
         rows.append(row)
-    return pl.DataFrame(rows).select(['object_id', 'h'] + meta['features'])
+    df = pl.DataFrame(rows).select(['object_id', 'h'] + meta['features'])
+    if not seq:
+        return df, None
+    comp_m = np.stack([comp[o] for o, _, _ in info])
+    return df, seq_pack(base, collectors, comp_m, cal, h)
 
 
 def load_models(run: str) -> dict:
@@ -141,7 +175,11 @@ def mix_parts(name: str, tp: str) -> list:
 
 
 def load_mix_models(name: str) -> dict:
-    """Для каждого типа — функция X -> оценка смеси на шкале проверки 2025."""
+    """Для каждого типа — функция (X, S) -> оценка смеси на шкале проверки 2025.
+
+    `S` — оценки сетей по тем же строкам, посчитанные заранее (`net_scores`): сеть смотрит не в
+    строку витрины, а в часовые ряды, и считается одна на все типы сразу.
+    """
     import xgboost as xgb
     from catboost import CatBoostClassifier
     out = {}
@@ -149,20 +187,64 @@ def load_mix_models(name: str) -> dict:
         fns = []
         for run, m, w in mix_parts(name, tp):
             d = config.WORK / 'runs' / run / 'models'
-            if m == 'xgb':
+            if m.startswith('tcn'):
+                f = lambda X, S, key=f'{m}_{tp}': S[key]
+            elif m == 'xgb':
                 b = xgb.Booster()
                 b.load_model(d / f'xgb_{tp}.json')
                 b.set_param({'device': 'cpu'})
-                f = lambda X, b=b: b.inplace_predict(X)
+                f = lambda X, S, b=b: b.inplace_predict(X)
             else:
                 c = CatBoostClassifier()
                 c.load_model(str(d / f'cat_{tp}.cbm'))
-                f = lambda X, c=c: c.predict_proba(X)[:, 1]
+                f = lambda X, S, c=c: c.predict_proba(X)[:, 1]
             base = np.sort(op.split(run, 'val', 2025, tp, m)[3])
             fns.append((f, base, w))
-        out[tp] = lambda X, fns=fns: sum(w * np.searchsorted(base, f(X), side='right') / len(base)
-                                         for f, base, w in fns)
+        out[tp] = lambda X, S, fns=fns: sum(w * np.searchsorted(base, f(X, S), side='right') / len(base)
+                                            for f, base, w in fns)
     return out
+
+
+def load_nets(name: str) -> dict:
+    """Сети, которые встречаются в смеси: семейство -> веса рабочего прогона.
+
+    Одна сеть выдаёт все шесть типов сразу, поэтому грузится по разу на семейство, а не на тип.
+    """
+    import torch
+    from seqmodel import Net
+    fams = {(run, m) for tp in config.TYPES for run, m, _ in mix_parts(name, tp) if m.startswith('tcn')}
+    out = {}
+    for run, m in sorted(fams):
+        state = torch.load(config.WORK / 'runs' / run / 'models' / f'{m}.pt', map_location='cpu', weights_only=True)
+        width, c_in = state['inp.weight'].shape[:2]
+        net = Net(c_in, state['head.0.weight'].shape[1] - 2 * width, len(config.TYPES), width, 0.0)
+        net.load_state_dict(state)
+        out[m] = net.eval()
+    return out
+
+
+def net_scores(nets: dict, pack: tuple, df: pl.DataFrame, dev: str) -> pl.DataFrame:
+    """Оценки сетей на строках момента: те же вероятности, что в прогоне, если вход собран верно."""
+    import torch
+    x, s = (torch.from_numpy(a).to(dev) for a in pack)
+    cols = {'object_id': df['object_id'], 'h': df['h']}
+    with torch.no_grad(), torch.autocast(dev, dtype=torch.bfloat16, enabled=dev == 'cuda'):
+        for m, net in nets.items():
+            p = torch.sigmoid(net.to(dev)(x, s).float()).cpu().numpy()
+            cols.update({f'{m}_{tp}': p[:, k] for k, tp in enumerate(config.TYPES)})
+    return pl.DataFrame(cols)
+
+
+def run_scores(run: str, m: str, tp: str, obj: np.ndarray, h: np.ndarray) -> np.ndarray:
+    """Оценка сети из рабочего прогона на тех же строках — с ней сверяется пересчёт по журналу."""
+    d = config.WORK / 'runs' / run / 'preds'
+    idx = np.load(d / 'index_test.npz')
+    key = idx['object_id'].astype(np.int64) * 10 ** 7 + idx['h']
+    order = np.argsort(key)
+    want = obj.astype(np.int64) * 10 ** 7 + h
+    pos = order[np.searchsorted(key[order], want)]
+    assert np.array_equal(key[pos], want), f'в прогнозах {run}/{m} нет части строк ретропрогона'
+    return np.load(d / f'{m}_{tp}_test.npy')[pos]
 
 
 def mix_history(name: str, tp: str) -> tuple:
@@ -228,10 +310,19 @@ def main() -> None:
     print(f'журнал для ретропрогона: {con.sql("SELECT count(*) FROM ev_all").fetchone()[0]:,} строк, '
           f'{time.time() - t:.0f} с', file=sys.stderr, flush=True)
     cal = ft.calendar()
-    snaps = []
+    nets = load_nets(args.run) if mix else {}
+    dev = 'cpu'
+    if nets:
+        import torch
+        dev = 'cuda' if torch.cuda.is_available() else 'cpu'
+        print(f'сетей в смеси: {len(nets)} ({dev})', file=sys.stderr, flush=True)
+    snaps, seqs = [], []
     for i, x in enumerate(ts):
         t1 = time.time()
-        snaps.append(snapshot(con, x, meta, cal))
+        df, pack = snapshot(con, x, meta, cal, seq=bool(nets))
+        snaps.append(df)
+        if nets:
+            seqs.append(net_scores(nets, pack, df, dev))
         print(f'  {x:%Y-%m-%d %H:%M}: {time.time() - t1:.0f} с', file=sys.stderr, flush=True)
     con.close()
     retro = pl.concat(snaps).join(batch.select('object_id', 'h'), on=['object_id', 'h'], how='semi')
@@ -259,6 +350,24 @@ def main() -> None:
     shares = {k: float(v) for k, v in (x.split('=') for x in args.shares.split(','))}
     Xr = np.ascontiguousarray(R, dtype=np.float32)
     Xb = np.ascontiguousarray(B, dtype=np.float32)
+    obj_k, h_k = retro['object_id'].to_numpy(), retro['h'].to_numpy()
+    Sr, Sb = {}, {}
+    if nets:
+        # оценки сети: слева пересчитанные по обрезанному журналу, справа — из рабочего прогона
+        cols = retro.select('object_id', 'h').join(pl.concat(seqs), on=['object_id', 'h'], how='left')
+        for tp in config.TYPES:
+            for run, m, _ in mix_parts(args.run, tp):
+                if m.startswith('tcn'):
+                    Sr[f'{m}_{tp}'] = cols[f'{m}_{tp}'].to_numpy()
+                    Sb[f'{m}_{tp}'] = run_scores(run, m, tp, obj_k, h_k)
+        print('\n## Сверка оценок сети\n\nВход сети — часовые ряды, а не строка витрины, поэтому он '
+              'сверяется отдельно: вероятность, пересчитанная по обрезанному журналу, против '
+              'вероятности того же зерна из рабочего прогона на той же строке.\n')
+        d = [{'сеть и тип': k, 'макс |Δp|': float(np.abs(Sr[k] - Sb[k]).max()),
+              'медиана |Δp|': float(np.median(np.abs(Sr[k] - Sb[k]))),
+              'ранговая корреляция': float(np.corrcoef(np.argsort(np.argsort(Sr[k])),
+                                                       np.argsort(np.argsort(Sb[k])))[0, 1])} for k in sorted(Sr)]
+        print(md(pl.DataFrame(d)))
     day = (retro['h'].to_numpy() + 1) // 24
     lines, per_day = [], []
     for tp in config.TYPES:
@@ -266,7 +375,7 @@ def main() -> None:
         y = nxt <= H
         scores = {'rules': (Xr[:, feats.index(f'trig_{tp}_24h')] > 0, None)}
         if mix:
-            pr, pb = models[tp](Xr), models[tp](Xb)
+            pr, pb = models[tp](Xr, Sr), models[tp](Xb, Sb)
             thr = rolling(*mix_history(args.run, tp), retro['h'].to_numpy(), shares[tp])
             scores['смесь'] = (pr >= thr, float(np.abs(pr - pb).max()))
         for name in () if mix else ('xgb', 'cat'):

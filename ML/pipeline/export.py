@@ -12,6 +12,11 @@
 Последние `H` часов 2026 не берутся: для них ещё не известно, случится ли эпизод в горизонте, и
 они вошли бы в обучение ложными отрицательными.
 
+Отказ оборудования — исключение: там работает сеть (раздел 48), а не бустинг. Её нельзя обучить
+тем же вызовом — обучение идёт на видеокарте часами, — поэтому веса берутся готовыми из прогона
+вперёд `seqmodel.py --cutoff 2026-07-01 --tag prod_s<зерно>` (обучение до той же даты минус
+горизонт, то есть на всей истории) и переносятся в выгрузку. Вход сети описан в `manifest.seq`.
+
 Выход — `work/export/`: модели `<тип>/<семейство>_s<зерно>`, и `manifest.json` с признаками,
 параметрами, деревьями и годами. Оценка каждого типа — среднее рангов пяти зёрен; порог — доля
 часов под тревогой по скользящему окну 90 суток (раздел 32, `calib.py`).
@@ -40,10 +45,12 @@ import train
 MIX = {'fire': ('main_h24_tunedh24', 'cat', 'tunedh24'),
        'gas': ('main_h24', 'cat', 'default'),
        'flood': ('main_h24_tuned', 'cat', 'tuned'),
-       'equipment': ('main_h24_tunedh24', 'cat', 'tunedh24'),
+       'equipment': ('prod', 'tcn', 'seq'),
        'sensor': ('main_h24_tuned', 'xgb', 'tuned'),
        'intrusion': ('main_h24', 'cat', 'default')}
 YEARS = [2022, 2023, 2024, 2025, 2026]
+# Сеть отказа оборудования (раздел 48): обучена прогоном вперёд на всём до даты минус горизонт
+TCN_CUTOFF = '2026-07-01'
 
 
 def trees(run: str, tp: str, model: str) -> int:
@@ -79,6 +86,39 @@ def fit(model: str, X, y, params: dict, n: int, seed: int):
     return m
 
 
+def seq_spec(H: int) -> dict:
+    """Чем кормится сеть: те же ряды, что в обучении (`seqmodel.py`), из `work/seq.npz`."""
+    import features as ft
+    return {'window': 168, 'channels': ft.BASE, 'collector': 'среднее тех же каналов по объектам коллектора',
+            'transform': 'знаковый log1p, float16 (features.py)',
+            'static': ['log1p состава датчиков', 'календарь: час/день недели/месяц/день года (sin, cos)/'
+                       'праздник/длинные выходные/9 мая/дней до праздника', 'log1p часов с прошлого эпизода '
+                       'по шести типам', f'log1p числа эпизодов за 720 и {ft.CAP} ч по шести типам'],
+            'width': 128, 'dropout': 0.2, 'outputs': list(config.TYPES), 'horizon': H,
+            'note': 'выход — шесть логитов, берётся канал своего типа; сигмоида не меняет порядок'}
+
+
+def export_tcn(tp: str, seeds: list[int], out, manifest: dict) -> None:
+    """Сети прогона вперёд, обученные на всей истории до `TCN_CUTOFF` минус горизонт (раздел 48).
+
+    Бустинг для эксплуатации переобучается здесь же, а сеть — нет: её обучение идёт часами на
+    видеокарте и запускается отдельно (`seqmodel.py --cutoff`), поэтому готовые веса переносятся.
+    """
+    import torch
+    (out / tp).mkdir(parents=True, exist_ok=True)
+    for seed in seeds:
+        src = config.WORK / 'roll' / f'prod_s{seed}_{TCN_CUTOFF}.pt'
+        if not src.exists():
+            raise FileNotFoundError(f'нет сети {src.name}: обучить seqmodel.py --cutoff {TCN_CUTOFF} '
+                                    f'--tag prod_s{seed}')
+        name = f'tcn_s{seed}.pt'
+        torch.save(torch.load(src, map_location='cpu', weights_only=True), out / tp / name)
+        manifest.setdefault('models', {}).setdefault(tp, {})[str(seed)] = {
+            'file': f'{tp}/{name}', 'family': 'tcn', 'params': 'seq', 'trained_to': TCN_CUTOFF,
+            'from_run': f'prod_s{seed}_{TCN_CUTOFF}'}
+        print(f'{tp} tcn зерно {seed}: сеть от {TCN_CUTOFF} перенесена', flush=True)
+
+
 # Доли часов под тревогой по типам — рабочие, из settings/operating.json (раздел 46)
 SHARES = config.shares()
 
@@ -107,30 +147,46 @@ def main() -> None:
     H = config.HORIZON
     meta = json.loads((train.FEAT / 'meta.json').read_text(encoding='utf-8'))
     features = meta['features']
-    t = time.time()
-    df = train.load(years, args.step, ['object_id', 'h'] + features + meta['targets'])
-    df = df.filter(df['h'] <= df['h'].max() - H)
-    X = train.matrix(df, features)
-    print(f'обучение {X.shape}, годы {years[0]}–{years[-1]}: {time.time() - t:.0f} с', flush=True)
-    if args.check:
-        test = train.load([2026], 1, ['object_id', 'h'] + features + meta['targets'])
-        Xs = train.matrix(test, features)
-        rows = []
+    types = args.types.split(',')
+    seeds = [int(s) for s in args.seeds.split(',')]
+    boost = [tp for tp in types if MIX[tp][1] != 'tcn']
+    df = X = None
+    if boost:
+        t = time.time()
+        df = train.load(years, args.step, ['object_id', 'h'] + features + meta['targets'])
+        df = df.filter(df['h'] <= df['h'].max() - H)
+        X = train.matrix(df, features)
+        print(f'обучение {X.shape}, годы {years[0]}–{years[-1]}: {time.time() - t:.0f} с', flush=True)
+        if args.check:
+            test = train.load([2026], 1, ['object_id', 'h'] + features + meta['targets'])
+            Xs = train.matrix(test, features)
+            rows = []
 
     out = config.WORK / ('export_check' if args.check else 'export')
     path = out / 'manifest.json'
     manifest = json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
     manifest.update({'features': features, 'years': years, 'horizon': H, 'step': args.step,
-                     'rows': int(X.shape[0]), 'built': date.today().isoformat(),
+                     'rows': int(X.shape[0]) if X is not None else manifest.get('rows'),
+                     'built': date.today().isoformat(),
                      'score': 'среднее рангов зёрен по типу', 'threshold': 'доля часов, окно 90 суток'})
-    for tp in args.types.split(','):
+    if any(MIX[tp][1] == 'tcn' for tp in types):
+        manifest['seq'] = seq_spec(H)
+    for tp in types:
         run, model, kind = MIX[tp]
+        if model == 'tcn':
+            if args.check:
+                print(f'{tp}: сеть обучена прогоном вперёд (раздел 48), допущение о годах к ней не относится',
+                      flush=True)
+                continue
+            export_tcn(tp, seeds, out, manifest)
+            path.write_text(json.dumps(manifest, ensure_ascii=False, indent=1), encoding='utf-8')
+            continue
         y = (df[f'next_{tp}'].to_numpy() <= H).astype(np.float32)
         objective = '_hours_v2024' if kind == 'tunedh24' else ''
         params = {} if kind == 'default' else train.tuned(model, tp, '', H, objective=objective) or {}
         (out / tp).mkdir(parents=True, exist_ok=True)
         ranks = 0
-        for seed in (int(s) for s in args.seeds.split(',')):
+        for seed in seeds:
             ref = run if seed == 0 else f'{run}_s{seed}'
             n = trees(ref, tp, model)
             t1 = time.time()

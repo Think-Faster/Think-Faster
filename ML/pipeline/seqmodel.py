@@ -16,6 +16,12 @@
 по проверке, и пишет прогноз теста 2026 в work/roll/<tag>_<дата>_<тип>.npy. `--window` отрезает
 старое, `--init` начинает с сети прошлого отрезка (дообучение на свежем окне).
 
+Перебор архитектуры (раздел 49): `--length` — окно рядов, `--blocks` — число свёрточных блоков
+(охват должен покрывать окно), `--width` и `--dropout` — размер и регуляризация, `--name` — имя
+семейства в файлах, чтобы прогоны не затирали рабочий `tcn`.
+
+    python seqmodel.py --epochs 8 --length 336 --blocks 8 --name tcn_l336
+
     python seqmodel.py --epochs 3 --cutoff 2026-01-31 --tag all_s0
     python seqmodel.py --epochs 1 --cutoff 2026-01-31 --tag ft_s0 --init all_s0_2026-01-01 --window 30 --lr 2e-4
 """
@@ -54,10 +60,11 @@ class Block(nn.Module):
 
 
 class Net(nn.Module):
-    def __init__(self, c_in: int, c_static: int, n_out: int, width: int, dropout: float):
+    def __init__(self, c_in: int, c_static: int, n_out: int, width: int, dropout: float, blocks: int = 7):
         super().__init__()
         self.inp = nn.Conv1d(c_in, width, 1)
-        self.blocks = nn.Sequential(*[Block(width, d, dropout) for d in (1, 2, 4, 8, 16, 32, 64)])
+        # шаг свёртки удваивается от блока к блоку: охват = 1 + 2·(2^blocks − 1), при семи блоках 255 ч
+        self.blocks = nn.Sequential(*[Block(width, 2 ** i, dropout) for i in range(blocks)])
         self.head = nn.Sequential(nn.Linear(2 * width + c_static, 256), nn.GELU(), nn.Dropout(dropout),
                                   nn.Linear(256, n_out))
 
@@ -87,7 +94,12 @@ def main() -> None:
     ap.add_argument('--window', type=int, default=0, help='прогон вперёд: окно обучения в сутках, 0 — всё')
     ap.add_argument('--init', default='', help='прогон вперёд: начать с work/roll/<init>.pt')
     ap.add_argument('--tag', default='roll', help='прогон вперёд: имя стратегии в файлах')
+    ap.add_argument('--length', type=int, default=168, help='окно рядов в часах')
+    ap.add_argument('--blocks', type=int, default=7, help='число свёрточных блоков: охват 1 + 2·(2^blocks − 1) ч')
+    ap.add_argument('--name', default='', help='имя семейства в файлах; по умолчанию tcn / tcn_s<зерно>')
+    ap.add_argument('--eval-every', type=int, default=1, help='проверять каждую N-ю эпоху (и последнюю)')
     args = ap.parse_args()
+    L = args.length
     torch.manual_seed(args.seed)
     rng = np.random.default_rng(args.seed)
     dev = 'cuda'
@@ -144,7 +156,7 @@ def main() -> None:
     ev = {s: to_idx(idx[s]['object_id'], idx[s]['h']) for s in idx}
 
     x0, s0 = batch(tr_o[:2], tr_h[:2])
-    net = Net(x0.shape[-1], s0.shape[-1], len(types), args.width, args.dropout).to(dev)
+    net = Net(x0.shape[-1], s0.shape[-1], len(types), args.width, args.dropout, args.blocks).to(dev)
     roll_dir = config.WORK / 'roll'
     if args.init:
         net.load_state_dict(torch.load(roll_dir / f'{args.init}.pt'))
@@ -187,7 +199,9 @@ def main() -> None:
             opt.step()
             sched.step()
             total += loss.detach()
-        if roll:
+        # оценка на проверке дороже самой эпохи (треть строк года против 400 тыс. окон), поэтому
+        # при переборе архитектур её берут реже: эпоха выбирается среди проверенных
+        if roll or ((epoch + 1) % args.eval_every and epoch + 1 != args.epochs):
             print(f'эпоха {epoch + 1}: loss {total.item() / (args.per_epoch // args.batch):.4f}, '
                   f'{time.time() - t1:.0f} с', flush=True)
             continue
@@ -210,7 +224,7 @@ def main() -> None:
         print(f'{name}: строк {len(tr_o):,}, готово за {time.time() - t:.0f} с', flush=True)
         return
     net.load_state_dict(best_state)
-    tag = 'tcn' if args.seed == 0 else f'tcn_s{args.seed}'
+    tag = args.name or ('tcn' if args.seed == 0 else f'tcn_s{args.seed}')
     (out_dir / 'models').mkdir(parents=True, exist_ok=True)
     torch.save(best_state, out_dir / 'models' / f'{tag}.pt')
 
