@@ -99,6 +99,14 @@ def main() -> None:
     ap.add_argument('--name', default='', help='имя семейства в файлах; по умолчанию tcn / tcn_s<зерно>')
     ap.add_argument('--eval-every', type=int, default=1, help='проверять каждую N-ю эпоху (и последнюю)')
     args = ap.parse_args()
+    # Потолок эпох для очереди, которая уже запущена: в `work/epoch_cap.txt` одно число, и каждый
+    # следующий прогон берёт минимум из него и `--epochs`. Лучшая эпоха во всех прогонах сети была
+    # 3–7 (раздел 57 аналитики), дальше проверочное качество только падает, так что длинный хвост
+    # очереди — это сожжённые часы видеокарты. Файл снимает ограничение, как только его удалить.
+    cap = config.WORK / 'epoch_cap.txt'
+    if cap.exists():
+        args.epochs = min(args.epochs, int(cap.read_text(encoding='utf-8').split()[0]))
+        print(f'потолок эпох из {cap.name}: {args.epochs}', flush=True)
     L = args.length
     torch.manual_seed(args.seed)
     rng = np.random.default_rng(args.seed)
