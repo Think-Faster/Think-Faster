@@ -23,6 +23,7 @@ import os
 import sys
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import duckdb
 import numpy as np
@@ -135,6 +136,124 @@ def md(df: pl.DataFrame) -> str:
     fmt = lambda v: f'{v:.3f}' if isinstance(v, float) else str(v)
     return '\n'.join(['| ' + ' | '.join(df.columns) + ' |', '|' + '---|' * len(df.columns)] +
                      ['| ' + ' | '.join(fmt(v) for v in r) + ' |' for r in df.rows()])
+
+
+def seq_pack(con, t: datetime, meta: dict, L: int = 168) -> dict[str, np.ndarray]:
+    """Вход сети на момент t (INTEGRATION §1.4): 168 ч + статика, повторяет seqmodel.batch.
+
+    Строится из того же обрезанного журнала, что и snapshot(): часовые ряды от `lo` до t, из них
+    — 66 рядов объекта и те же 66, усреднённые по коллектору, знаковый log1p в float16 (см.
+    features.main). Статика — состав объекта, календарь часа, часы с прошлого эпизода по шести
+    типам и счётчики эпизодов за 30 и 90 суток (CAP), ровно в том порядке, в котором сеть видела
+    их при обучении. Возврат: x (объекты × 168 × 132) и s (объекты × статика), float16.
+    """
+    hi = int((t - ft.T0).total_seconds() // 3600)
+    lo = hi - L - ft.CAP
+    with contextlib.redirect_stdout(io.StringIO()):
+        base, objects, oi = ft.load_base(con, lo, hi)
+    nch = base.shape[2]
+    arr = np.where(np.isnan(base), 0.0, base).astype(np.float32)
+    arr = np.sign(arr) * np.log1p(np.abs(arr))
+    info = con.sql('SELECT object_id, collector_id FROM obj3 ORDER BY object_id').fetchall()
+    collectors = np.array([c for _, c in info], np.int64)
+    uniq = np.unique(collectors)
+    coll = np.stack([arr[collectors == c].mean(0) for c in uniq]).astype(np.float16)
+    o2c = np.searchsorted(uniq, collectors)
+    hh = np.arange(hi - L, hi) - lo
+    xo = arr[:, hh]
+    xc = coll[o2c][:, hh].astype(np.float32)
+    x = np.concatenate([xo, xc], -1).astype(np.float16)          # объекты × 168 × 132
+
+    ons = np.nancumsum(np.nan_to_num(base[:, :, [ft.IDX[k] for k in ft.ONSETS]], nan=0.0), 1)
+    since = np.stack([np.log1p(ft.since_last(ons[:, :, j])) for j in range(len(ft.ONSETS))], -1)
+    th = hh[-1]
+    long = np.log1p(np.stack([(ons[:, th] - ons[:, np.clip(th - w, 0, None)])
+                              for w in (720, ft.CAP)], -1))
+    cal = ft.calendar()
+    calv = np.stack([cal['hour'][th] / 23, cal['dow'][th] / 6, cal['month'][th] / 12,
+                     cal['doy_sin'][th], cal['doy_cos'][th], cal['holiday'][th],
+                     cal['long_holiday'][th], cal['may9'][th], cal['days_to_holiday'][th] / 60], -1)
+    comp = np.zeros((len(objects), len(meta['stypes'])), np.float32)
+    for o, s, n in con.sql('SELECT object_id, stype, count(*) FROM ch WHERE object_id IN '
+                           '(SELECT object_id FROM obj3) GROUP BY ALL').fetchall():
+        comp[oi[o], meta['stypes'].index(s)] = n
+    s = np.concatenate([np.log1p(comp), np.broadcast_to(calv, (len(objects), 9)),
+                        since.astype(np.float32), long.astype(np.float32)], -1).astype(np.float16)
+    return {'x': x, 's': s}
+
+
+def load_nets(export: Path | None = None) -> list:
+    """Сети TCN из выгрузки. Возвращает список сетей в порядке manifest.seq.nets."""
+    import torch
+    import seqmodel
+    nets_dir = (export or config.WORK / 'export' / 'nets')
+    manifest = json.loads((config.WORK / 'export' / 'manifest.json').read_text(encoding='utf-8'))
+    names = manifest['seq'].get('nets', sorted(p.name for p in nets_dir.glob('*.pt')))
+    out = []
+    for name in names:
+        state = torch.load(nets_dir / name, map_location='cpu', weights_only=True)
+        net = seqmodel.Net(state['c_in'], state['c_static'], state['n_out'],
+                           state['width'], state['dropout'])
+        net.load_state_dict(state['state_dict'])
+        net.eval()
+        out.append(net)
+    return out
+
+
+def net_scores(nets: list, x: np.ndarray, s: np.ndarray) -> np.ndarray:
+    """Среднее sigmoid-выходов сетей: объекты × 6 типов. Только для инференса."""
+    import torch
+    with torch.no_grad():
+        out = []
+        xt, st = torch.from_numpy(x), torch.from_numpy(s)
+        for o in range(0, len(xt), 4096):
+            acc = None
+            for net in nets:
+                p = torch.sigmoid(net(xt[o:o + 4096], st[o:o + 4096]).float())
+                acc = p if acc is None else acc + p
+            out.append((acc / len(nets)).numpy())
+    return np.concatenate(out)
+
+
+def load_mix_models(export: Path | None = None) -> dict:
+    """Модели выгрузки: тип → {'family', 'seeds': {зерно: вызываемое}}.
+
+    Зерно — лямбда по строке признаков (порядок manifest.features), как в load_models.
+    """
+    import xgboost as xgb
+    from catboost import CatBoostClassifier
+    export = export or config.WORK / 'export'
+    manifest = json.loads((export / 'manifest.json').read_text(encoding='utf-8'))
+    out = {}
+    for tp, block in manifest['models'].items():
+        fam = block['family']
+        seeds = {}
+        for seed, info in block['seeds'].items():
+            p = export / info['path'] / f'{fam}_{tp}.{EXT[fam]}'
+            if fam == 'cat':
+                m = CatBoostClassifier()
+                m.load_model(str(p))
+                seeds[seed] = lambda X, m=m: m.predict_proba(X)[:, 1]
+            else:
+                b = xgb.Booster()
+                b.load_model(p)
+                b.set_param({'device': 'cpu'})
+                seeds[seed] = lambda X, b=b: b.inplace_predict(X)
+        out[tp] = {'family': fam, 'seeds': seeds}
+    return out
+
+
+def rolling(history: pl.DataFrame, share: float, window_days: int = 90) -> float:
+    """Квантиль оценок за последние window_days суток — скользящий порог на долю share.
+
+    history: колонки h (час) и score по одному типу. Порог не свойство модели, а место в
+    распределении оценок парка (INTEGRATION §2.1): пересчитывается на каждый новый час.
+    """
+    if not history.height:
+        return float('nan')
+    last = history['h'].max()
+    keep = history.filter(pl.col('h') >= last - window_days * 24)
+    return float(keep['score'].quantile(1.0 - share)) if keep.height else float('nan')
 
 
 def main() -> None:

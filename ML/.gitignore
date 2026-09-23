@@ -1,2 +1,4 @@
 work/
+data/
 __pycache__/
+.venv/

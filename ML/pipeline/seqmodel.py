@@ -172,7 +172,12 @@ def main() -> None:
             best, best_state = score, {k: v.detach().clone() for k, v in net.state_dict().items()}
     net.load_state_dict(best_state)
     (out_dir / 'models').mkdir(parents=True, exist_ok=True)
-    torch.save(best_state, out_dir / 'models' / 'tcn.pt')
+    # Помимо весов кладём архитектуру: без c_in/c_static/width число сеть в проде не собрать
+    # (retro.load_nets читает ровно эти ключи, INTEGRATION §1.4)
+    torch.save({'state_dict': best_state,
+                'c_in': x0.shape[-1], 'c_static': s0.shape[-1],
+                'n_out': len(types), 'width': args.width, 'dropout': args.dropout},
+               out_dir / 'models' / 'tcn.pt')
 
     preds = {s: predict(*ev[s]) for s in ev}
     report = {}
