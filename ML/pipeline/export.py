@@ -117,6 +117,16 @@ def export_tcn(tp: str, seeds: list[int], out, manifest: dict) -> None:
             'file': f'{tp}/{name}', 'family': 'tcn', 'params': 'seq', 'trained_to': TCN_CUTOFF,
             'from_run': f'prod_s{seed}_{TCN_CUTOFF}'}
         print(f'{tp} tcn зерно {seed}: сеть от {TCN_CUTOFF} перенесена', flush=True)
+    prune(tp, out, manifest)
+
+
+def prune(tp: str, out, manifest: dict) -> None:
+    """Убрать файлы прежней выгрузки, которых нет в манифесте: у типа могло смениться семейство."""
+    keep = {v['file'].rsplit('/', 1)[-1] for v in manifest.get('models', {}).get(tp, {}).values()}
+    for f in sorted((out / tp).iterdir()):
+        if f.name not in keep:
+            f.unlink()
+            print(f'{tp}: файл прежней выгрузки {f.name} удалён', flush=True)
 
 
 # Доли часов под тревогой по типам — рабочие, из settings/operating.json (раздел 46)
@@ -201,6 +211,7 @@ def main() -> None:
             if args.check:
                 q = (m.inplace_predict(Xs) if model == 'xgb' else m.predict_proba(Xs)[:, 1])
                 ranks = ranks + q.argsort().argsort()
+        prune(tp, out, manifest)
         if args.check:
             obj, h, nxt = (test[c].to_numpy() for c in ('object_id', 'h', f'next_{tp}'))
             o, hh, nn, pw = op.load_mix(f'{tp}~{mix_name(tp)}', 'test', 2026, tp, model)
@@ -209,7 +220,7 @@ def main() -> None:
                         f'{check_row(tp, obj, h, nxt, ranks.astype(np.float64), H)} |')
             print(rows[-1], flush=True)
     if args.check:
-        print('\nТест 2026, доли часов раздела 38, склейка 6 ч. В клетке: PR-AUC · поймано · ложных сигналов.\n')
+        print('\nТест 2026, доли часов из настроек, склейка 6 ч. В клетке: PR-AUC · поймано · ложных сигналов.\n')
         print('| тип | доля часов | рабочие прогоны (2022–2024) | те же деревья на 2022–2025 |')
         print('|---|---:|---|---|')
         print('\n'.join(rows))
