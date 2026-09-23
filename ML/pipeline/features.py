@@ -134,7 +134,7 @@ def load_base(con, lo: int = 0, hi: int = NH) -> tuple[np.ndarray, list[int], di
     base[np.array([oi[x] for x in d['object_id']]), dense(d['h']).astype(np.int64) - lo,
          np.array([IDX[k] for k in d['k']])] = dense(d['n'])
     print('  счётчики состояний', flush=True)
-    gas = "stype = 'Газовый датчик' AND num >= 0 AND num < 327.68"
+    gas = "stype = 'Газовый датчик' AND num >= 0 AND num <= 15"  # остальное — неисправность (labels.py)
     temp = "stype = 'Датчик температуры' AND num BETWEEN -40 AND 80"
     put(f"""SELECT object_id, {hour_of('ts')} AS h, count(*) AS n_events, count(DISTINCT channel_id) AS n_channels,
                    max(num) FILTER (WHERE {gas}) AS gas_max, coalesce(sum(num) FILTER (WHERE {gas}), 0) AS gas_sum,
