@@ -24,6 +24,7 @@
 
     python seqmodel.py --epochs 3 --cutoff 2026-01-31 --tag all_s0
     python seqmodel.py --epochs 1 --cutoff 2026-01-31 --tag ft_s0 --init all_s0_2026-01-01 --window 30 --lr 2e-4
+    python seqmodel.py --epochs 3 --cutoff 2026-01-31 --tag gap90_s0 --gap 90
 """
 import argparse
 import json
@@ -92,6 +93,7 @@ def main() -> None:
                     help='зерно; при ненулевом файлы пишутся как tcn_s<зерно>, чтобы не затереть нулевое')
     ap.add_argument('--cutoff', default='', help='прогон вперёд: дата переобучения, обучение до неё минус H')
     ap.add_argument('--window', type=int, default=0, help='прогон вперёд: окно обучения в сутках, 0 — всё')
+    ap.add_argument('--gap', type=int, default=0, help='прогон вперёд: последние N суток до даты в обучение не берутся')
     ap.add_argument('--init', default='', help='прогон вперёд: начать с work/roll/<init>.pt')
     ap.add_argument('--tag', default='roll', help='прогон вперёд: имя стратегии в файлах')
     ap.add_argument('--length', type=int, default=168, help='окно рядов в часах')
@@ -153,7 +155,7 @@ def main() -> None:
     roll = bool(args.cutoff)
     if roll:
         # метка строки смотрит на H часов вперёд, поэтому обучение кончается за H до даты переобучения
-        hi = int((np.datetime64(args.cutoff) - np.datetime64('2019-01-01')) / np.timedelta64(1, 'h')) - H
+        hi = int((np.datetime64(args.cutoff) - np.datetime64('2019-01-01')) / np.timedelta64(1, 'h')) - H - args.gap * 24
         o_, h_ = index([2022, 2023, 2024, 2025, 2026])
         m = (h_ < hi) & ((h_ >= hi - args.window * 24) if args.window else True)
         tr_o, tr_h = to_idx(o_[m], h_[m])
