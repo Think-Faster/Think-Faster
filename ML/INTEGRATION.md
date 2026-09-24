@@ -533,3 +533,126 @@ Airflow, Kubernetes, feature store и MLflow сознательно не бер�
 | Ф4-5 выгрузка решений для дообучения | нет | из потока решений (M11) в обучающую выборку, 5 заявок «ложные» найти с меткой |
 | Ф5-4 рекомендации по ТО | нет | таблица «тип и риск → мера» со ссылкой на правило и источник наработки |
 | Ф5-5 погода | `weather.py` есть в main | прирост с погодой и без по подтоплению и пожару; нет прироста — записать и не тащить |
+
+## 11. Для бэкенда: версии модели в БД и хранилище файлов
+
+Ответ Грише на два вопроса: что лежит в БД, чтобы переключаться между версиями модели, и нужно ли
+отдельное файловое хранилище, если есть MLflow. Схема `ml` в `tf-postgres` заведена
+(`think-infra/postgree/db/schemas.conf`); владелец — ML-сервис, BFF читает её для админ-панели,
+а меняет через `tf.dispatch.settings` (§9.3, §9.4).
+
+### 11.1 Единица версии
+
+Версия — одна **выгрузка**: 30 файлов (6 типов × семейство × 5 зёрен) и `manifest.json`, ≈22 МБ.
+Её идентификатор (`export-2026-09-23`) — это `model_version` в сообщении §2.3. Порог в версию не
+входит: это квантиль оценок той же версии за 90 суток, поэтому оценки хранятся с `version_id`.
+
+### 11.2 Таблицы
+
+```sql
+-- Версии. Регистрирует ML-сервис (или скрипт выгрузки) после ретропрогона.
+create table ml.model_version (
+  id           text primary key,                 -- 'export-2026-09-23', уходит в model_version
+  created_at   timestamptz not null default now(),
+  created_by   text not null,
+  trained_to   date not null,                    -- последний день данных в обучении
+  train_years  int[] not null,                   -- manifest.years
+  labels       text not null,                    -- версия разметки, например 'r58'
+  git_sha      text not null,
+  storage_uri  text not null,                    -- file:///models/<id> или models:/... в MLflow (11.3)
+  manifest     jsonb not null,                   -- manifest.json целиком: признаки, вход сети
+  metrics      jsonb not null,                   -- по типу: pr_auc, ложных часов в сутки, покрытие на ретропрогоне
+  status       text not null default 'staging'
+               check (status in ('staging', 'production', 'archived'))
+);
+
+-- Файлы версии: 30 строк. По ним сервис проверяет, что скачал именно то.
+create table ml.model_file (
+  version_id  text not null references ml.model_version (id),
+  type        text not null,                     -- fire gas flood equipment sensor intrusion
+  family      text not null,                     -- cat xgb tcn
+  seed        int  not null,
+  path        text not null,                     -- относительно storage_uri
+  sha256      text not null,
+  primary key (version_id, type, family, seed)
+);
+
+-- Переключения, только добавление. Текущая версия типа — последняя строка по since.
+-- По типу, а не целиком: пожар можно оставить на старой версии, газ перевести на новую.
+create table ml.model_switch (
+  id          bigserial primary key,
+  type        text not null,
+  version_id  text not null references ml.model_version (id),
+  since       timestamptz not null,              -- применяется со следующего часа
+  changed_by  text not null,
+  reason      text not null
+);
+create view ml.active_model as
+  select distinct on (type) type, version_id, since, changed_by
+  from ml.model_switch order by type, since desc;
+
+-- Рабочая точка (ползунки §9.3): operating.json версиями. Текущая — max(version).
+create table ml.operating_settings (
+  version     int primary key,
+  settings    jsonb not null,                    -- types{share, reject_k}
+  changed     timestamptz not null default now(),
+  changed_by  text not null,
+  reason      text not null
+);
+
+-- Оценки: из них порог (квантиль за 90 суток) и объяснение прошлых тревог.
+-- 78 объектов × 24 ч × 6 типов ≈ 11 тыс. строк в сутки, ≈1 млн за 90 суток.
+create table ml.score (
+  version_id  text not null references ml.model_version (id),
+  object_id   int  not null,
+  hour_end    timestamptz not null,
+  type        text not null,
+  score       real not null,
+  source      text not null check (source in ('live', 'retro')),
+  primary key (version_id, type, hour_end, object_id)
+);
+
+-- Переобучение по кнопке и по расписанию (§9.5).
+create table ml.retrain_job (
+  id                 bigserial primary key,
+  trigger            text not null check (trigger in ('schedule', 'button')),
+  requested_by       text,
+  status             text not null default 'queued'
+                     check (status in ('queued', 'running', 'done', 'error')),
+  created_at         timestamptz not null default now(),
+  started_at         timestamptz,
+  finished_at        timestamptz,
+  result_version_id  text references ml.model_version (id),
+  error              text
+);
+```
+
+Как это работает при переключении: регистрируя версию, ML-сервис прогоняет её по последним 90
+суткам и пишет оценки в `ml.score` с `source = 'retro'`. Тогда порог новой версии считается сразу,
+без ожидания истории (задача из §9.4), а в админ-панели видно, сколько тревог в сутки дала бы
+новая версия на том же периоде (`metrics` и `ml.score`).
+
+### 11.3 Файловое хранилище
+
+Отдельный S3 или MinIO не нужен: ≈22 МБ на версию, при переобучении раз в 30 суток — меньше
+300 МБ в год. Хватает docker-тома. Два варианта, таблицы 11.2 в обоих одни и те же, меняется
+только `storage_uri`:
+
+| | без MLflow | с MLflow |
+|---|---|---|
+| где файлы | том `tf-ml-models`, `/models/<id>/manifest.json`, `/models/<id>/<тип>/<семейство>_s<зерно>.*` | artifact store MLflow на томе `tf-mlflow-artifacts` (`mlflow server --serve-artifacts`) |
+| метаданные MLflow | — | отдельная БД `mlflow` в том же `tf-postgres` |
+| `storage_uri` | `file:///models/<id>` | `models:/tf-<тип>/<версия>` или `runs:/<run_id>/...` |
+| как версия попадает на сервер | rsync в том + строка в `ml.model_version` | клиент `mlflow` с машины обучения пишет по HTTPS в registry |
+| что даёт сверх | ничего, самое простое | UI сравнения экспериментов, журнал обучений |
+| цена | — | ещё один контейнер, 300–500 МБ памяти; вход в UI закрыть авторизацией |
+
+`ml.model_version` нужна и с MLflow: Model Registry не хранит наши метрики по ложным часам,
+переключение по типам и связь с порогом. Сервис в обоих вариантах держит локальную копию файлов
+активной версии: прогноз не должен зависеть от доступности хранилища.
+
+Обучение сети идёт часами на видеокарте, а на сервере видеокарты нет, и там около 4 ГБ свободной
+памяти на всё. Поэтому обучение остаётся на машине с GPU, сервер только считает прогноз. Кнопка
+переобучения (§9.5) ставит задачу в `ml.retrain_job`, машина обучения её забирает и регистрирует
+результат. Удалённая регистрация — главный довод за MLflow. Без него: начать с тома и таблиц
+11.2, MLflow добавить позже, таблицы при этом не меняются.
