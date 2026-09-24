@@ -25,17 +25,40 @@ def load_manifest(export: Path | None = None) -> dict:
     return json.loads(p.read_text(encoding='utf-8'))
 
 
+def _is_iso_date(tail: str) -> bool:
+    return (len(tail) == 10 and tail[4] == '-' and tail[7] == '-'
+            and tail[:4].isdigit() and tail[5:7].isdigit() and tail[8:].isdigit())
+
+
+def _candidate_runs(from_run: str) -> list[str]:
+    """Прогоны-кандидаты под шкалу зерна: сам `from_run` и рабочий прогон его ветки.
+
+    У бустинга `from_run` — рабочий прогон (`main_h24`, `main_h24_s1`). У сети из манифеста
+    `from_run` — имя roll-прогона (`prod_s1_2026-07-01`), который 2025-оценок не держит: валидация
+    seed-0 подписана своим именем (`prod`), остальных зёрен — `prod_s<seed>`, и она лежит в preds
+    рабочего прогона той же ветки. Просто срезаем дату и пробуем обе схемы имени.
+    """
+    runs = [from_run]
+    if _is_iso_date(from_run[-10:]):
+        stem = from_run[:-11]
+        runs.append(stem)
+        if stem.endswith('_s0'):
+            runs.append(stem[:-3])
+    return runs
+
+
 def val_scale_file(from_run: str, family: str, seed: int, tp: str, work: Path) -> Path | None:
     """Файл оценок 2025 зерна — как его ищет `operating.split`/`retro.load_mix_models`."""
-    d = work / 'runs' / from_run / 'preds'
     if family == 'tcn':
-        names = [f'{family}_s{seed}_{tp}_val.npy', f'tcn_{tp}_val.npy']
+        names = [f'tcn_s{seed}_{tp}_val.npy', f'tcn_{tp}_val.npy']
     else:
         names = [f'{family}_{tp}_val.npy']
-    for n in names:
-        p = d / n
-        if p.exists():
-            return p
+    for run in _candidate_runs(from_run):
+        d = work / 'runs' / run / 'preds'
+        for n in names:
+            p = d / n
+            if p.exists():
+                return p
     return None
 
 
@@ -56,6 +79,11 @@ class Predictor:
         self._nets: dict[int, object] = {}
         self._scales: dict[tuple, np.ndarray] = {}
         self.loaded = False
+
+    @property
+    def version(self) -> str:
+        """Версия выгрузки — дата сборки из манифеста main (`built`, ключа `exported` там нет)."""
+        return str(self.manifest.get('built', ''))
 
     # ----- модели --------------------------------------------------------
     def has_nets(self) -> bool:
@@ -130,29 +158,43 @@ class Predictor:
         return out
 
     # ----- история и шкала -------------------------------------------------
+    def _seed_ranks(self, tp: str, seed: int, info: dict) -> np.ndarray:
+        """Ранг каждой строки витрины зерна на собственной шкале — как `retro.mix_history`.
+
+        Читаем те же preds, что `operating.split`/`retro.load_mix_models` (строки в порядке витрины
+        того же года), и переводим в долю «своих же» оценок на 2025 — `searchsorted/len`. Это и есть
+        компонента смеси истории; входы сети не пересчитываются (их ряды по витрине не восстанавливаются).
+        """
+        sid = int(seed)
+        p = val_scale_file(info['from_run'], info['family'], sid, tp, self.work)
+        if p is None:
+            raise FileNotFoundError(
+                f'нет шкалы 2025 для {tp}/зерна {sid} ({info["family"]}): ждём '
+                f'pipeline-прогон {info["from_run"]} с preds/*_val.npy — тот же файл, что читает '
+                f'retro.load_mix_models')
+        raw = np.load(p).astype(np.float32)
+        base = np.sort(raw)
+        return np.searchsorted(base, raw, side='right') / len(base)
+
     def bootstrap_history(self, year: int = 2025) -> dict:
         """(h_hist, p_hist) смеси по строкам витрины года — начальная история для retro.rolling.
 
-        Считается той же функцией, что и такт (predict), поэтому порог с первой же границы часа
-        встаёт в ту же точку, что и у retro на тех же моделях. Массив парка сортируется по часу —
-        как `retro.mix_history`, иначе retro.rolling не увидит окно.
+        Той же функцией, что `retro.mix_history`: оценка каждого зерна переводится в долю его же
+        оценок на 2025 (searchsorted/len), смесь — среднее зёрен, массив парка сортируется по часу.
+        Порог с первой же границы часа встаёт в ту же точку, что и у retro на тех же моделях.
         """
-        years = (self.meta.get('years') or [year])
-        if year not in years:
-            years = [year]
-        lf = pl.scan_parquet([self.work / 'features' / f'{y}.parquet' for y in years])
-        df = lf.select(['object_id', 'h'] + self.features).collect()
+        df = pl.scan_parquet(self.work / 'features' / f'{year}.parquet') \
+              .select(['object_id', 'h'] + self.features).collect()
         h = df['h'].to_numpy()
-        if self.has_nets():
-            # вход сетей по витрине не восстанавливается (нужны ряды журнала) — для истории сети
-            # берём ранг-смесь по шкале без пересчёта входов, как retro.load_mix_models для S
-            dfr = df.sort('h')
-            scores = self.predict(dfr)
-            hr = dfr['h'].to_numpy()
-            return {tp: (hr, np.asarray(v, np.float32)) for tp, v in scores.items()}
-        scores = self.predict(df)
         order = np.argsort(h, kind='stable')
-        return {tp: (h[order], np.asarray(v[order], np.float32)) for tp, v in scores.items()}
+        out = {}
+        for tp, seeds in self.manifest['models'].items():
+            parts = [self._seed_ranks(tp, int(seed), info) for seed, info in seeds.items()]
+            if not parts:
+                continue
+            mix = np.mean(parts, axis=0).astype(np.float32)
+            out[tp] = (h[order], mix[order])
+        return out
 
     # ----- основания тревоги (ТЗ §5) -----------------------------------------
     def reasons(self, frame: pl.DataFrame, idx: int, tp: str, k: int = 5) -> list[dict]:

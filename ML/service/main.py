@@ -50,9 +50,11 @@ def hour_index(ts: datetime) -> int:
 
 def bootstrap(history: thrmod.Thresholds, predictor: predmod.Predictor,
               settings: OperatingSettings, h: int) -> None:
-    """История порога (П1): если в parquet есть прошлый прогон — поднимаем его, иначе заново."""
-    if not history.load(settings, h):          # файл истории (текущая версия) чего-то не знает
-        history.bootstrap(predictor.bootstrap_history(year=2025), settings, h)
+    """История порога (П1): если в parquet есть прошлый прогон той же версии — поднимаем его,
+    иначе (нет файла либо история собрана другой выгрузкой) пересчитываем на текущей."""
+    if not history.load(settings, h, model_version=predictor.version):
+        history.bootstrap(predictor.bootstrap_history(year=2025), settings, h,
+                          model_version=predictor.version)
         history.dump()
 
 
@@ -88,7 +90,7 @@ def tick(store, predictor, history, rules, settings, sink, observer, now: dateti
     applied = rules.apply(scores, objects, h, thresholds)
 
     # 7: сообщения
-    model_version = meta.get('exported', '')
+    model_version = predictor.version
     for i, oid in enumerate(objects):
         msg = outbox.build_message(int(oid), hour_iso(h), model_version, config.TYPES)
         for tp in config.TYPES:
@@ -132,7 +134,7 @@ def pull_decisions(rules, kafka: bool = False) -> int:
     """Решения диспетчера: parquet-журнал (стенд) либо Kafka (П4, прод)."""
     if kafka:
         from ingest import KafkaReader
-        with KafkaReader([config.TOPIC_DECISIONS]) as r:
+        with KafkaReader([config.TOPIC_DECISIONS], group=config.KAFKA_GROUP_DECISIONS) as r:
             n = 0
             for i in range(64):
                 msg = r.poll_readings(timeout_ms=200, commit=False)
@@ -193,12 +195,13 @@ def main() -> None:
             if now.hour == 0:
                 from retrainer import Retrainer
                 st = Retrainer().status()
-                if st.get('status') == 'done' and st.get('version') != predictor.manifest.get('exported'):
+                if st.get('status') == 'done' and st.get('version') != predictor.version:
                     from retrainer import apply_version
                     predictor = predmod.Predictor()
                     apply_version(history, predictor, hour_index(now) - 1)
             pull_decisions(rules, kafka=True)
             settings = OperatingSettings.load()          # могли сменить в админ-панели (П7)
+            rules.settings = settings                    # доля/k для thr_mute — со свежего файла (П5)
             tick(store, predictor, history, rules, settings, sink, observ.Observer(), now)
             time.sleep(30)
     elif args.replay:

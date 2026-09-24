@@ -57,7 +57,7 @@ class Retrainer:
             return {'ok': False, 'why': f'стратегия {strategy}; можно: {" ".join(STRATEGIES)}'}
         manifest = load_manifest()
         self.state.update({'status': 'queued', 'requested_by': by, 'reason': reason,
-                           'note': note, 'strategy': strategy, 'version': manifest.get('exported'),
+                           'note': note, 'strategy': strategy, 'version': manifest.get('built'),
                            'error': None})
         self.save()
         return {'ok': True}
@@ -70,7 +70,7 @@ class Retrainer:
             # это retrain.py, его крутит MLOps/CI, сервис лишь хранит выбранный ключ для журнала
             subprocess.run([self.python, 'export.py'], cwd=config.ML / 'pipeline', check=True)
             new_manifest = load_manifest()
-            self.state.update({'status': 'done', 'version': new_manifest.get('exported'),
+            self.state.update({'status': 'done', 'version': new_manifest.get('built'),
                                'changed': datetime.now().isoformat(timespec='seconds'),
                                'error': None})
         except subprocess.CalledProcessError as e:
@@ -93,4 +93,4 @@ def apply_version(thresholds, predictor: Predictor, h: int) -> None:
     """
     import settings as s
     scores = predictor.bootstrap_history(year=2025)
-    thresholds.rebootstrap(scores, s.OperatingSettings.load(), h)
+    thresholds.rebootstrap(scores, s.OperatingSettings.load(), h, model_version=predictor.version)

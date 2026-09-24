@@ -17,7 +17,9 @@ def psi(ref: np.ndarray, win: np.ndarray, bins: int = 10,
     """Population Stability Index распределения win против ref: индекс и грейд 0/1/2."""
     if ref.size < bins or win.size == 0:
         return float('nan'), 0
-    edges = np.quantile(ref, np.linspace(0, 1, bins + 1)[1:-1])
+    edges = np.unique(np.quantile(ref, np.linspace(0, 1, bins + 1)[1:-1]))
+    if edges.size < 2:
+        return float('nan'), 0
     r = np.clip(np.histogram(ref, bins=edges)[0] / max(ref.size, 1), 1e-6, None)
     w_ = np.clip(np.histogram(win, bins=edges)[0] / max(win.size, 1), 1e-6, None)
     val = float(np.sum((r - w_) * np.log(r / w_)))
