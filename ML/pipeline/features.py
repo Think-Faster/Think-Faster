@@ -134,7 +134,7 @@ def load_base(con, lo: int = 0, hi: int = NH) -> tuple[np.ndarray, list[int], di
     base[np.array([oi[x] for x in d['object_id']]), dense(d['h']).astype(np.int64) - lo,
          np.array([IDX[k] for k in d['k']])] = dense(d['n'])
     print('  счётчики состояний', flush=True)
-    gas = "stype = 'Газовый датчик' AND num >= 0 AND num < 327.68"
+    gas = "stype = 'Газовый датчик' AND num >= 0 AND num <= 15"  # остальное — неисправность (labels.py)
     temp = "stype = 'Датчик температуры' AND num BETWEEN -40 AND 80"
     put(f"""SELECT object_id, {hour_of('ts')} AS h, count(*) AS n_events, count(DISTINCT channel_id) AS n_channels,
                    max(num) FILTER (WHERE {gas}) AS gas_max, coalesce(sum(num) FILTER (WHERE {gas}), 0) AS gas_sum,
@@ -145,9 +145,10 @@ def load_base(con, lo: int = 0, hi: int = NH) -> tuple[np.ndarray, list[int], di
     print('  показания', flush=True)
     put(f"""SELECT object_id, {hour_of('ts')} AS h, arg_max(armed::INT, ts) AS guard_last FROM guard GROUP BY ALL""",
         ['guard_last'])
+    # Н9 (временная метка проверки, labels.py) меняет только цель: в признаках эпизод остаётся как был
     for t in config.TYPES:
         put(f"""SELECT object_id, {hour_of('t0', KNOWN.get(t))} AS h, count(*) AS onset_{t} FROM inc
-                WHERE type = '{t}' AND noise IS NULL GROUP BY ALL""", [f'onset_{t}'])
+                WHERE type = '{t}' AND (noise IS NULL OR noise = 'Н9') GROUP BY ALL""", [f'onset_{t}'])
         put(f"""SELECT object_id, {hour_of('ts', KNOWN.get(t))} AS h, count(*) AS trig_{t} FROM trig
                 WHERE type = '{t}' GROUP BY ALL""", [f'trig_{t}'])
     put(f"""SELECT object_id, {hour_of('t0', KNOWN['noise_fire'])} AS h, count(*) AS noise_fire FROM inc

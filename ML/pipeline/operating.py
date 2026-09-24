@@ -98,7 +98,8 @@ def row(obj, h, nx, p, thr, H, cap, days) -> str:
             f"{m['lead_median_h']:.0f} |").replace('.', ',')
 
 
-def load_mix(name: str, on: str, year: int, tp: str, model: str, label: str = '') -> tuple:
+def load_mix(name: str, on: str, year: int, tp: str, model: str, label: str = '',
+             ref: tuple | None = None) -> tuple:
     """Прогон или смесь прогонов: `a+b` — среднее рангов вероятностей.
 
     Вероятности двух моделей, обученных на разных целях, по величине несопоставимы: у цели
@@ -113,6 +114,12 @@ def load_mix(name: str, on: str, year: int, tp: str, model: str, label: str = ''
 
     Свой прогон каждому типу — через `тип~прогон`, разделитель `;`, `*` — для остальных:
     `fire~main_h24/cat;equipment~main_h24_tuned;*~main_h24/cat` (раздел 34: база — смесь по типам).
+
+    Ранги считаются внутри периода, поэтому смеси двух периодов на одной шкале нет: в году
+    проверки строк вдвое больше, чем в полугодии теста, и порог с проверки на тесте не срабатывает
+    ни разу. Кому нужна общая шкала (скользящий порог в `calib.py`), передаёт `ref = (on, year)`
+    опорного периода: оценка каждого зерна переводится в долю его же оценок на опорном периоде,
+    не ниже её. Опорный период идёт раньше, так что будущее не подсматривается.
     """
     if '~' in name:
         table = dict(part.split('~', 1) for part in name.split(';') if part)
@@ -125,7 +132,14 @@ def load_mix(name: str, on: str, year: int, tp: str, model: str, label: str = ''
             run, _, m = run.partition('/')
             parts.append((run, m or model, float(w) if w else 1.0))
     obj, h, nxt, p = split(parts[0][0], on, year, tp, parts[0][1], label)
-    if len(parts) > 1:
+    if len(parts) > 1 and ref:
+        def pct(run, m, q):
+            base = np.sort(split(run, ref[0], ref[1], tp, m, label)[3])
+            return np.searchsorted(base, q, side='right') / len(base)
+        p = parts[0][2] * pct(parts[0][0], parts[0][1], p)
+        for run, m, w in parts[1:]:
+            p = p + w * pct(run, m, split(run, on, year, tp, m, label)[3])
+    elif len(parts) > 1:
         p = parts[0][2] * p.argsort().argsort()
         for run, m, w in parts[1:]:
             _, _, _, q = split(run, on, year, tp, m, label)

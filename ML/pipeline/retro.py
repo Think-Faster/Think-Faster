@@ -13,7 +13,18 @@
 Журнал для каждого момента — 100 суток до него (самое длинное окно признаков — 90 суток) плюс вся
 история режима охраны: для проникновения нужно знать, стоит ли объект на охране.
 
+Смесь раздела 34 (`--run "$MIX5"`, тип~прогоны) считается так же, как в эксплуатации: оценка
+каждого зерна переводится в долю его же оценок на проверке 2025 (`operating.load_mix`, `ref`),
+доли складываются, а порог — доля часов под тревогой по оценкам всего парка за 90 суток до
+момента прогноза (раздел 32). Доли по типам — из раздела 38 (`--shares`).
+
+У отказа оборудования в смеси стоит сеть (раздел 48). Ей нужна не строка витрины, а 168 ч часовых
+рядов объекта и его коллектора плюс статика — всё это пересобирается из того же обрезанного
+журнала (`seq_pack`), и сверка идёт не с витриной, а с прогнозом сети из рабочего прогона: вход
+собран верно, если вероятности совпали.
+
     python retro.py [--run main_h24] [--days N] > ../work/retro.md
+    python retro.py --run "$MIXT" > ../work/retro_mixt.md
 """
 import argparse
 import contextlib
@@ -23,7 +34,6 @@ import os
 import sys
 import time
 from datetime import datetime, timedelta
-from pathlib import Path
 
 import duckdb
 import numpy as np
@@ -32,12 +42,17 @@ import polars as pl
 import config
 import features as ft
 import labels
+import operating as op
 
 HOUR = 7            # момент прогноза — 07:00, начало смены
 LOOK_DAYS = 100     # сут журнала перед моментом прогноза
 LOOK_H = ft.CAP + 168   # ч часовых рядов: окна до 90 сут плюс запас
 TOL = 1e-4
 MONTHS = ['янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек']
+SEQ_L = 168         # ч окна сети (seqmodel.L)
+# Календарь в статике сети — в том же порядке и с теми же делителями, что в `seqmodel.py`
+CAL_SEQ = [('hour', 23), ('dow', 6), ('month', 12), ('doy_sin', 1), ('doy_cos', 1),
+           ('holiday', 1), ('long_holiday', 1), ('may9', 1), ('days_to_holiday', 60)]
 
 
 def cutoffs(days: int | None) -> list[datetime]:
@@ -63,7 +78,28 @@ def open_db(first: datetime, last: datetime) -> duckdb.DuckDBPyConnection:
     return con
 
 
-def snapshot(con, t: datetime, meta: dict, cal: dict) -> pl.DataFrame:
+def seq_pack(base: np.ndarray, collectors: np.ndarray, comp: np.ndarray, cal: dict, h: int) -> tuple:
+    """Вход сети (`seqmodel.py`) из того же окна журнала: ряды объекта, ряды коллектора и статика.
+
+    Ряды приводятся к тому же виду, что в `work/seq.npz`: nan → 0, знаковый log1p, float16 —
+    иначе оценка разойдётся с обучением уже на третьем знаке. Окно сети — 168 ч, но часы с
+    прошлого эпизода и счётчики эпизодов за 30 и 90 суток считаются по всему окну ретропрогона:
+    в обучении они считались по всей истории объекта и там, и там насыщаются на 90 сутках.
+    """
+    x = np.nan_to_num(base, nan=0.0)
+    x = (np.sign(x) * np.log1p(np.abs(x))).astype(np.float16).astype(np.float32)
+    mean = {c: x[collectors == c].mean(0) for c in np.unique(collectors)}
+    xin = np.concatenate([x[:, -SEQ_L:], np.stack([mean[c] for c in collectors])[:, -SEQ_L:]], -1)
+    ep = np.expm1(x[:, :, [ft.IDX[k] for k in ft.ONSETS]])
+    long = [np.log1p(ep[:, -w:].sum(1)) for w in (720, ft.CAP)]
+    since = np.log1p(np.stack([[ft.since_last(np.expm1(b[:, ft.IDX[f'onset_{tp}']]))[-1]
+                                for tp in config.TYPES] for b in x]))
+    day = np.array([cal[k][h] / d for k, d in CAL_SEQ], np.float32)
+    s = np.concatenate([np.log1p(comp), np.broadcast_to(day, (len(x), len(day))), since] + long, 1)
+    return xin.astype(np.float32), s.astype(np.float32)
+
+
+def snapshot(con, t: datetime, meta: dict, cal: dict, seq: bool = False):
     """Строки признаков всех объектов на момент t, собранные только из журнала до t."""
     con.sql(f"""CREATE OR REPLACE VIEW ev AS SELECT * FROM ev_all WHERE ts < TIMESTAMP '{t}'
                 AND (ts >= TIMESTAMP '{t - timedelta(days=LOOK_DAYS)}' OR stype = 'Состояние охраны')""")
@@ -96,7 +132,11 @@ def snapshot(con, t: datetime, meta: dict, cal: dict) -> pl.DataFrame:
         row.update({f'comp_{i}': float(x) for i, x in enumerate(comp[o])})
         row.update({k: float(v[-1]) for k, v in f.items()})
         rows.append(row)
-    return pl.DataFrame(rows).select(['object_id', 'h'] + meta['features'])
+    df = pl.DataFrame(rows).select(['object_id', 'h'] + meta['features'])
+    if not seq:
+        return df, None
+    comp_m = np.stack([comp[o] for o, _, _ in info])
+    return df, seq_pack(base, collectors, comp_m, cal, h)
 
 
 def load_models(run: str) -> dict:
@@ -115,6 +155,114 @@ def load_models(run: str) -> dict:
             m.load_model(str(d / f'cat_{tp}.cbm'))
             out[('cat', tp)] = lambda X, m=m: m.predict_proba(X)[:, 1]
     return out
+
+
+# Доли часов под тревогой по типам — рабочие, из settings/operating.json (раздел 46)
+SHARES = ','.join(f'{k}={v}' for k, v in config.shares().items())
+
+
+def mix_parts(name: str, tp: str) -> list:
+    """Прогоны смеси для типа: [(прогон, семейство, вес)], разбор как в `operating.load_mix`."""
+    table = dict(part.split('~', 1) for part in name.split(';') if part)
+    name = table.get(tp, table.get('*', ''))
+    out = []
+    for part in name.split('+'):
+        if part:
+            run, _, w = part.partition(':')
+            run, _, m = run.partition('/')
+            out.append((run, m or 'xgb', float(w) if w else 1.0))
+    return out
+
+
+def load_mix_models(name: str) -> dict:
+    """Для каждого типа — функция (X, S) -> оценка смеси на шкале проверки 2025.
+
+    `S` — оценки сетей по тем же строкам, посчитанные заранее (`net_scores`): сеть смотрит не в
+    строку витрины, а в часовые ряды, и считается одна на все типы сразу.
+    """
+    import xgboost as xgb
+    from catboost import CatBoostClassifier
+    out = {}
+    for tp in config.TYPES:
+        fns = []
+        for run, m, w in mix_parts(name, tp):
+            d = config.WORK / 'runs' / run / 'models'
+            if m.startswith('tcn'):
+                f = lambda X, S, key=f'{m}_{tp}': S[key]
+            elif m == 'xgb':
+                b = xgb.Booster()
+                b.load_model(d / f'xgb_{tp}.json')
+                b.set_param({'device': 'cpu'})
+                f = lambda X, S, b=b: b.inplace_predict(X)
+            else:
+                c = CatBoostClassifier()
+                c.load_model(str(d / f'cat_{tp}.cbm'))
+                f = lambda X, S, c=c: c.predict_proba(X)[:, 1]
+            base = np.sort(op.split(run, 'val', 2025, tp, m)[3])
+            fns.append((f, base, w))
+        out[tp] = lambda X, S, fns=fns: sum(w * np.searchsorted(base, f(X, S), side='right') / len(base)
+                                            for f, base, w in fns)
+    return out
+
+
+def load_nets(name: str) -> dict:
+    """Сети, которые встречаются в смеси: семейство -> веса рабочего прогона.
+
+    Одна сеть выдаёт все шесть типов сразу, поэтому грузится по разу на семейство, а не на тип.
+    """
+    import torch
+    from seqmodel import Net
+    fams = {(run, m) for tp in config.TYPES for run, m, _ in mix_parts(name, tp) if m.startswith('tcn')}
+    out = {}
+    for run, m in sorted(fams):
+        state = torch.load(config.WORK / 'runs' / run / 'models' / f'{m}.pt', map_location='cpu', weights_only=True)
+        width, c_in = state['inp.weight'].shape[:2]
+        net = Net(c_in, state['head.0.weight'].shape[1] - 2 * width, len(config.TYPES), width, 0.0)
+        net.load_state_dict(state)
+        out[m] = net.eval()
+    return out
+
+
+def net_scores(nets: dict, pack: tuple, df: pl.DataFrame, dev: str) -> pl.DataFrame:
+    """Оценки сетей на строках момента: те же вероятности, что в прогоне, если вход собран верно."""
+    import torch
+    x, s = (torch.from_numpy(a).to(dev) for a in pack)
+    cols = {'object_id': df['object_id'], 'h': df['h']}
+    with torch.no_grad(), torch.autocast(dev, dtype=torch.bfloat16, enabled=dev == 'cuda'):
+        for m, net in nets.items():
+            p = torch.sigmoid(net.to(dev)(x, s).float()).cpu().numpy()
+            cols.update({f'{m}_{tp}': p[:, k] for k, tp in enumerate(config.TYPES)})
+    return pl.DataFrame(cols)
+
+
+def run_scores(run: str, m: str, tp: str, obj: np.ndarray, h: np.ndarray) -> np.ndarray:
+    """Оценка сети из рабочего прогона на тех же строках — с ней сверяется пересчёт по журналу."""
+    d = config.WORK / 'runs' / run / 'preds'
+    idx = np.load(d / 'index_test.npz')
+    key = idx['object_id'].astype(np.int64) * 10 ** 7 + idx['h']
+    order = np.argsort(key)
+    want = obj.astype(np.int64) * 10 ** 7 + h
+    pos = order[np.searchsorted(key[order], want)]
+    assert np.array_equal(key[pos], want), f'в прогнозах {run}/{m} нет части строк ретропрогона'
+    return np.load(d / f'{m}_{tp}_test.npy')[pos]
+
+
+def mix_history(name: str, tp: str) -> tuple:
+    """Оценки смеси по витрине за 2025 и 2026 — история для скользящего порога."""
+    _, hv, _, pv = op.load_mix(name, 'val', 2025, tp, 'xgb', ref=('val', 2025))
+    _, ht, _, pt = op.load_mix(name, 'test', 2026, tp, 'xgb', ref=('val', 2025))
+    h, p = np.concatenate([hv, ht]), np.concatenate([pv, pt])
+    order = np.argsort(h, kind='stable')
+    return h[order], p[order]
+
+
+def rolling(h_hist: np.ndarray, p_hist: np.ndarray, hours: np.ndarray, share: float) -> np.ndarray:
+    """Порог на каждый момент: квантиль оценок парка за 90 суток строго до часа прогноза."""
+    thr = {}
+    for x in np.unique(hours):
+        lo, hi = np.searchsorted(h_hist, [x - 90 * 24 + 1, x + 1])
+        thr[x] = float(np.quantile(p_hist[lo:hi], 1 - share))
+    return np.array([thr[x] for x in hours])
 
 
 def thresholds(run: str) -> dict:
@@ -138,133 +286,17 @@ def md(df: pl.DataFrame) -> str:
                      ['| ' + ' | '.join(fmt(v) for v in r) + ' |' for r in df.rows()])
 
 
-def seq_pack(con, t: datetime, meta: dict, L: int = 168) -> dict[str, np.ndarray]:
-    """Вход сети на момент t (INTEGRATION §1.4): 168 ч + статика, повторяет seqmodel.batch.
-
-    Строится из того же обрезанного журнала, что и snapshot(): часовые ряды от `lo` до t, из них
-    — 66 рядов объекта и те же 66, усреднённые по коллектору, знаковый log1p в float16 (см.
-    features.main). Статика — состав объекта, календарь часа, часы с прошлого эпизода по шести
-    типам и счётчики эпизодов за 30 и 90 суток (CAP), ровно в том порядке, в котором сеть видела
-    их при обучении. Возврат: x (объекты × 168 × 132) и s (объекты × статика), float16.
-    """
-    hi = int((t - ft.T0).total_seconds() // 3600)
-    lo = hi - L - ft.CAP
-    with contextlib.redirect_stdout(io.StringIO()):
-        base, objects, oi = ft.load_base(con, lo, hi)
-    nch = base.shape[2]
-    arr = np.where(np.isnan(base), 0.0, base).astype(np.float32)
-    arr = np.sign(arr) * np.log1p(np.abs(arr))
-    info = con.sql('SELECT object_id, collector_id FROM obj3 ORDER BY object_id').fetchall()
-    collectors = np.array([c for _, c in info], np.int64)
-    uniq = np.unique(collectors)
-    coll = np.stack([arr[collectors == c].mean(0) for c in uniq]).astype(np.float16)
-    o2c = np.searchsorted(uniq, collectors)
-    hh = np.arange(hi - L, hi) - lo
-    xo = arr[:, hh]
-    xc = coll[o2c][:, hh].astype(np.float32)
-    x = np.concatenate([xo, xc], -1).astype(np.float16)          # объекты × 168 × 132
-
-    ons = np.nancumsum(np.nan_to_num(base[:, :, [ft.IDX[k] for k in ft.ONSETS]], nan=0.0), 1)
-    since = np.stack([np.log1p(ft.since_last(ons[:, :, j])) for j in range(len(ft.ONSETS))], -1)
-    th = hh[-1]
-    long = np.log1p(np.stack([(ons[:, th] - ons[:, np.clip(th - w, 0, None)])
-                              for w in (720, ft.CAP)], -1))
-    cal = ft.calendar()
-    calv = np.stack([cal['hour'][th] / 23, cal['dow'][th] / 6, cal['month'][th] / 12,
-                     cal['doy_sin'][th], cal['doy_cos'][th], cal['holiday'][th],
-                     cal['long_holiday'][th], cal['may9'][th], cal['days_to_holiday'][th] / 60], -1)
-    comp = np.zeros((len(objects), len(meta['stypes'])), np.float32)
-    for o, s, n in con.sql('SELECT object_id, stype, count(*) FROM ch WHERE object_id IN '
-                           '(SELECT object_id FROM obj3) GROUP BY ALL').fetchall():
-        comp[oi[o], meta['stypes'].index(s)] = n
-    s = np.concatenate([np.log1p(comp), np.broadcast_to(calv, (len(objects), 9)),
-                        since.astype(np.float32), long.astype(np.float32)], -1).astype(np.float16)
-    return {'x': x, 's': s}
-
-
-def load_nets(export: Path | None = None) -> list:
-    """Сети TCN из выгрузки. Возвращает список сетей в порядке manifest.seq.nets."""
-    import torch
-    import seqmodel
-    nets_dir = (export or config.WORK / 'export' / 'nets')
-    manifest = json.loads((config.WORK / 'export' / 'manifest.json').read_text(encoding='utf-8'))
-    names = manifest['seq'].get('nets', sorted(p.name for p in nets_dir.glob('*.pt')))
-    out = []
-    for name in names:
-        state = torch.load(nets_dir / name, map_location='cpu', weights_only=True)
-        net = seqmodel.Net(state['c_in'], state['c_static'], state['n_out'],
-                           state['width'], state['dropout'])
-        net.load_state_dict(state['state_dict'])
-        net.eval()
-        out.append(net)
-    return out
-
-
-def net_scores(nets: list, x: np.ndarray, s: np.ndarray) -> np.ndarray:
-    """Среднее sigmoid-выходов сетей: объекты × 6 типов. Только для инференса."""
-    import torch
-    with torch.no_grad():
-        out = []
-        xt, st = torch.from_numpy(x), torch.from_numpy(s)
-        for o in range(0, len(xt), 4096):
-            acc = None
-            for net in nets:
-                p = torch.sigmoid(net(xt[o:o + 4096], st[o:o + 4096]).float())
-                acc = p if acc is None else acc + p
-            out.append((acc / len(nets)).numpy())
-    return np.concatenate(out)
-
-
-def load_mix_models(export: Path | None = None) -> dict:
-    """Модели выгрузки: тип → {'family', 'seeds': {зерно: вызываемое}}.
-
-    Зерно — лямбда по строке признаков (порядок manifest.features), как в load_models.
-    """
-    import xgboost as xgb
-    from catboost import CatBoostClassifier
-    export = export or config.WORK / 'export'
-    manifest = json.loads((export / 'manifest.json').read_text(encoding='utf-8'))
-    out = {}
-    for tp, block in manifest['models'].items():
-        fam = block['family']
-        seeds = {}
-        for seed, info in block['seeds'].items():
-            p = export / info['path'] / f'{fam}_{tp}.{EXT[fam]}'
-            if fam == 'cat':
-                m = CatBoostClassifier()
-                m.load_model(str(p))
-                seeds[seed] = lambda X, m=m: m.predict_proba(X)[:, 1]
-            else:
-                b = xgb.Booster()
-                b.load_model(p)
-                b.set_param({'device': 'cpu'})
-                seeds[seed] = lambda X, b=b: b.inplace_predict(X)
-        out[tp] = {'family': fam, 'seeds': seeds}
-    return out
-
-
-def rolling(history: pl.DataFrame, share: float, window_days: int = 90) -> float:
-    """Квантиль оценок за последние window_days суток — скользящий порог на долю share.
-
-    history: колонки h (час) и score по одному типу. Порог не свойство модели, а место в
-    распределении оценок парка (INTEGRATION §2.1): пересчитывается на каждый новый час.
-    """
-    if not history.height:
-        return float('nan')
-    last = history['h'].max()
-    keep = history.filter(pl.col('h') >= last - window_days * 24)
-    return float(keep['score'].quantile(1.0 - share)) if keep.height else float('nan')
-
-
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument('--run', default='main_h24')
     ap.add_argument('--days', type=int, default=None, help='только первые N суток — для пробы')
+    ap.add_argument('--shares', default=SHARES, help='смесь: доля часов под тревогой по типам')
     args = ap.parse_args()
+    mix = '~' in args.run
     t = time.time()
     meta = json.loads((config.WORK / 'features' / 'meta.json').read_text(encoding='utf-8'))
     feats = meta['features']
-    report = thresholds(args.run)
+    report = None if mix else thresholds(args.run)
     H = config.HORIZON
     ts = cutoffs(args.days)
     hours = [int((x - ft.T0).total_seconds() // 3600) - 1 for x in ts]
@@ -278,10 +310,19 @@ def main() -> None:
     print(f'журнал для ретропрогона: {con.sql("SELECT count(*) FROM ev_all").fetchone()[0]:,} строк, '
           f'{time.time() - t:.0f} с', file=sys.stderr, flush=True)
     cal = ft.calendar()
-    snaps = []
+    nets = load_nets(args.run) if mix else {}
+    dev = 'cpu'
+    if nets:
+        import torch
+        dev = 'cuda' if torch.cuda.is_available() else 'cpu'
+        print(f'сетей в смеси: {len(nets)} ({dev})', file=sys.stderr, flush=True)
+    snaps, seqs = [], []
     for i, x in enumerate(ts):
         t1 = time.time()
-        snaps.append(snapshot(con, x, meta, cal))
+        df, pack = snapshot(con, x, meta, cal, seq=bool(nets))
+        snaps.append(df)
+        if nets:
+            seqs.append(net_scores(nets, pack, df, dev))
         print(f'  {x:%Y-%m-%d %H:%M}: {time.time() - t1:.0f} с', file=sys.stderr, flush=True)
     con.close()
     retro = pl.concat(snaps).join(batch.select('object_id', 'h'), on=['object_id', 'h'], how='semi')
@@ -305,16 +346,39 @@ def main() -> None:
                   f'ретро {R[i, j]}, витрина {B[i, j]}')
 
     # 2. прогнозы: тот же вход — тот же выход; сутки за сутками
-    models = load_models(args.run)
+    models = load_mix_models(args.run) if mix else load_models(args.run)
+    shares = {k: float(v) for k, v in (x.split('=') for x in args.shares.split(','))}
     Xr = np.ascontiguousarray(R, dtype=np.float32)
     Xb = np.ascontiguousarray(B, dtype=np.float32)
+    obj_k, h_k = retro['object_id'].to_numpy(), retro['h'].to_numpy()
+    Sr, Sb = {}, {}
+    if nets:
+        # оценки сети: слева пересчитанные по обрезанному журналу, справа — из рабочего прогона
+        cols = retro.select('object_id', 'h').join(pl.concat(seqs), on=['object_id', 'h'], how='left')
+        for tp in config.TYPES:
+            for run, m, _ in mix_parts(args.run, tp):
+                if m.startswith('tcn'):
+                    Sr[f'{m}_{tp}'] = cols[f'{m}_{tp}'].to_numpy()
+                    Sb[f'{m}_{tp}'] = run_scores(run, m, tp, obj_k, h_k)
+        print('\n## Сверка оценок сети\n\nВход сети — часовые ряды, а не строка витрины, поэтому он '
+              'сверяется отдельно: вероятность, пересчитанная по обрезанному журналу, против '
+              'вероятности того же зерна из рабочего прогона на той же строке.\n')
+        d = [{'сеть и тип': k, 'макс |Δp|': float(np.abs(Sr[k] - Sb[k]).max()),
+              'медиана |Δp|': float(np.median(np.abs(Sr[k] - Sb[k]))),
+              'ранговая корреляция': float(np.corrcoef(np.argsort(np.argsort(Sr[k])),
+                                                       np.argsort(np.argsort(Sb[k])))[0, 1])} for k in sorted(Sr)]
+        print(md(pl.DataFrame(d)))
     day = (retro['h'].to_numpy() + 1) // 24
     lines, per_day = [], []
     for tp in config.TYPES:
         nxt = batch[f'next_{tp}'].to_numpy()
         y = nxt <= H
         scores = {'rules': (Xr[:, feats.index(f'trig_{tp}_24h')] > 0, None)}
-        for name in ('xgb', 'cat'):
+        if mix:
+            pr, pb = models[tp](Xr, Sr), models[tp](Xb, Sb)
+            thr = rolling(*mix_history(args.run, tp), retro['h'].to_numpy(), shares[tp])
+            scores['смесь'] = (pr >= thr, float(np.abs(pr - pb).max()))
+        for name in () if mix else ('xgb', 'cat'):
             if (name, tp) in models:
                 pr, pb = models[(name, tp)](Xr), models[(name, tp)](Xb)
                 thr = report[tp]['scores'][name]['test']['threshold']

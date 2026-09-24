@@ -1,21 +1,15 @@
 {
+  "$schema": "./operating.schema.json",
   "version": 3,
-  "changed": "2026-09-23T00:00:00+03:00",
-  "changed_by": "ml",
-  "reason": "рабочая точка из INTEGRATION.md §2.1: доли часов под тревогой; версия 3",
-  "horizon_hours": 24,
-  "shares": {
-    "fire": 0.025,
-    "gas": 0.026,
-    "flood": 0.018,
-    "equipment": 0.059,
-    "sensor": 0.009,
-    "intrusion": 0.005
-  },
-  "reject_k": 0.2,
-  "reject_types": ["gas", "flood"],
-  "max_share": 0.1,
-  "threshold_window_days": 90,
-  "chatter_gap_hours": 6,
-  "mute_max_hours": 72
+  "changed": "2026-09-22",
+  "changed_by": "ML",
+  "reason": "правило отклонения только у газа и подтопления: у остальных типов оно добавляет пропусков больше, чем убирает ложных сигналов (analytics.md, раздел 46)",
+  "types": {
+    "fire":      {"share": 0.025, "reject_k": null},
+    "gas":       {"share": 0.026, "reject_k": 0.2},
+    "flood":     {"share": 0.018, "reject_k": 0.2},
+    "equipment": {"share": 0.059, "reject_k": null},
+    "sensor":    {"share": 0.009, "reject_k": null},
+    "intrusion": {"share": 0.005, "reject_k": null}
+  }
 }

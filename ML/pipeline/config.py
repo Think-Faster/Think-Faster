@@ -3,6 +3,7 @@
 Журналы (15 ГБ) в git не лежат: путь к папке с ext-journal-*.csv задаёт TF_JOURNAL.
 Рабочая база, витрина и модели — в TF_WORK (по умолчанию ML/work, git его не видит).
 """
+import json
 import os
 from datetime import datetime
 from pathlib import Path
@@ -15,6 +16,7 @@ RESULTS = ML / 'results'
 JOURNAL = Path(os.environ.get('TF_JOURNAL', ML / 'journal'))
 WORK = Path(os.environ.get('TF_WORK', ML / 'work'))
 DB = WORK / 'tf.duckdb'
+SETTINGS = ML / 'settings' / 'operating.json'
 
 # 2021 год исключён: в нём параллельно работали две системы мониторинга (plan.md §5)
 YEARS = [2019, 2020, 2022, 2023, 2024, 2025, 2026]
@@ -32,6 +34,28 @@ WINDOWS = [1, 6, 24, 168]  # ч: окна признаков 1 ч / 6 ч / 24 ч
 TYPES = ['fire', 'gas', 'flood', 'equipment', 'sensor', 'intrusion']
 TYPE_NAMES = {'fire': 'пожар', 'gas': 'загазованность', 'flood': 'подтопление',
               'equipment': 'отказ оборудования', 'sensor': 'отказ датчика', 'intrusion': 'проникновение'}
+
+
+def operating(path: Path = SETTINGS) -> dict:
+    """Рабочие параметры, которые меняет главный диспетчер (`settings/operating.md`): по каждому
+    типу доля часов под тревогой и k после отклонения (None — правило выключено). Проверяются по
+    границам схемы: значение за исследованным диапазоном не молча обрезается, а останавливает
+    загрузку."""
+    cfg = json.loads(path.read_text(encoding='utf-8'))
+    schema = json.loads((SETTINGS.parent / 'operating.schema.json').read_text(encoding='utf-8'))
+    props = schema['properties']['types']['properties']
+    assert set(cfg['types']) == set(TYPES), f'{path.name}: нужны все типы {TYPES}'
+    kb = schema['$defs']['reject_k']
+    for tp, v in props.items():
+        b, s, k = v['properties']['share'], cfg['types'][tp]['share'], cfg['types'][tp]['reject_k']
+        assert b['minimum'] <= s <= b['maximum'], f"{path.name}: {tp} share {s} вне [{b['minimum']}, {b['maximum']}]"
+        assert k is None or kb['minimum'] <= k <= kb['maximum'], f"{path.name}: {tp} reject_k {k} вне [{kb['minimum']}, {kb['maximum']}]"
+    assert cfg.get('reason'), f'{path.name}: не указана причина изменения'
+    return cfg
+
+
+def shares() -> dict:
+    return {tp: v['share'] for tp, v in operating()['types'].items()}
 
 
 def connect(read_only: bool = False) -> duckdb.DuckDBPyConnection:
