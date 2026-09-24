@@ -459,7 +459,7 @@ Airflow, Kubernetes, feature store и MLflow сознательно не бер�
 
 В ветке `ml` один коммит поверх main — `6d2d702` от 23.09: сервис `ML/service/` (около 1900 строк
 с тестами) под задачи M1–M12 из §5 и свои версии `pipeline/export.py`, `retro.py`, `reject.py`,
-`dispatch.py`, `settings/operating.json`. Автор коммита — учётная запись GroznyiBombila, не Захара.
+`dispatch.py`, `settings/operating.json`. Это работа Захара (закоммичена с учётной записи GroznyiBombila).
 
 **Сливать в main как есть нельзя.** Файлы `pipeline/` и `settings/` в ветке старше main и с ним
 расходятся. Слияние затрёт проверенные версии, а сервис не прочитает текущую выгрузку `work/export`:
@@ -507,8 +507,8 @@ Airflow, Kubernetes, feature store и MLflow сознательно не бер�
 
 ### 10.3 Остаток задач Захара
 
-По `tasks/todo.md` и листам TF-3, TF-6. В репозитории на 24.09 от Захара только `docs/analytics/dtl.py`
-и `README.md` от 16.09; файлов результата TF-3 и TF-6 нет.
+По `tasks/todo.md` и листам TF-3, TF-6. Сделанное Захаром на 24.09 — `ML/service/` в ветке `ml` (разобран
+выше) и `docs/analytics/dtl.py` с `README.md` от 16.09; файлов результата TF-3 и TF-6 нет.
 
 | задача | состояние | что осталось |
 |---|---|---|
