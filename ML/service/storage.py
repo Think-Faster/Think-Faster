@@ -1,12 +1,15 @@
-"""Горячий журнал (M2): куда потребитель пишет события, из чего собираются признаки.
+"""Горячий журнал (M2): куда приём пишет события, из чего собираются признаки.
 
-Схема повторяет внутреннюю таблицу `ev` исследования (INTEGRATION §1.1): events.py чистит журнал
-на этапе загрузки — здесь та же чистка применяется к каждой строке Kafka-потока. Разница одна:
-у исследования журнал статичный, у нас он кольцевой — глубина 100 суток, строки охраны не
-удаляются никогда (для проникновения нужна вся история режима).
+Схема совпадает с внутренней таблицей `ev` исследования (INTEGRATION §1.1), но называется
+`ev_all` — ровно то имя, которое ждёт `retro.snapshot()` из main, пересоздающий вид `ev` с окном
+и полной историей охраны (П2, INTEGRATION2 §10.1). events.py чистит журнал на этапе загрузки —
+здесь та же чистка применяется к каждой строке Kafka-потока. Разница одна: у исследования журнал
+статичный, у нас он кольцевой — глубина 100 суток, строки охраны не удаляются никогда (для
+проникновения нужна вся история режима).
 
-Событие из потока входит в чтения только после чистки; чистка должна совпадать с events.py
-строка в строку, иначе витрина в проде разойдётся с той, на которой модели считаны.
+Событие входит в чтения только после чистки; чистка должна совпадать с events.py строка в строку,
+иначе витрина в проде разойдётся с той, на которой модели считаны. Дедупликация — первичным ключом
+(канал, время, значение), как SELECT DISTINCT в events.py; флаг «тревожное» в дублях не участвует.
 """
 import re
 from datetime import datetime, timedelta
@@ -19,12 +22,13 @@ import svc as config
 
 GUARD_DATE = re.compile(r'^[0-9#]{2}\.[0-9#]{2}\.')
 
+# Каналы вне справочника выкидываются (events.py): их не к чему привязать. Числовые показания — в
+# num, текстовые состояния — в state, сырое значение оставлено в value как ключ дедупликации.
 SCHEMA = """
-CREATE TABLE IF NOT EXISTS readings(
+CREATE TABLE IF NOT EXISTS ev_all(
     object_id INT, channel_id INT, ts TIMESTAMP, stype VARCHAR,
-    state VARCHAR, num DOUBLE, value VARCHAR,
-    PRIMARY KEY(channel_id, ts, value));
-CREATE INDEX IF NOT EXISTS readings_ts ON readings(ts);
+    state VARCHAR, num DOUBLE, value VARCHAR, PRIMARY KEY(channel_id, ts, value));
+CREATE INDEX IF NOT EXISTS ev_all_ts ON ev_all(ts);
 CREATE TABLE IF NOT EXISTS obj(
     object_id INT PRIMARY KEY, level INT, parent_id INT, kind VARCHAR, name VARCHAR);
 CREATE TABLE IF NOT EXISTS ch(
@@ -104,37 +108,52 @@ class HotStore:
         if not rows:
             return 0
         self.con.executemany(
-            'INSERT OR IGNORE INTO readings VALUES (?,?,?,?,?,?,?)',
+            'INSERT OR IGNORE INTO ev_all VALUES (?,?,?,?,?,?,?)',
             [(r['object_id'], r['channel_id'], r['ts'], r['stype'], r['state'], r['num'], r['value'])
              for r in rows])
         return len(rows)
 
-    def bulk_import(self) -> int:
-        """Загрузка журнала из csv (стенд/возврат к файлам): как events.py, но в readings."""
-        files = [(config.JOURNAL / f'ext-journal-{y}.csv').as_posix()
-                 for y in config.YEARS]
-        return self.con.sql(f"""
-            INSERT OR IGNORE INTO readings
+    RAW_COLS = "{'ид_события': 'VARCHAR', 'ид_канала_данных': 'VARCHAR', 'дата': 'VARCHAR', " \
+               "'время': 'VARCHAR', 'тревожное': 'VARCHAR', 'значение_датчика': 'VARCHAR'}"
+
+    def bulk_import(self, until: datetime | None = None, since: datetime | None = None,
+                    years: list[int] | None = None) -> int:
+        """Загрузка журнала из csv одним COPY-подобным INSERT (П9, INTEGRATION2 §10.1).
+
+        Дата — параметр, не константа: `until` (по умолчанию config.DATA_END) режет хвост, `since`
+        — левый край. Годы вне YEARS и 2021 выкидываются, как в events.py. Чистка и дедупликация —
+        внутри того же запроса: разбор CSV — через read_csv поверхности (семейство COPY в DuckDB,
+        кавычки и провалы не ломают строку), массовая вставка объявлена одним INSERT OR IGNORE.
+        """
+        until = until or config.DATA_END
+        since = since or datetime(2019, 1, 1)
+        years = years or config.YEARS
+        files = [(config.JOURNAL / f'ext-journal-{y}.csv').as_posix() for y in years]
+        missing = [f for f in files if not Path(f).exists()]
+        if missing:
+            raise FileNotFoundError(f'нет журнала: {missing}')
+        before = int(self.con.sql('SELECT count(*) FROM ev_all').fetchone()[0])
+        self.con.sql(f"""
+            INSERT OR IGNORE INTO ev_all
             WITH raw AS (
                 SELECT try_cast(ид_канала_данных AS INTEGER) AS channel_id,
                        try_cast(дата || ' ' || время AS TIMESTAMP) AS ts, значение_датчика AS v
                 FROM read_csv({files}, header=true, quote='"', escape='"', parallel=true,
-                              columns={{'ид_события': 'VARCHAR', 'ид_канала_данных': 'VARCHAR',
-                                       'дата': 'VARCHAR', 'время': 'VARCHAR', 'тревожное': 'VARCHAR',
-                                       'значение_датчика': 'VARCHAR'}})
-                WHERE ts >= '2019-01-01' AND ts < '2026-07-01' AND year(ts) <> 2021)
+                              columns={self.RAW_COLS})
+                WHERE ts >= TIMESTAMP '{since}' AND ts < TIMESTAMP '{until}' AND year(ts) <> 2021)
             SELECT c.object_id::INT, r.channel_id, r.ts, c.stype,
                    CASE WHEN try_cast(r.v AS DOUBLE) IS NULL THEN r.v END, try_cast(r.v AS DOUBLE), r.v
             FROM raw r JOIN ch c USING (channel_id)
             WHERE NOT (c.stype = '{config.GUARD_STYPE}' AND regexp_matches(r.v, '^[0-9#]{{2}}\\.[0-9#]{{2}}\\.'))
-            """).fetchone()[0]
+            """)
+        return int(self.con.sql('SELECT count(*) FROM ev_all').fetchone()[0]) - before
 
     # ----- чтение (образец — retro.open_db) ----------------------------------------
     def ev_view(self, t: datetime) -> None:
-        """Витрина-представление ev на момент t: только журнал до t, окно 100 сут + охрана целиком."""
+        """Представление ev на момент t: только журнал до t, окно 100 сут + охрана целиком."""
         lo = t - timedelta(days=config.HOT_RETENTION_DAYS)
         self.con.sql(f"""CREATE OR REPLACE VIEW ev AS
-            SELECT object_id, channel_id, ts, stype, state, num FROM readings
+            SELECT object_id, channel_id, ts, stype, state, num FROM ev_all
             WHERE ts < TIMESTAMP '{t}' AND (ts >= TIMESTAMP '{lo}' OR stype = '{config.GUARD_STYPE}')""")
 
     def query(self, sql: str) -> pl.DataFrame:
@@ -148,7 +167,7 @@ class HotStore:
         """Удалить строки старше глубины, кроме охраны — это M2 в работе."""
         cut = now - timedelta(days=config.HOT_RETENTION_DAYS)
         return self.con.execute(
-            f"""DELETE FROM readings WHERE ts < TIMESTAMP '{cut}' AND stype <> '{config.GUARD_STYPE}'"""
+            f"""DELETE FROM ev_all WHERE ts < TIMESTAMP '{cut}' AND stype <> '{config.GUARD_STYPE}'"""
         ).fetchone()[0]
 
 

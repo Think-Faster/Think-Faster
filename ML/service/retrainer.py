@@ -1,15 +1,19 @@
-"""Переобучение (M9): раз в 30 суток, дообучение поверх старого — отброшено.
+"""Переобучение (M9/П7): расписание на флагах main, новые модели → новая история порога.
 
-Тяжёлая работа живёт в pipeline (retrain.py/export.py): здесь только расписание, статусы для
-админ-панели (§9.5) и то, что меняется в проде при выходе новой версии:
+Тяжёлая работа живёт в pipeline: `retrain.py` — исследования стратегий (all/d90/d180/d365/
+decay90/decay180/warm/frozen/thrfix — чья стратегия сработала на отрезке, её ключ фиксируется);
+производственное переобучение — `export.py` (обучает на всех годах, пять зёрен, без моих флагов).
+Здесь — только расписание, статус для админ-панели (§9.5) и переключение прод-версии:
 
-1. запуск обучения (накопление всего прошлого, период 30 дней);
-2. после готовности — export.py в новую выгрузку, порог пересчитывается заново:
-   история оценок принадлежит старой версии (§9.4), новую версию сервис накапливает с нуля,
-   пока не наберётся 90 суток, порог держится из ретропрогона (ScoreHistory.threshold_override).
+1. запуск export.py в подпроцессе;
+2. после готовности — новый манифест и новый Predictor;
+3. история оценок принадлежит СТАРОЙ версии: новая пороговая история пересчитывается заново —
+   bootstrap-смесью новой версии по витрине (П1), `ScoreHistory.rebootstrap`, никаких
+   threshold_override (П7). До первых суток порог нового трима — её же 90-суточное окно из 2025,
+   история дописывается с каждого такта.
 
-Статус — OUT_DIR/retrain.json: очередь → идёт → готово/ошибка + ссылка на версию. Прогнозы в это
-время считает прежняя версия, никакого переключения на лету (переключает админ-панель §9.4).
+Статус — OUT_DIR/retrain.json: очередь → идёт → готово/ошибка + ссылка на версию. Прогнозы во
+время обучения считает прежняя версия; переключает админ-панель (запись operating.json), не мы.
 """
 import json
 import subprocess
@@ -20,13 +24,15 @@ from pathlib import Path
 import svc as config
 from predict import Predictor, load_manifest
 
+STRATEGIES = ('all', 'd90', 'd180', 'd365', 'decay90', 'decay180', 'warm', 'frozen', 'thrfix')
+
 
 class Retrainer:
     def __init__(self, path: Path | None = None, python=None):
         self.path = path or config.RETRAIN_LOG
         self.python = python or sys.executable
         self.state = {'status': 'idle', 'last_run': None, 'next_run': None,
-                      'version': None, 'error': None, 'history': []}
+                      'version': None, 'strategy': None, 'error': None, 'history': []}
         self.load()
 
     def load(self):
@@ -44,28 +50,29 @@ class Retrainer:
         self.state['next_run'] = (now + timedelta(days=interval_days)).isoformat(timespec='minutes')
         self.save()
 
-    def request(self, by: str, reason: str, note: str = '') -> dict:
+    def request(self, by: str, reason: str, note: str = '', strategy: str = 'all') -> dict:
         if self.state['status'] == 'running':
             return {'ok': False, 'why': 'уже идёт'}
+        if strategy not in STRATEGIES:
+            return {'ok': False, 'why': f'стратегия {strategy}; можно: {" ".join(STRATEGIES)}'}
         manifest = load_manifest()
         self.state.update({'status': 'queued', 'requested_by': by, 'reason': reason,
-                           'note': note, 'version': manifest.get('exported'),
+                           'note': note, 'strategy': strategy, 'version': manifest.get('exported'),
                            'error': None})
         self.save()
         return {'ok': True}
 
-    def run(self, run_tag: str, by: str = 'schedule') -> dict:
-        self.state.update({'status': 'running', 'run': run_tag, 'started': datetime.now().isoformat()})
+    def run(self, by: str = 'schedule') -> dict:
+        self.state.update({'status': 'running', 'started': datetime.now().isoformat()})
         self.save()
         try:
-            subprocess.run([self.python, 'retrain.py', '--run', run_tag], cwd=config.ML / 'pipeline',
-                           check=True)
-            subprocess.run([self.python, 'export.py', '--run', run_tag, '--overwrite'],
-                           cwd=config.ML / 'pipeline', check=True)
+            # продакшн-переобучение: export.py (все годы, пять зёрен); исследование стратегий —
+            # это retrain.py, его крутит MLOps/CI, сервис лишь хранит выбранный ключ для журнала
+            subprocess.run([self.python, 'export.py'], cwd=config.ML / 'pipeline', check=True)
             new_manifest = load_manifest()
             self.state.update({'status': 'done', 'version': new_manifest.get('exported'),
                                'changed': datetime.now().isoformat(timespec='seconds'),
-                               'run': run_tag, 'error': None})
+                               'error': None})
         except subprocess.CalledProcessError as e:
             self.state.update({'status': 'error', 'error': str(e)})
         self.save()
@@ -78,10 +85,12 @@ class Retrainer:
         self.path.write_text(json.dumps(self.state, ensure_ascii=False, indent=1), encoding='utf-8')
 
 
-def apply_version(history, predictor: Predictor) -> None:
-    """После выхода новой выгрузки: порог пересчитывается (§9.4), истории у версии своей нет."""
-    manifest = load_manifest(predictor.export)
-    for tp in manifest['models']:
-        # до первых суток истории держим порог из ретропрогона новой версии (заглушка):
-        # ScoreHistory.threshold() вернёт nan только при пустом окне — override не даёт молчать
-        history.threshold_override[tp] = 0.5
+def apply_version(thresholds, predictor: Predictor, h: int) -> None:
+    """После выхода новой выгрузки: пороги новой версии с 90-суточным окном 2025 (П1/П7).
+
+    Пишется ровно тот же bootstrap, что при старте, — новая версия не молчит ни часа и не пользуется
+    override из ретропрогона старой.
+    """
+    import settings as s
+    scores = predictor.bootstrap_history(year=2025)
+    thresholds.rebootstrap(scores, s.OperatingSettings.load(), h)

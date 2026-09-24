@@ -1,18 +1,20 @@
 """Рабочие настройки: ML/settings/operating.json (INTEGRATION §2.1, §9.3).
 
-Настройки — не константа кода, а файл с версией: интерфейс главного диспетчера меняет его и
-обязан оставлять старые версии в истории, сервис перечитывает его без перезапуска. Ползунки в
-админ-панели — это ровно поля `shares` и `reject_k`; пересчёт «доля → тревог в сутки» —
-функция estimate() (ручка /api/ml/estimate).
+Формат — ровно тот, что в main: `version/changed/changed_by/reason` и `types{tp:{share, reject_k}}`
+с per-типовым reject_k (None — правило отклонения выключено). Валидация по operating.schema.json —
+та же `config.operating()`, что читает исследование, — сервис не держит своей копии и не расширяет
+файл своими полями (П5/П6, INTEGRATION2 §10.1). Интерфейс диспетчера меняет только долю и k;
+пересчёт «доля → тревог в сутки» — функция estimate() (ручка /api/ml/estimate).
 """
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 
 import svc as config
+import config as pipe  # noqa: F401  pipeline/config: operating()
 
 KNOWN_TYPES = list(config.TYPES)
 
@@ -27,74 +29,71 @@ class OperatingSettings:
     changed: str
     changed_by: str
     reason: str
-    horizon_hours: int
-    shares: dict
-    reject_k: float
-    reject_types: list
-    max_share: float
-    threshold_window_days: int
-    chatter_gap_hours: int
-    mute_max_hours: int
+    types: dict
 
     @classmethod
     def load(cls, path: Path | None = None) -> 'OperatingSettings':
-        p = Path(path) if path else config.SETTINGS
-        raw = json.loads(p.read_text(encoding='utf-8'))
-        return cls._from(raw, p)
+        return cls._from(pipe.operating(Path(path) if path else config.SETTINGS))
 
     @classmethod
-    def _from(cls, raw: dict, p: Path) -> 'OperatingSettings':
-        bad = [k for k in ('version', 'changed', 'changed_by', 'reason',
-                           'horizon_hours', 'shares', 'reject_k', 'reject_types',
-                           'max_share', 'threshold_window_days', 'chatter_gap_hours',
-                           'mute_max_hours') if k not in raw]
-        if bad:
-            raise SettingError(f'{p.name}: нет полей {bad}')
-        shares = raw['shares']
-        if set(shares) != set(KNOWN_TYPES):
-            raise SettingError(f'{p.name}: shares должны покрывать все 6 типов, есть {sorted(shares)}')
-        for tp, s in shares.items():
-            if s <= 0 or s >= 1:
-                raise SettingError(f'{p.name}: доля типа {tp} вне (0, 1): {s}')
-            if s > raw['max_share']:
-                raise SettingError(f'{p.name}: доля {tp}={s} выше максимума {raw["max_share"]} '
-                                   '(§9.3: больше семи тревог в сутки интерфейс не должен давать)')
-        if not (0 < raw['reject_k'] <= 1):
-            raise SettingError(f'{p.name}: reject_k вне (0, 1]')
-        if not set(raw['reject_types']) <= set(KNOWN_TYPES):
-            raise SettingError(f'{p.name}: reject_types вне известных типов: {raw["reject_types"]}')
-        return cls(**raw)
+    def _from(cls, raw: dict) -> 'OperatingSettings':
+        # config.operating() уже проверил схему (границы share и reject_k) и наличие reason
+        return cls(version=int(raw['version']), changed=str(raw['changed']),
+                   changed_by=str(raw['changed_by']), reason=str(raw['reason']),
+                   types={tp: dict(v) for tp, v in raw['types'].items()})
 
     def share(self, tp: str) -> float:
-        return self.shares[tp]
+        return float(self.types[tp]['share'])
+
+    def reject_k(self, tp: str) -> float | None:
+        return self.types[tp]['reject_k']
 
     def is_rejectable(self, tp: str) -> bool:
-        return tp in self.reject_types
+        return self.types[tp]['reject_k'] is not None
 
     def check(self, share: float) -> None:
-        if share > self.max_share:
-            raise SettingError(f'доля {share} выше потолка {self.max_share}')
+        if not (0.0 < share < 1.0):
+            raise SettingError(f'доля {share} вне (0, 1)')
 
     def rebase(self, updates: dict, by: str, reason: str, now: str | None = None) -> 'OperatingSettings':
-        """Новая версия поверх текущих настроек (для записи из интерфейса §9.3)."""
-        raw = self.as_dict()
-        raw.update({k: v for k, v in updates.items() if k in raw})
-        raw['version'] = self.version + 1
-        raw['changed'] = now or datetime.now().astimezone().isoformat(timespec='seconds')
-        raw['changed_by'] = by
-        raw['reason'] = reason
-        return self._from(raw, config.SETTINGS)
+        """Новая версия поверх текущих настроек: меняется только types{share, reject_k} (§9.3)."""
+        types = json.loads(json.dumps(self.types))
+        for tp, u in updates.items():
+            if tp in types and isinstance(u, dict):
+                for k in ('share', 'reject_k'):
+                    if k in u:
+                        types[tp][k] = u[k]
+        raw = {'version': self.version + 1,
+               'changed': now or datetime.now().astimezone().isoformat(timespec='seconds'),
+               'changed_by': by, 'reason': reason, 'types': types}
+        _validate(raw)
+        return self._from(raw)
 
     def as_dict(self) -> dict:
-        return json.loads(json.dumps(self.__dict__))
+        return {'version': self.version, 'changed': self.changed, 'changed_by': self.changed_by,
+                'reason': self.reason, 'types': self.types}
 
     def save(self, path: Path | None = None) -> None:
         p = Path(path) if path else config.SETTINGS
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(self.as_dict(), ensure_ascii=False, indent=1), encoding='utf-8')
+        json.dump(self.as_dict(), p.open('w', encoding='utf-8'), ensure_ascii=False, indent=1)
 
 
-def estimate(history_scores: np.ndarray, share: float, days: int = 90) -> dict:
+def _validate(raw: dict) -> None:
+    """Проверка по operating.schema.json — та, что в config.operating(), но без записи файла."""
+    import json as _json
+    schema = _json.loads((pipe.SETTINGS.parent / 'operating.schema.json').read_text(encoding='utf-8'))
+    props = schema['properties']['types']['properties']
+    kb = schema['$defs']['reject_k']
+    assert set(raw['types']) == set(KNOWN_TYPES), 'нужны все 6 типов'
+    for tp, v in props.items():
+        b, s, k = v['properties']['share'], raw['types'][tp]['share'], raw['types'][tp]['reject_k']
+        assert b['minimum'] <= s <= b['maximum'], f'{tp}: share {s} вне [{b["minimum"]}, {b["maximum"]}]'
+        assert k is None or kb['minimum'] <= k <= kb['maximum'], f'{tp}: reject_k {k} вне границ'
+    assert raw.get('reason'), 'не указана причина изменения'
+
+
+def estimate(history_scores: np.ndarray, share: float, days: int) -> dict:
     """«Доля часов → сколько тревог в сутки» для ползунка (§9.3) и порога (M5).
 
     history_scores — плоский массив оценок парка за историю, их место в распределении и есть
@@ -110,6 +109,6 @@ def estimate(history_scores: np.ndarray, share: float, days: int = 90) -> dict:
 
 if __name__ == '__main__':
     st = OperatingSettings.load()
-    for tp, s in st.shares.items():
-        print(tp, s)
-    print('version', st.version, '| rejectable', st.reject_types)
+    for tp, v in st.types.items():
+        print(tp, v['share'], v['reject_k'])
+    print('version', st.version, '| changed_by', st.changed_by)

@@ -1,46 +1,81 @@
-import json
 import tempfile
 import unittest
 from pathlib import Path
 
 import numpy as np
 
-from settings import OperatingSettings
-from threshold import ScoreHistory
+from helpers import make_settings
+from threshold import Thresholds
 
 
-def make_settings(tmp: Path) -> OperatingSettings:
-    raw = {'version': 1, 'changed': '2026-09-23T00:00:00+03:00', 'changed_by': 'ml', 'reason': 't',
-           'horizon_hours': 24,
-           'shares': {t: 0.1 for t in ('fire', 'gas', 'flood', 'equipment', 'sensor', 'intrusion')},
-           'reject_k': 0.2, 'reject_types': ['gas', 'flood'], 'max_share': 0.1,
-           'threshold_window_days': 90, 'chatter_gap_hours': 6, 'mute_max_hours': 72}
-    p = tmp / 'operating.json'
-    p.write_text(json.dumps(raw), encoding='utf-8')
-    return OperatingSettings.load(p)
+def pool(n: int = 90 * 24, seed: int = 3) -> tuple:
+    rng = np.random.default_rng(seed)
+    h = np.arange(n)
+    p = rng.random(n)
+    return h, p.astype(np.float32)
+
+
+def quantile_of_window(h_hist, p_hist, h, share):
+    lo, hi = np.searchsorted(h_hist, [h - 90 * 24 + 1, h + 1])
+    if lo >= hi:
+        lo, hi = np.searchsorted(h_hist, [h_hist[-1] - 90 * 24 + 1, h_hist[-1] + 1])
+    return float(np.quantile(p_hist[lo:hi], 1 - share))
 
 
 class ThresholdTest(unittest.TestCase):
-    def test_window_and_quantile(self):
-        with tempfile.TemporaryDirectory() as d:
-            st = make_settings(Path(d))
-            hist = ScoreHistory(st, path=Path(d) / 'history.parquet')
-            rng = np.random.default_rng(1)
-            for h in range(24):
-                hist.update(h, {t: rng.random(3) for t in st.shares})
-            t = hist.threshold('fire')
-            self.assertAlmostEqual(t, float(np.quantile(hist.window('fire'), 0.9)), places=6)
+    def _mk(self, d: str):
+        tp = Path(d)
+        st = make_settings(tp)
+        score = {'fire': pool(), 'gas': pool(seed=4)}
+        t = Thresholds(tp / 'history.parquet')
+        return st, t, score
 
-    def test_persist_roundtrip(self):
+    def test_bootstrap_equals_retro_rolling(self):
         with tempfile.TemporaryDirectory() as d:
-            p = Path(d) / 'history.parquet'
-            st = make_settings(Path(d))
-            a = ScoreHistory(st, path=p)
-            a.update(1, {t: np.array([0.1, 0.2]) for t in st.shares})
-            a.save()
-            b = ScoreHistory(st, path=p)
-            self.assertEqual(b.window('fire').size, 2)
-            self.assertTrue(np.allclose(b.window('fire'), [0.1, 0.2]))
+            st, t, scores = self._mk(d)
+            h = 200 * 24 + 1
+            t.bootstrap(scores, st, h)
+            self.assertAlmostEqual(
+                t.thresholds['fire'],
+                quantile_of_window(scores['fire'][0], scores['fire'][1], h,
+                                   st.share('fire')), places=7)
+
+    def test_extend_advances_threshold(self):
+        with tempfile.TemporaryDirectory() as d:
+            st, t, scores = self._mk(d)
+            t.bootstrap(scores, st, 100)
+            n0 = len(t.history('fire')[0])
+            t.extend(101, {'fire': np.float32(0.99)}, st)
+            self.assertEqual(len(t.history('fire')[0]), n0 + 1)
+            self.assertTrue(0.0 < t.thresholds['fire'] < 1.0)
+
+    def test_dump_load_roundtrip(self):
+        with tempfile.TemporaryDirectory() as d:
+            tp = Path(d)
+            st, t, scores = self._mk(d)
+            t.bootstrap(scores, st, 50)
+            t.dump()
+            t2 = Thresholds(tp / 'history.parquet')
+            self.assertTrue(t2.load(st, 50))            # тот же h, что и bootstrap
+            self.assertEqual(len(t2.history('fire')[0]), len(t.history('fire')[0]))
+            self.assertAlmostEqual(t2.thresholds['fire'], t.thresholds['fire'], places=7)
+
+    def test_empty_window_falls_back_without_crash(self):
+        """Бутстрап впереди хвоста парка: порог из последних 90 суток, без выброса."""
+        with tempfile.TemporaryDirectory() as d:
+            st, t, scores = self._mk(d)
+            t.bootstrap(scores, st, 10_000)             # окно не пересекается с историей
+            self.assertTrue(0.0 < t.thresholds['fire'] < 1.0)
+
+    def test_apply_settings_recomputes_with_new_share(self):
+        with tempfile.TemporaryDirectory() as d:
+            st, t, scores = self._mk(d)
+            t.bootstrap(scores, st, 60)
+            old = t.thresholds['fire']
+            new = st.rebase({'fire': {'share': 0.04}}, by='x', reason='y')
+            changed = t.apply_settings(new, 61)
+            self.assertIn('fire', changed)
+            self.assertNotEqual(t.thresholds['fire'], old)
 
 
 if __name__ == '__main__':

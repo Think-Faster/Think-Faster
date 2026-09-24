@@ -1,11 +1,13 @@
 """Онлайн-сборка признаков (M3): строка на каждый объект в момент прогноза.
 
-Повторяет проверенный ретропрогон — `retro.snapshot()` и `retro.seq_pack()` — на кольцевом
-журнале сервиса (INTEGRATION §1.2: ровно это делает retro.snapshot(); он же проверен на отсутствие
-заглядывания в будущее). Пересбор всего парка — секунды на границе часа (требование ≤60 с).
+Повторяет проверенный ретропрогон — `retro.snapshot()` из main — на кольцевом журнале сервиса
+(INTEGRATION §1.2). Никакой своей копии: retro.snapshot сам пересоздаёт вид `ev` (окно 100 сут +
+вся история охраны из `ev_all`), строит разметку labels.build и считает признаки; он же проверен
+на отсутствие заглядывания в будущее. Сервис даёт ему ровно те таблицы, что он ждёт: obj, ch,
+ev_all. Пересбор всего парка — секунды на границе часа (требование ≤60 с).
 
-Рядом считаются две вещи из INTEGRATION §7: свежесть данных по типам (для флага «данные несвежие»,
-а не для остановки выдачи) и молчание семейств датчиков (записывается в сообщение тревоги).
+Рядом считается свежесть данных по типам (для флага «данные несвежие», INTEGRATION §7) — для
+наблюдения M10, а не для остановки выдачи.
 """
 from datetime import datetime, timedelta
 
@@ -14,20 +16,13 @@ import polars as pl
 import svc as config
 
 
-def snapshot(store, t: datetime, meta: dict, cal: dict) -> pl.DataFrame:
-    """Строки признаков всех объектов на момент t из журнала сервиса."""
-    store.ev_view(t)
-    import retro
-    return retro.snapshot(store.con, t, meta, cal)
+def snapshot(store, t: datetime, meta: dict, cal: dict, seq: bool = False):
+    """Строки признаков всех объектов на момент t (+ вход сети, если seq).
 
-
-def seq(store, t: datetime, meta: dict) -> dict | None:
-    """Вход сети (одно 168-часовое окно на объект) или None, если сетей в выгрузке нет."""
-    if not meta.get('seq', {}).get('present'):
-        return None
-    store.ev_view(t)
+    Возврат — как в retro.snapshot(): (df, seq_pack) — один прогон labels.build на такт.
+    """
     import retro
-    return retro.seq_pack(store.con, t, meta)
+    return retro.snapshot(store.con, t, meta, cal, seq=seq)
 
 
 # семейства датчиков, на которые держится каждый тип (INTEGRATION §7: молчание семьи бьёт по типу)
@@ -47,7 +42,7 @@ def freshness(store, t: datetime, back_days: int = 30) -> dict:
     """
     cutoff = t - timedelta(days=back_days)
     raws = store.con.sql(
-        f"""SELECT stype, max(ts) AS last FROM readings WHERE ts < TIMESTAMP '{t}'
+        f"""SELECT stype, max(ts) AS last FROM ev_all WHERE ts < TIMESTAMP '{t}'
             AND ts >= TIMESTAMP '{cutoff}' GROUP BY stype""").fetchall()
     oldest = datetime.min
     lasts = {}

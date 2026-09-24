@@ -1,30 +1,115 @@
-"""HTTP-ручки сервиса (M11/M12): health, /api/ml/estimate, статус и версия настроек.
+"""HTTP-ручки сервиса (M11/M12/П8): JWT на ВСЕХ ручках, 401 без токена.
 
-FastAPI — маршрут /api/ml обслуживает nginx по суффиксу (INTEGRATION §4). Если fastapi не
-установлен, модуль импортируется без ошибок, но app = None — стенд работает без него.
+FastAPI: маршрут /api/ml обслуживает nginx по суффиксу (INTEGRATION §4). Модуль импортируется без
+fastapi, app = None — стенд работает без него. Токен — Bearer, HMAC-SHA256 с секретом из
+окружения TF_MODEL_TOKEN_SECRET (MБ дев-умолчание только для стенда); подпись фиксирует header и
+payload, exp — не дальше TTL. Единственный глобальный конёк живых ссылок — State: П7 меняет
+predictor/reload сеттинги, и ручки сразу это видят.
+
+П8: ручек без авторизации нет вообще — ни /health, ни /status; nginx/лоад-балансер знает токен
+службы (заголовок Authorization), клиенты получают его через think-infra.
 """
+import base64
+import hashlib
+import hmac
+import json
+import threading
+import time
+
+import svc as config
 from settings import OperatingSettings
 
 app = None
+_HAVE_FASTAPI = False
 try:
-    from fastapi import FastAPI, HTTPException
-    from pydantic import BaseModel
-
+    from fastapi import Depends, FastAPI, Header, HTTPException
+    _HAVE_FASTAPI = True
     app = FastAPI(title='tf-model')
 except ImportError:
     pass
 
 
-def _bind(history=None, settings: OperatingSettings | None = None, retrainer=None,
-          observer=None):
-    global _history, _settings, _retrain, _observe
-    _history = history
-    _settings = settings
-    _retrain = retrainer
-    _observe = observer
+# ----- JWT (П8) ---------------------------------------------------------
+def _b64(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b'=').decode('ascii')
 
 
-_history = _settings = _retrain = _observe = None
+def _b64d(s: str) -> bytes:
+    pad = '=' * (-len(s) % 4)
+    return base64.urlsafe_b64decode(s + pad)
+
+
+def sign(data: bytes, secret: str = config.TOKEN_SECRET) -> bytes:
+    return hmac.new(secret.encode(), data, hashlib.sha256).digest()
+
+
+def make_token(payload: dict, secret: str = config.TOKEN_SECRET,
+               ttl_hours: int = config.TOKEN_TTL_HOURS) -> str:
+    """Выпуск токена: header и payload подписываются вместе (JWS). Для стенда/тестов."""
+    header = _b64(json.dumps({'alg': 'HS256', 'typ': 'JWT'}).encode())
+    claims = dict(payload)
+    claims['exp'] = int(time.time()) + ttl_hours * 3600
+    body = _b64(json.dumps(claims, sort_keys=True).encode())
+    sig = _b64(sign(f'{header}.{body}'.encode(), secret))
+    return f'{header}.{body}.{sig}'
+
+
+def verify_token(token: str, secret: str = config.TOKEN_SECRET) -> dict | None:
+    if isinstance(token, bytes):
+        token = token.decode()
+    parts = token.split('.')
+    if len(parts) != 3:
+        return None
+    header_s, body_s, sig_s = parts
+    try:
+        expected = hmac.new(secret.encode(), f'{header_s}.{body_s}'.encode(),
+                            hashlib.sha256).digest()
+        if not hmac.compare_digest(_b64d(sig_s), expected):
+            return None
+        claims = json.loads(_b64d(body_s))
+    except (ValueError, TypeError):
+        return None
+    if claims.get('exp', 0) < time.time():
+        return None
+    return claims
+
+
+def _require_auth(authorization: str | None) -> dict:
+    if not authorization or not authorization.lower().startswith('bearer '):
+        raise HTTPException(401, 'нет Bearer-токена')
+    claims = verify_token(authorization[7:].strip())
+    if claims is None:
+        raise HTTPException(401, 'токен не прошёл проверку (подпись/exp)')
+    return claims
+
+
+# ----- состояние и привязка -------------------------------------------------
+class State:
+    """Живые ссылки, которые ручки читают в момент запроса (не копии на bind-момент)."""
+
+    def __init__(self, store=None, predictor=None, history=None, rules=None, settings=None):
+        self.store = store
+        self.predictor = predictor
+        self.history = history
+        self.rules = rules
+        self.settings = settings
+        self._settings_mtime = None
+        self.reload_settings()
+
+    def apply_settings(self, _=None):
+        """on_batch из потока приёма: подхватить новую операционку, если админ переписал файл."""
+        self.reload_settings()
+
+    def reload_settings(self) -> bool:
+        p = config.SETTINGS
+        if self._settings_mtime is None:
+            self._settings_mtime = p.stat().st_mtime_ns if p.exists() else None
+            return False
+        if p.exists() and (mt := p.stat().st_mtime_ns) != self._settings_mtime:
+            self._settings_mtime = mt
+            self.settings = OperatingSettings.load()
+            return True
+        return False
 
 
 def ensure_app():
@@ -32,46 +117,78 @@ def ensure_app():
         raise RuntimeError('fastapi не установлен — ручки недоступны, стенд без них')
 
 
+def _state() -> State:
+    if _live is None:
+        raise HTTPException(503, 'сервис не инициализирован')
+    return _live
+
+
+_live: State | None = None
+
+
+def bind(state: State) -> None:
+    global _live
+    _live = state
+
+
 if app is not None:
 
-    from typing import Optional
-
-    class Estimate(BaseModel):
-        share: float
-        type: str
-        alarms_per_day: Optional[float] = None
-        threshold: Optional[float] = None
-        limited: int = 0
+    def require_auth(authorization: str | None = Header(default=None)) -> dict:
+        return _require_auth(authorization)
 
     @app.get('/health')
-    def health():
-        last = _observe.buf[-1] if _observe and _observe.buf else None
-        return {'ok': True, 'last_hour': last}
+    def health(auth: dict = Depends(require_auth)):
+        st = _state()
+        return {'ok': True, 'settings_version': st.settings.version
+                if st.settings else None}
 
     @app.get('/api/ml/estimate')
-    def estimate(type: str, share: float):
+    def estimate(type: str, share: float, auth: dict = Depends(require_auth)):
         ensure_app()
-        if _settings is None or _history is None:
+        st = _state()
+        if st.settings is None or st.history is None:
             raise HTTPException(503, 'сервис не инициализирован (нет настроек/истории)')
         try:
-            _settings.check(share)
+            st.settings.check(share)
         except Exception as e:
             raise HTTPException(422, str(e))
-        return _history.estimate(type, share)
+        try:
+            # М5: ожидаемые тревоги в сутки — по истории оценок парка текущей версии
+            import settings as smod
+            hh, pp = st.history.history(type)
+            return smod.estimate(pp, share, config.THRESHOLD_WINDOW_DAYS)
+        except KeyError:
+            raise HTTPException(422, f'типа {type} нет в манифесте')
 
     @app.post('/api/ml/settings')
-    def update_settings(updates: dict, by: str, reason: str):
-        global _settings
+    def update_settings(updates: dict, by: str, reason: str, auth: dict = Depends(require_auth)):
         ensure_app()
-        if _settings is None:
+        st = _state()
+        if st.settings is None:
             raise HTTPException(503, 'нет настроек')
-        new = _settings.rebase(updates, by, reason)
-        new.save()
-        _settings = new
+        try:
+            new = st.settings.rebase(updates, by, reason)
+            new.save()
+            st.settings = new
+        except Exception as e:
+            raise HTTPException(422, str(e))
         return {'version': new.version}
 
     @app.get('/api/ml/status')
-    def status():
+    def status(auth: dict = Depends(require_auth)):
         ensure_app()
-        return {'retrain': _retrain.status() if _retrain else None,
-                'settings_version': _settings.version if _settings else None}
+        st = _state()
+        return {'settings_version': st.settings.version if st.settings else None,
+                'thresholds': st.history.thresholds if st.history else None}
+
+
+def start_api(state: State, host: str | None = None, port: int | None = None) -> threading.Thread:
+    """П8: uvicorn из процесса сервиса (поток-демон); bind в момент старта."""
+    import uvicorn
+    ensure_app()
+    bind(state)
+    t = threading.Thread(target=lambda: uvicorn.run(
+        app, host=host or config.API_HOST, port=port or config.API_PORT,
+        log_level='warning'), daemon=True)
+    t.start()
+    return t

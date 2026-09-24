@@ -1,99 +1,110 @@
-"""Скользящий порог (M5): квантиль оценок парка за 90 суток на долю из настроек.
+"""Скользящий порог (M5): квантиль оценок всего парка за 90 суток до часа.
 
-Порог не свойство модели (INTEGRATION §2.1, §9.4): при смене версии истории оценок принадлежат
-старой модели, и порог пересчитывается заново — пока истории нет, берётся из ретропрогона новой
-версии (таблица `rebase`), это часть M9.
+Ровно `retro.rolling()` из main — тот же код, то же окно, тот же номер квантиля 1-share; у сервиса
+нет своей копии и, главное, нет админ-допуска «порог вручную» (threshold_override), который П7
+просил выпилить, чтобы прод не ухал от исследования. Менять долю тревоги можно только настройкой
+operating.json (доля → квантиль), и то же самое видит диспетчер в /api/ml/estimate.
 
-История хранится в OUT_DIR/history.parquet по часам (тип × объект × score); окно — последние
-threshold_window_days суток. estimate() — та же квантиль, но в числа «тревог в сутки» для
-ползунков админ-панели (§9.3, ручка /api/ml/estimate).
+Историю оценок текущей версии моделей сервис ведёт сам (каждый такт дописывает час) и стартует
+её из витрины 2025 bootstrap-смесью той же версии — поэтому порог с самого первого часа стоит ровно
+туда, куда его поставил бы retro. На смене версии моделей история пересчитывается на новой смеси.
 """
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import numpy as np
 import polars as pl
 
 import svc as config
-from settings import OperatingSettings, estimate
+import settings as s
 
 
-class ScoreHistory:
-    """Оценки парка по часам; append каждую границу часа, окно срезается в момент чтения."""
+def _thr(h_hist: np.ndarray, p_hist: np.ndarray, h: int, share: float) -> float:
+    """extend.rolling() из main для одного часа: квантиль парка за 90 суток строго до h.
 
-    def __init__(self, settings: OperatingSettings, path=None):
-        self.settings = settings
-        self.path = path or config.HISTORY
-        self._by_type: dict[str, list[tuple[int, np.ndarray]]] = {t: [] for t in config.TYPES}
-        self.threshold_override: dict[str, float] = {}   # из ретропрогона новой версии (M9)
-        self.load()
+    Окно и квантиль — те же, что в retro.rolling (тот же поиск по часам). Единственное отличие
+    от retro: если окно ещё не пересеклось с историей (бутстрап впереди хвоста парка, а порог
+    нужен уже сейчас), берём последние 90 суток известной истории — порог без заглушки-константы
+    и строго без заглядывания в будущее.
+    """
+    lo, hi = np.searchsorted(h_hist, [h - 90 * 24 + 1, h + 1])
+    if lo >= hi:
+        lo, hi = np.searchsorted(h_hist, [h_hist[-1] - 90 * 24 + 1, h_hist[-1] + 1])
+    return float(np.quantile(p_hist[lo:hi], 1 - share))
 
-    def load(self):
-        if not self.path.exists():
-            return
-        df = pl.read_parquet(self.path)
-        for tp in config.TYPES:
-            sub = df.filter(pl.col('type') == tp).sort('h')
-            if sub.height:
-                self._by_type[tp] = [(int(h), arr) for h, arr in zip(
-                    sub['h'].to_list(), row_chunks(sub['scores'].to_list()))]
 
-    def update(self, hour_end: int, scores: dict) -> None:
-        for tp, arr in scores.items():
-            self._by_type[tp].append((hour_end, np.asarray(arr, np.float32)))
-        self._trim()
+class Thresholds:
+    """Пороги по типам на момент t; приводится к такту через .estimate()."""
 
-    def _trim(self):
-        win = self.settings.threshold_window_days * 24
-        for tp in self._by_type:
-            arrs = self._by_type[tp]
-            if not arrs:
-                continue
-            last = arrs[-1][0]
-            self._by_type[tp] = [(h, a) for h, a in arrs if h > last - win]
+    def __init__(self, history_path: Path | None = None):
+        self.history_path = Path(history_path) if history_path else config.HISTORY
+        self.versions: dict[str, int] = {}      # тип → версия операционки, с которой читаем порог
+        self._hist: dict[str, np.ndarray] = {}  # тип → (h_hist, p_hist) смеси на шкале 2025
+        self.thresholds: dict[str, float] = {}
 
-    def window(self, tp: str) -> np.ndarray:
-        return np.concatenate([a for _, a in self._by_type[tp]]) if self._by_type[tp] else np.empty(0)
+    # ----- история --------------------------------------------------------
+    def bootstrap(self, scores: dict, st: s.OperatingSettings, h: int) -> None:
+        """Начальная история смеси (П1/Д3): из 2025-витрины, сортировка по h как mix_history.
 
-    def threshold(self, tp: str, share: float | None = None) -> float:
-        s = self.settings.share(tp) if share is None else share
-        w = self.window(tp)
-        if w.size == 0:
-            return float('nan')
-        return float(np.quantile(w, 1.0 - s))
-
-    def estimate(self, tp: str, share: float) -> dict:
-        return estimate(self.window(tp), share, self.settings.threshold_window_days)
-
-    def rebase(self, tp: str, thr: float, days: int = 7) -> None:
-        """Пока истории новой версии нет, держим порог из ретропрогона (M9/§9.4).
-
-        Ставим одно «доисторическое» значение-заглушку, которое просто не влияет на окно при
-        первых 7 сутках сбора — на порог оно не заменяется, для этого есть поле threshold_override.
+        merge=True потом: добавим и оба накопленных окна перед сменой версии (rebootstrap).
         """
-        w = self.window(tp)
-        if w.size == 0:
-            self._by_type[tp].append((0, np.array([thr], np.float32)))
+        for tp, (h_hist, p_hist) in scores.items():
+            self._hist[tp] = (h_hist, p_hist)
+            self.versions[tp] = st.version
+            self.thresholds[tp] = _thr(h_hist, p_hist, h, st.share(tp))
 
-    def save(self) -> None:
-        rows = []
-        for tp, arrs in self._by_type.items():
-            for h, a in arrs:
-                rows.append(pl.DataFrame({'type': [tp], 'h': [h], 'scores': [serialize(a)]}))
-        if not rows:
+    def extend(self, stamp: int, scores: dict, st: s.OperatingSettings) -> None:
+        """Дописать час, который только что посчитан тактом, и сразу пересчитать порог."""
+        for tp, v in scores.items():
+            hh, pp = self._hist[tp]
+            # окно retro.rolling — 90 суток: не хранить больше, чем понадобится
+            cut = np.searchsorted(hh, stamp - 90 * 24)
+            hh = np.append(hh[cut:], stamp if not (len(hh) and hh[-1] == stamp) else hh[-1])
+            pp = np.append(pp[cut:], v if not (len(pp) and pp[-1] == v) else pp[-1])
+            self._hist[tp] = (hh, pp)
+            self.thresholds[tp] = _thr(hh, pp, stamp, st.share(tp))
+
+    def estimate(self, t: datetime, st: s.OperatingSettings) -> None:
+        """Порог на ручку /api/ml/estimate и на границу часа такта (без дописывания истории)."""
+        for tp in config.TYPES:
+            if tp in self._hist:
+                self.thresholds[tp] = _thr(*self._hist[tp], int(t.timestamp() // 3600), st.share(tp))
+
+    def apply_settings(self, st: s.OperatingSettings, h: int) -> list[str]:
+        """Новая версия настроек → пороги на месте; история не пересчитывается (шум низкий)."""
+        changed = [tp for tp in config.TYPES if self.versions.get(tp) != st.version]
+        for tp in changed:
+            self.versions[tp] = st.version
+            if tp in self._hist:
+                self.thresholds[tp] = _thr(*self._hist[tp], h, st.share(tp))
+        return changed
+
+    def rebootstrap(self, scores: dict, st: s.OperatingSettings, h: int) -> None:
+        self.bootstrap(scores, st, h)
+
+    # ----- наблюдение/гид --------------------------------------------------
+    def history(self, tp: str) -> tuple[np.ndarray, np.ndarray]:
+        return self._hist[tp]
+
+    def dump(self) -> None:
+        if not self._hist:
             return
-        pl.concat(rows).write_parquet(self.path)
+        parts = []
+        for tp, (hh, pp) in self._hist.items():
+            parts.append(pl.DataFrame({'tp': tp, 'h': hh, 'p': pp}))
+        df = pl.concat(parts)
+        self.history_path.parent.mkdir(parents=True, exist_ok=True)
+        df.write_parquet(self.history_path)
 
-
-def serialize(a: np.ndarray) -> str:
-    import base64
-    return base64.b64encode(np.asarray(a, np.float32).tobytes()).decode()
-
-
-def row_chunks(b64s: list[str]) -> list[np.ndarray]:
-    import base64
-    return [np.frombuffer(base64.b64decode(b), np.float32) for b in b64s]
-
-
-def hour_index(t: datetime) -> int:
-    import features as ft
-    return int((t - ft.T0).total_seconds() // 3600)
+    def load(self, st: s.OperatingSettings, h: int) -> bool:
+        if not self.history_path.exists():
+            return False
+        df = pl.read_parquet(self.history_path)
+        for tp in config.TYPES:
+            sub = df.filter(pl.col('tp') == tp)
+            if sub.height:
+                self._hist[tp] = (sub['h'].to_numpy().astype(np.int64),
+                                  sub['p'].to_numpy().astype(np.float32))
+                self.thresholds[tp] = _thr(*self._hist[tp], h, st.share(tp))
+                self.versions[tp] = st.version
+        return bool(self._hist)
