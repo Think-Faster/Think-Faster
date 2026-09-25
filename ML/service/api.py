@@ -21,6 +21,17 @@ from settings import OperatingSettings
 
 app = None
 _HAVE_FASTAPI = False
+
+
+class ApiError(Exception):
+    """Ошибка ручки без зависимости от fastapi (стенд/тесты без него). Ручка переводит в HTTP."""
+
+    def __init__(self, status_code: int, detail: str):
+        super().__init__(detail)
+        self.status_code = status_code
+        self.detail = detail
+
+
 try:
     from fastapi import Depends, FastAPI, Header, HTTPException
     _HAVE_FASTAPI = True
@@ -112,6 +123,27 @@ class State:
         return False
 
 
+def estimate_view(st: State, type: str, share: float) -> dict:
+    """Ядро /api/ml/estimate (M12, §9.3): доля часа под тревогой → тревог в сутки по парку.
+
+    Порог — (1-share)-квантиль истории оценок парка текущей версии, отсюда число объекто-часов
+    выше него за сутки истории; та же формула, что calib.py называет «обещано проверкой»
+    в переносе порога (transfer). Без fastapi — тестируется на стенде.
+    """
+    if st.settings is None or st.history is None:
+        raise ApiError(503, 'сервис не инициализирован (нет настроек/истории)')
+    try:
+        st.settings.check(share)
+    except Exception as e:
+        raise ApiError(422, str(e))
+    try:
+        import settings as smod
+        hh, pp = st.history.history(type)
+        return smod.estimate(pp, share, config.THRESHOLD_WINDOW_DAYS)
+    except (KeyError, IndexError):
+        raise ApiError(422, f'типа {type} нет в истории оценок')
+
+
 def ensure_app():
     if app is None:
         raise RuntimeError('fastapi не установлен — ручки недоступны, стенд без них')
@@ -145,20 +177,10 @@ if app is not None:
     @app.get('/api/ml/estimate')
     def estimate(type: str, share: float, auth: dict = Depends(require_auth)):
         ensure_app()
-        st = _state()
-        if st.settings is None or st.history is None:
-            raise HTTPException(503, 'сервис не инициализирован (нет настроек/истории)')
         try:
-            st.settings.check(share)
-        except Exception as e:
-            raise HTTPException(422, str(e))
-        try:
-            # М5: ожидаемые тревоги в сутки — по истории оценок парка текущей версии
-            import settings as smod
-            hh, pp = st.history.history(type)
-            return smod.estimate(pp, share, config.THRESHOLD_WINDOW_DAYS)
-        except KeyError:
-            raise HTTPException(422, f'типа {type} нет в манифесте')
+            return estimate_view(_state(), type, share)
+        except ApiError as e:
+            raise HTTPException(e.status_code, e.detail)
 
     @app.post('/api/ml/settings')
     def update_settings(updates: dict, by: str, reason: str, auth: dict = Depends(require_auth)):

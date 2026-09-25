@@ -46,6 +46,21 @@ class SettingsTest(unittest.TestCase):
         self.assertTrue(0 < res['alarms_per_day'] < 200)
         self.assertEqual(res['threshold'], np.quantile(hist, 0.9))
 
+    def test_estimate_matches_calib_transfer_promise(self):
+        """M12: сверено с calib.py — estimate повторяет «обещано проверкой» из transfer().
+
+        calib: порог = квантиль истории парка (1-share), обещанные тревоги в сутки = объекто-часы
+        выше него за сутки истории (calib.transfer, af[:, :start].sum() / (start/24)).
+        """
+        rng = np.random.default_rng(11)
+        hist = rng.random(90 * 24)                  # парк, объекто-час за часом, 90 суток
+        share = 0.005
+        fix = np.quantile(hist, 1.0 - share)        # calib: фиксированный порог на истории
+        promised = int((hist >= fix).sum()) / (len(hist) / 24.0)   # «обещано проверкой»
+        res = estimate(hist, share, 90)
+        self.assertAlmostEqual(res['threshold'], fix)
+        self.assertAlmostEqual(res['alarms_per_day'], promised)
+
     def test_check_rejects_bad_share(self):
         with tempfile.TemporaryDirectory() as d:
             st = make_settings(Path(d))

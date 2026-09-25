@@ -3,7 +3,7 @@
 Сервис читает и пишет только в ML/work (по умолчанию) — git его не видит. Пути, периоды и рабочие
 настройки берутся из pipeline/config.py и pipeline/operating (settings/operating.json), чтобы
 исследование и прод не разъехались: у сервиса нет своих копий pipeline-модулей и своего формата
-настроек (INTEGRATION2 §10.1).
+настроек (INTEGRATION §10.1).
 """
 import os
 import sys

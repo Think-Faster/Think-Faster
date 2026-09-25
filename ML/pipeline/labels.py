@@ -28,6 +28,37 @@ ARRIVAL = '15 minutes'       # охрану сняли так скоро пос�
 CONFIRM = '2 hours'          # окно сопоставления эпизода и выезда
 PRIMARY = '7 days'           # эпизод первичный, если такого же типа на объекте не было столько времени
 CHECK_TYPES = ""             # Н9 выключена; "('gas')" — разметка для оценки газа (work_ck), раздел 59
+WORKS = config.ML / 'settings' / 'works_2026.csv'  # график плановых работ (INTEGRATION.md §1.6), раздел 62
+WORKS_PAD = 7                # сут: в год без строки того же вида работ окно переносится на те же дни ± запас
+
+
+def works_windows(con, years: list[int] | None = None) -> None:
+    """Окна графика работ — временная таблица `works_win` (work_id, object_id, types, sensor, a, b): час
+    входит в окно при a <= ts < b. Строка графика — объект любого уровня (коллектор накрывает все свои
+    объекты), вид работ, типы происшествий и время начала и конца с точностью до часа; это та же таблица,
+    которую правит главный диспетчер (INTEGRATION.md §1.6). В свой год окно берётся как есть. В год, где у
+    объекта нет строки того же вида работ, окно переносится со строки ближайшего года на те же дни с
+    запасом WORKS_PAD (раздел 62). Одно правило на разметку (Н10) и на молчание M7 (maintenance.py `in_works`,
+    сервис `planmute.py`); `work_id` — номер строки, на который ссылаются молчание и история (INTEGRATION.md
+    §1.6). Годы по умолчанию — все, где есть эпизоды."""
+    if years is None:
+        years = [r[0] for r in con.sql('SELECT DISTINCT year(t0) FROM inc ORDER BY 1').fetchall()]
+    con.sql(f"""
+        CREATE OR REPLACE TEMP TABLE works_win AS
+        WITH w AS (SELECT work_id::VARCHAR AS work_id, object_id::BIGINT AS object_id, work_kind,
+                          string_split(incident_types, ',') AS types, removed_sensor AS sensor,
+                          starts_at::TIMESTAMP AS s, ends_at::TIMESTAMP AS e, year(starts_at::TIMESTAMP) AS wy
+                   FROM read_csv('{WORKS.as_posix()}', delim=';', header=true, all_varchar=true)
+                   WHERE object_id IS NOT NULL),
+             src AS (SELECT k.object_id, k.work_kind, y, arg_min(k.wy, abs(k.wy - y)) AS wy
+                     FROM (SELECT DISTINCT object_id, work_kind, wy FROM w) k, (SELECT unnest({list(years)}) AS y)
+                     GROUP BY ALL HAVING NOT bool_or(k.wy = y))
+        SELECT work_id, object_id, types, sensor, s AS a, e AS b FROM w
+        UNION ALL
+        SELECT w.work_id, w.object_id, w.types, w.sensor,
+               w.s + to_years((c.y - w.wy)::INT) - INTERVAL {WORKS_PAD} DAY,
+               w.e + to_years((c.y - w.wy)::INT) + INTERVAL {WORKS_PAD} DAY
+        FROM w JOIN src c USING (object_id, work_kind, wy)""")
 
 EQUIPMENT = "('Состояние насоса', 'Состояние вентилятора', 'Состояние фазы', 'ИБП', 'Переключатель')"
 OPENINGS = "('КД Дверь', 'КД Люк', 'Стекло', '9-секционный люк')"

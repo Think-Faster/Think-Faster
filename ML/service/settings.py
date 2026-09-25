@@ -3,7 +3,7 @@
 Формат — ровно тот, что в main: `version/changed/changed_by/reason` и `types{tp:{share, reject_k}}`
 с per-типовым reject_k (None — правило отклонения выключено). Валидация по operating.schema.json —
 та же `config.operating()`, что читает исследование, — сервис не держит своей копии и не расширяет
-файл своими полями (П5/П6, INTEGRATION2 §10.1). Интерфейс диспетчера меняет только долю и k;
+файл своими полями (П5/П6, INTEGRATION §10.1). Интерфейс диспетчера меняет только долю и k;
 пересчёт «доля → тревог в сутки» — функция estimate() (ручка /api/ml/estimate).
 """
 import json

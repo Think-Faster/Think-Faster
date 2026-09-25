@@ -102,6 +102,68 @@ class PredictTest(unittest.TestCase):
             p = self._predictor(Path(d), Path(d) / 'export', {})
             self.assertEqual(p.version, '2026-09-25')
 
+    def test_export_version_block(self):
+        """§11: блок `version` из export_equipment_vN читается как есть."""
+        with tempfile.TemporaryDirectory() as d:
+            exp = Path(d) / 'export_equipment_v1'
+            feat = Path(d) / 'features'
+            feat.mkdir(parents=True)
+            (feat / 'meta.json').write_text(json.dumps({'features': ['tmp']}), encoding='utf-8')
+            exp.mkdir(parents=True)
+            manifest = {'built': '2026-09-25', 'features': ['tmp'],
+                        'version': {'type': 'equipment', 'number': 1, 'name': 'тихая'}, 'models': {}}
+            (exp / 'manifest.json').write_text(json.dumps(manifest), encoding='utf-8')
+            p = Predictor(exp, Path(d))
+            self.assertEqual(p.export_version['number'], 1)
+            self.assertEqual(p.export_version['name'], 'тихая')
+
+    def test_mix_ranks_family_blend(self):
+        """§60/§11: взвешенная смесь частей из `blend` (export_equipment_vN), не среднее зёрен."""
+        with tempfile.TemporaryDirectory() as d:
+            work = Path(d)
+            models = {'equipment': {'0': {'file': 'equipment/tcn_s0.pt', 'family': 'tcn',
+                                          'from_run': 'prod_s0_2026-07-01', 'params': {}, 'trees': 0},
+                                    '1': {'file': 'equipment/cat_s1.cbm', 'family': 'cat',
+                                          'from_run': 'main_h24_tunedh24', 'params': {}, 'trees': 10}}}
+            exp = work / 'export_equipment_v1'
+            manifest_path = self._make_manifest(work, exp, models)
+            m = json.loads(manifest_path.read_text(encoding='utf-8'))
+            m['blend'] = [{'family': 'cat', 'weight': 0.75}, {'family': 'tcn', 'weight': 0.25}]
+            manifest_path.write_text(json.dumps(m), encoding='utf-8')
+            p = Predictor(exp, work)
+            rng = np.random.default_rng(3)
+            cat = rng.random(10)
+            tcn = rng.random(10)
+            out = p._mix_ranks({'cat': [cat], 'tcn': [tcn]}, 'equipment')
+            np.testing.assert_allclose(out, 0.75 * cat + 0.25 * tcn, rtol=1e-6)
+
+    def test_mix_ranks_equal_weights_without_blend(self):
+        """Без `blend` — прежнее поведение: среднее зёрен всех семейств, веса равные."""
+        with tempfile.TemporaryDirectory() as d:
+            work = Path(d)
+            models = {'equipment': {'0': {'file': 'equipment/tcn_s0.pt', 'family': 'tcn',
+                                          'from_run': 'prod_s0_2026-07-01', 'params': {}, 'trees': 0},
+                                    '1': {'file': 'equipment/cat_s1.cbm', 'family': 'cat',
+                                          'from_run': 'main_h24_tunedh24', 'params': {}, 'trees': 10}}}
+            exp = work / 'export'
+            p = self._predictor(work, exp, models)
+            rng = np.random.default_rng(5)
+            a = rng.random(8)
+            b = rng.random(8)
+            out = p._mix_ranks({'tcn': [a], 'cat': [b, a]}, 'equipment')
+            two_fam = (a + (b + a) / 2.0) / 2.0
+            np.testing.assert_allclose(out, two_fam, rtol=1e-6)
+
+    def _make_manifest(self, work: Path, exp: Path, models: dict) -> Path:
+        feat = work / 'features'
+        feat.mkdir(parents=True, exist_ok=True)
+        (feat / 'meta.json').write_text(json.dumps({'features': ['tmp']}), encoding='utf-8')
+        exp.mkdir(parents=True)
+        manifest = {'built': '2026-09-25', 'features': ['tmp'],
+                    'types': list(TYPES), 'models': models}
+        (exp / 'manifest.json').write_text(json.dumps(manifest), encoding='utf-8')
+        return exp / 'manifest.json'
+
     def test_bootstrap_history_from_saved_preds(self):
         """B2: история из preds-файлов зёрен (ранг на собственной шкале), без пересчёта сетей."""
         import polars as pl

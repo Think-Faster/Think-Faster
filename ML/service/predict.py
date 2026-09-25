@@ -1,14 +1,17 @@
 """Предиктор (M4): выгрузка `work/export` по манифесту main и счёт шести типов (П1).
 
 Читает манифест в формате main (`models[tp][seed] = {file, family, params, trees, from_run}`,
-сети — `equipment/tcn_s*.pt`) — без единой правки манифеста.
+сети — `equipment/tcn_s*.pt`) — без единой правки манифеста. Выгрузки версий отказа оборудования
+(§60, `export.py --equipment-version N`) несут блоки `blend` (части со весами) и `version` — их
+сервис читает тоже (§11: `ml.model_switch` может переключить тип на такую выгрузку).
 
 Оценка зерна кладётся на отсортированную шкалу валидации 2025, как `retro.load_mix_models()`:
-`score = searchsorted(sorted_2025_scores, p, side='right') / len`; смесь по типу — среднее зёрен
-по весам из манифеста (у main веса равные). Шкала каждого зерна — оценки его же прогона на
-проверке (родитель seed в `from_run`), те же файлы `preds/<семейство>_<тип>_val.npy`, что читает
-`operating.split`/`retro.load_mix_models`. Для сети отказа оборудования шкала — `tcn_s<seed>_<тип>
-_val.npy` того же прогона. Истории с той же шкалой (bootstrap) отдаёт `bootstrap_history()`.
+`score = searchsorted(sorted_2025_scores, p, side='right') / len`; смесь по типу — среднее рангов
+зёрен внутри семейства, дальше по весам `blend` (без `blend` веса равные — прежнее поведение).
+Шкала каждого зерна — оценки его же прогона на проверке (родитель seed в `from_run`), те же файлы
+`preds/<семейство>_<тип>_val.npy`, что читает `operating.split`/`retro.load_mix_models`. Для сети
+отказа оборудования шкала — `tcn_s<seed>_<тип>_val.npy` того же прогона. Истории с той же шкалой
+(bootstrap) отдаёт `bootstrap_history()`.
 """
 import json
 from pathlib import Path
@@ -85,6 +88,11 @@ class Predictor:
         """Версия выгрузки — дата сборки из манифеста main (`built`, ключа `exported` там нет)."""
         return str(self.manifest.get('built', ''))
 
+    @property
+    def export_version(self) -> dict | None:
+        """Блок `version` манифеста выгрузки оборудования (§60, §11): версия главного диспетчера."""
+        return self.manifest.get('version')
+
     # ----- модели --------------------------------------------------------
     def has_nets(self) -> bool:
         return any(b['family'] == 'tcn' for tp in self.manifest['models'].values()
@@ -139,6 +147,23 @@ class Predictor:
             cols[seed] = p
         return cols
 
+    def _mix_ranks(self, fam_ranks: dict[str, list[np.ndarray]], tp: str) -> np.ndarray:
+        """Смесь зёрен по типу: среднее рангов внутри семейства, дальше — по весам `blend` (§11).
+
+        В манифесте рабочей выгрузки `blend` нет — все семейства с весом 1, то есть обычное среднее
+        зёрен (прежнее поведение). У `export_equipment_vN` части идут со своими весами (§60, «Версии
+        для главного диспетчера»): оценка типа — взвешенная сумма семейственных смесей.
+        """
+        blend = self.manifest.get('blend')
+        w = {b['family']: float(b['weight']) for b in blend} if blend else {}
+        acc, tot = None, 0.0
+        for fam, arrs in fam_ranks.items():
+            m = np.mean(np.stack(arrs, axis=0), axis=0)
+            wt = w.get(fam, 1.0)
+            acc = wt * m if acc is None else acc + wt * m
+            tot += wt
+        return (acc / tot).astype(np.float32) if tot else np.zeros(0, np.float32)
+
     def predict(self, frame: pl.DataFrame, seqdata: tuple | None = None) -> dict:
         """Тип → смесь оценок по порядку строк frame (0..1, шкала проверки 2025)."""
         self._ensure()
@@ -146,15 +171,16 @@ class Predictor:
         netcols = self._netcols(seqdata) if seqdata is not None else {}
         out = {}
         for tp, seeds in self.manifest['models'].items():
-            parts = []
+            fam_ranks: dict[str, list[np.ndarray]] = {}
             for seed, info in seeds.items():
                 if info['family'] == 'tcn':
                     p = netcols[int(seed)][:, config.TYPES.index(tp)]
                 else:
                     p = self._boosters[(tp, int(seed))](X)
                 base = self.scale(tp, int(seed), info['from_run'], info['family'])
-                parts.append(np.searchsorted(base, p, side='right') / len(base))
-            out[tp] = np.mean(parts, axis=0).astype(np.float32)
+                fam_ranks.setdefault(info['family'], []).append(
+                    np.searchsorted(base, p, side='right') / len(base))
+            out[tp] = self._mix_ranks(fam_ranks, tp).astype(np.float32)
         return out
 
     # ----- история и шкала -------------------------------------------------
@@ -189,10 +215,13 @@ class Predictor:
         order = np.argsort(h, kind='stable')
         out = {}
         for tp, seeds in self.manifest['models'].items():
-            parts = [self._seed_ranks(tp, int(seed), info) for seed, info in seeds.items()]
-            if not parts:
+            fam_ranks: dict[str, list[np.ndarray]] = {}
+            for seed, info in seeds.items():
+                fam_ranks.setdefault(info['family'], []).append(
+                    self._seed_ranks(tp, int(seed), info))
+            if not fam_ranks:
                 continue
-            mix = np.mean(parts, axis=0).astype(np.float32)
+            mix = self._mix_ranks(fam_ranks, tp).astype(np.float32)
             out[tp] = (h[order], mix[order])
         return out
 

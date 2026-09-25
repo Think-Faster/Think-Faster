@@ -47,8 +47,9 @@ def freshness(store, t: datetime, back_days: int = 30) -> dict:
     oldest = datetime.min
     lasts = {}
     for s, last in raws:
+        low = s.lower()
         for fam, pat in STYPE_PAT.items():
-            if pat in s:
+            if pat.lower() in low:
                 lasts[fam] = max(lasts.get(fam, oldest), last)
     hours = 24.0 * back_days
     out = {}
@@ -56,3 +57,24 @@ def freshness(store, t: datetime, back_days: int = 30) -> dict:
         ts = max((lasts.get(f, oldest) for f in fams), default=oldest)
         out[tp] = hours if ts == oldest else (t - ts).total_seconds() / 3600.0
     return out
+
+
+def evidence(store, object_id: int, tp: str, t: datetime, win_hours: float = 1.5,
+             limit: int = 6) -> list[dict]:
+    """Датчики-свидетели тревоги (§9.7): события семейств типа на объекте в свежем окне.
+
+    Это те же события, из которых считались признаки строки витрины, — тот же источник, что у
+    `features.py`. Отдаются самым свежим первым, `value` — показание (`state`, при численном
+    значении — само число, как в журнале). Пикеты по `sensor_id` подставляет бэкенд.
+    """
+    pats = [STYPE_PAT[f] for f in FAMILIES.get(tp, ())]
+    if not pats:
+        return []
+    cond = ' OR '.join(f"stype ILIKE '%{p}%'" for p in pats)
+    rows = store.con.sql(
+        f"""SELECT channel_id, ts, coalesce(state, value) AS value FROM ev_all
+            WHERE object_id = {int(object_id)} AND ts >= TIMESTAMP '{t.isoformat()}' - INTERVAL {int(win_hours * 60)} MINUTE
+              AND ts < TIMESTAMP '{t.isoformat()}' AND ({cond})
+            ORDER BY ts DESC LIMIT {limit}""").fetchall()
+    return [{'sensor_id': cid, 'ts': ts.isoformat(sep='T', timespec='seconds') + config.TZ, 'value': val}
+            for cid, ts, val in rows]

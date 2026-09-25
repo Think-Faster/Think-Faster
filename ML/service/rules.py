@@ -105,9 +105,9 @@ class RuleState:
         elif action == 'MUTE':
             self.mutes[key] = ts + (mute_hours if mute_hours is not None else config.REJECT_N_HOURS)
         elif action in ('REOPEN', 'CONFIRMED'):
+            # REOPEN и CONFIRMED снимают и отклонение, и молчание (как настоящий эпизод, M6)
             self.rejections.pop(key, None)
-            if action == 'REOPEN':
-                self.mutes.pop(key, None)
+            self.mutes.pop(key, None)
 
     def on_fact(self, facts: set[tuple[int, str]], hour_end: int) -> None:
         """«Настоящий эпизод пришёл» — снимает и отклонение, и молчание (reject.simulate)."""

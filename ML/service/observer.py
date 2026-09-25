@@ -32,15 +32,16 @@ class Observer:
         self.path = path or config.OBS_LOG
         self.buf: list[dict] = []
 
-    def observe(self, *, alarms: dict, history: dict, freshness: dict,
+    def observe(self, *, alarms: dict, history: dict,
+                muted: dict | None = None, freshness: dict,
                 stale: bool, dlq: int, now) -> dict:
-        """history: тип → массив оценок окна. Отдаёт сводку и копит в buf."""
+        """history: тип → массив оценок окна; muted: тип → число MUTED-прогнозов (M7). Отдаёт сводку."""
         per = {}
         for tp in config.TYPES:
             h = history.get(tp, np.empty(0))
             exp_share = (alarms.get(tp, 0) / max(len(alarms.get(tp, []) or []), 1))
             per[tp] = {'window_size': int(h.size), 'alarm_share': float(exp_share),
-                       'psi_vs_week': -1}
+                       'muted': int((muted or {}).get(tp, 0)), 'psi_vs_week': -1}
             if h.size:
                 last_week = h[-24:]
                 per[tp]['psi_vs_week'] = psi(h[: max(h.size - 168, 1)], last_week)[0]

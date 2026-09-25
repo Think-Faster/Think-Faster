@@ -19,8 +19,11 @@ def build_message(object_id: int, hour_end: str, model_version: str,
 
 
 def fill_type(msg: dict, tp: str, *, score, threshold, alarm, since_hours=None,
-              reasons=None, confidence=None, evidence=None) -> None:
+              reasons=None, confidence=None, evidence=None, recommendation=None,
+              muted=None) -> None:
     blk = {'score': float(score), 'threshold': float(threshold), 'alarm': bool(alarm)}
+    if muted:
+        blk['muted'] = muted                      # M7: MUTED по графику работ (INTEGRATION §1.6)
     if alarm:
         if since_hours is not None:
             blk['since_hours'] = int(since_hours)
@@ -30,7 +33,15 @@ def fill_type(msg: dict, tp: str, *, score, threshold, alarm, since_hours=None,
             blk['confidence'] = float(confidence)
         if evidence:
             blk['evidence'] = evidence
+        if recommendation:
+            blk['recommendation'] = recommendation
     msg['types'][tp] = blk
+
+
+def object_recommendation(msg: dict, rec: dict) -> None:
+    """Составная рекомендация по объекту (§2.3), когда тревожат несколько типов разом."""
+    if rec:
+        msg['object_recommendation'] = rec
 
 
 class Sink:

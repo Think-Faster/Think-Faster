@@ -1,27 +1,45 @@
 """Канал «по факту» (M8): происшествие уже идёт, а прогноз его не дал.
 
 Разметку (guard/trig/inc/…) на такт строит один `retro.snapshot()` — общая для признаков и фактов.
-Отсюда берётся только эпизоды `inc` с «чистого» начала: правило `clean` из factalert — первый
-триггер эпизода не помечен шумом (Н7 mass-сработка, Н8 «затоплен после питания»), поэтому
-`noise IS NULL`. Задержка — не больше цикла разметки (граница часа). Здесь же конец последнего
-эпизода пары (inc.t1) — для since_hours карточки (П6): считается с конца эпизода, а не с тревоги.
+Объявление — по правилам той же панели, что `factalert.py` (шаг 17): выбор правила по типу — ноль
+ложных объявлений, при равенстве — большая полнота. У пожара, газа, подтопления, отказа датчика и
+проникновения это «чистый» первый триггер: первые события эпизода не помечены шумом Н7/Н8
+(`noise IS NULL`; Н8 — массовое срабатывание извещателей, Н7 — «Затоплен» сразу за событием питания,
+оба видны из журнала в пределах десяти минут). У отказа оборудования фильтр шума, наоборот,
+вычёркивает 423 настоящих эпизода ни за что — там объявление на первом триггере без фильтра
+(правило `first`). Задержка — не больше цикла разметки (граница часа).
 """
 from datetime import datetime, timedelta
 
 import svc as config
 
+# типы, где факт объявляется без фильтра Н7/Н8 — правило `first` из factalert (раздел 15 аналитики)
+FIRST_BY_PASS = {'equipment'}
 
-def detect(store, t: datetime, back: str = '1 hour', need_build: bool = True) -> set:
-    """Пары (object_id, тип) чистых происшествий, которые уже идут к моменту t."""
+
+def detect(store, t: datetime, back: str = '1 hour', need_build: bool = True,
+           noise: bool = True) -> set:
+    """Пары (object_id, тип) происшествий, которые уже идут к моменту t.
+
+    noise=True — чистое начало: только `noise IS NULL`, так снимается отклонение и молчание правил,
+    снимать их шумным эпизодом нельзя. noise=False — правила объявления factalert: фильтр Н7/Н8 у всех
+    типов, кроме оборудования (для него — правило `first`, без фильтра). Отбираются эпизоды,
+    начавшиеся не раньше `back`.
+    """
     if need_build:
         store.ev_view(t)
         import labels
         labels.build(store.con)
-    rows = store.con.sql(
-        f"""SELECT object_id, type, t0 FROM inc
-            WHERE noise IS NULL AND t0 >= TIMESTAMP '{(t - timedelta(hours=1)).isoformat()}'"""
-    ).fetchall()
-    return {(int(o), tp) for o, tp, _ in rows}
+    from_ts = f"TIMESTAMP '{(t - timedelta(hours=1)).isoformat()}'"
+    res = set()
+    for tp in config.TYPES:
+        filter7_8 = noise or tp not in FIRST_BY_PASS
+        where = f"type = '{tp}' AND t0 >= {from_ts}"
+        if filter7_8:
+            where += ' AND noise IS NULL'
+        rows = store.con.sql(f'SELECT object_id FROM inc WHERE {where}').fetchall()
+        res.update((int(o), tp) for o, in rows)
+    return res
 
 
 def last_end(store, t: datetime, pairs: set[tuple[int, str]] | None = None) -> dict:

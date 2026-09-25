@@ -72,6 +72,30 @@ class RulesTest(unittest.TestCase):
             self.assertNotIn((10, 'gas'), r.rejections)
             self.assertNotIn((20, 'gas'), r.mutes)
 
+    def test_confirm_clears_rejection_and_mute(self):
+        """§9.1: CONFIRMED, как настоящий эпизод, снимает и отклонение, и молчание."""
+        with tempfile.TemporaryDirectory() as d:
+            st = make_settings(Path(d))
+            r = RuleState(st, history=hist())
+            r.on_decision(10, 'gas', 'REJECT', 100)
+            r.on_decision(20, 'gas', 'MUTE', 100, mute_hours=12)
+            r.on_decision(10, 'gas', 'CONFIRMED', 101)
+            r.on_decision(20, 'gas', 'CONFIRMED', 101)
+            self.assertNotIn((10, 'gas'), r.rejections)
+            self.assertNotIn((20, 'gas'), r.mutes)
+
+    def test_reopen_clears_rejection_and_mute(self):
+        """§9.1: REOPEN снимает отклонение и молчание вручную."""
+        with tempfile.TemporaryDirectory() as d:
+            st = make_settings(Path(d))
+            r = RuleState(st, history=hist())
+            r.on_decision(10, 'gas', 'REJECT', 100)
+            r.on_decision(20, 'gas', 'MUTE', 100, mute_hours=12)
+            r.on_decision(10, 'gas', 'REOPEN', 101)
+            r.on_decision(20, 'gas', 'REOPEN', 101)
+            self.assertNotIn((10, 'gas'), r.rejections)
+            self.assertNotIn((20, 'gas'), r.mutes)
+
     def test_chatter_merges_pause_leq_gap(self):
         """П6: разрыв ≤ 6 ч не начинает новый сигнал; since 0, пока сигнал жив."""
         with tempfile.TemporaryDirectory() as d:
