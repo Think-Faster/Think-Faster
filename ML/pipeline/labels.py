@@ -5,8 +5,8 @@
 2. Эпизод — триггеры одного типа на одном объекте с паузой не больше EPISODE_GAP. Так дребезг (Н3)
    и пачки по многим каналам схлопываются в один инцидент; начало эпизода — момент инцидента.
 3. Шум размечается, а не удаляется: массовый дым (Н8) и «Затоплен» в пачке с событием питания (Н7).
-   В цель модели шумные эпизоды не входят. Метка Н9 — газ при снятой охране (плановая проверка
-   баллоном, раздел 59) — только мера оценки газа: в рабочей разметке выключена.
+   В цель модели шумные эпизоды не входят. Метка Н10 — газ и отказ газового датчика в окне
+   планово-предупредительных работ по графику организатора (settings/works_2026.csv, раздел 62).
 4. Проникновение — дверь или люк открылись, когда объект на охране, за ними сработало движение или
    объёмный датчик (ответ 20), и охрану в коллекторе не сняли в течение ARRIVAL. Если сняли — это
    персонал, который открыл дверь раньше, чем снял охрану: в 2022–2026 таких 24% срабатываний под охраной.
@@ -27,7 +27,8 @@ INTRUSION_STEP = '10 minutes'  # проникновение: движение н
 ARRIVAL = '15 minutes'       # охрану сняли так скоро после открытия — это персонал, а не нарушитель
 CONFIRM = '2 hours'          # окно сопоставления эпизода и выезда
 PRIMARY = '7 days'           # эпизод первичный, если такого же типа на объекте не было столько времени
-CHECK_TYPES = ""             # Н9 выключена; "('gas')" — разметка для оценки газа (work_ck), раздел 59
+WORKS = config.ML / 'settings' / 'works_2026.csv'  # график плановых работ организатора, раздел 62
+WORKS_PAD = 7                # сут: в прошлые годы окно графика ставится на те же дни года ± столько
 
 EQUIPMENT = "('Состояние насоса', 'Состояние вентилятора', 'Состояние фазы', 'ИБП', 'Переключатель')"
 OPENINGS = "('КД Дверь', 'КД Люк', 'Стекло', '9-секционный люк')"
@@ -153,18 +154,41 @@ def build(con) -> None:
         FROM prev p JOIN obj3 o USING (object_id)
         ASOF LEFT JOIN visit v ON v.collector_id = o.collector_id AND p.t0 < v.t0""")
 
-    # 6. Н9 — ВРЕМЕННО, до таблицы графика плановых работ (раздел 59, INTEGRATION.md §1.6): эпизод
-    #    типа из CHECK_TYPES, начавшийся при снятой охране коллектора, считается проверкой. Меняется
-    #    только цель: признаки видят такие эпизоды как раньше (features.py). Модель газа, обученная
-    #    без проверок, хуже, поэтому в рабочей разметке блок выключен и служит только мерой. Придёт
-    #    таблица — этот блок заменить окнами из неё.
-    if CHECK_TYPES:
-        con.sql(f"""
-            UPDATE inc SET noise = 'Н9'
-            FROM (SELECT i.object_id, i.type, i.t0
-                  FROM inc i ASOF JOIN guard g ON g.collector_id = i.collector_id AND i.t0 >= g.ts
-                  WHERE i.type IN {CHECK_TYPES} AND i.noise IS NULL AND NOT g.armed) c
-            WHERE inc.object_id = c.object_id AND inc.type = c.type AND inc.t0 = c.t0 AND inc.noise IS NULL""")
+    # 6. Н10 — плановые работы по графику (раздел 62, INTEGRATION.md §1.6): эпизод типа из графика,
+    #    начавшийся на своём коллекторе в окне работ (works_windows), — шум. У ППР газа сюда же отказ
+    #    датчика, начавшийся с газового датчика: датчик снят и увезён в метрологию. Как прочий шум,
+    #    эпизод Н10 не входит ни в цель, ни в счётчики эпизодов в признаках (features.py);
+    #    срабатывания его датчиков в признаках остаются.
+    works_windows(con)
+    con.sql("""
+        UPDATE inc SET noise = 'Н10'
+        FROM (SELECT DISTINCT i.object_id, i.type, i.t0
+              FROM inc i JOIN works_win w
+                ON w.collector_id = i.collector_id AND i.t0 >= w.a AND i.t0 < w.b
+              WHERE i.noise IS NULL
+                AND (i.type = w.type OR i.type = 'sensor' AND w.type = 'gas' AND EXISTS (
+                     SELECT 1 FROM trig t WHERE t.object_id = i.object_id AND t.ts = i.t0
+                                          AND t.type = 'sensor' AND t.stype = 'Газовый датчик'))) c
+        WHERE inc.object_id = c.object_id AND inc.type = c.type AND inc.t0 = c.t0 AND inc.noise IS NULL""")
+
+
+def works_windows(con, years: list[int] | None = None) -> None:
+    """Окна графика плановых работ — временная таблица `works_win` (collector_id, type, a, b), час
+    входит в окно при a <= ts < b. В год графика окно — его даты от демонтажа до конца дня приёмки.
+    В другие годы — те же дни года с запасом WORKS_PAD: по журналу график из года в год почти не
+    сдвигается (раздел 62). Одно правило на разметку (Н10) и на молчание M7 (maintenance.py --mode works);
+    годы по умолчанию — все, где есть эпизоды."""
+    if years is None:
+        years = [r[0] for r in con.sql('SELECT DISTINCT year(t0) FROM inc ORDER BY 1').fetchall()]
+    con.sql(f"""
+        CREATE OR REPLACE TEMP TABLE works_win AS
+        SELECT w.collector_id, w.тип AS type,
+               CASE WHEN y = year(w.демонтаж) THEN w.демонтаж::TIMESTAMP
+                    ELSE (make_date(y, month(w.демонтаж), day(w.демонтаж)) - {WORKS_PAD})::TIMESTAMP END AS a,
+               CASE WHEN y = year(w.демонтаж) THEN (w.приёмка + 1)::TIMESTAMP
+                    ELSE (make_date(y, month(w.приёмка), day(w.приёмка)) + {1 + WORKS_PAD})::TIMESTAMP END AS b
+        FROM read_csv('{WORKS.as_posix()}', delim=';', header=true) w, (SELECT unnest({list(years)}) AS y)
+        WHERE w.collector_id IS NOT NULL""")
 
 
 def main() -> None:
