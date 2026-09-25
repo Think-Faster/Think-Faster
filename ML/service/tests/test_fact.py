@@ -17,6 +17,19 @@ def mk_store(d: str):
     return st
 
 
+def mk_fact_store(d: str):
+    """Полная разметка для рекомендаций по факту: inc с полями context() + trig/guard/ev."""
+    st = storage.HotStore(Path(d) / 'hot.duckdb')
+    st.con.sql("""CREATE TABLE inc(object_id INT, collector_id INT, type VARCHAR, t0 TIMESTAMP,
+                                   t1 TIMESTAMP, rows INT, channels INT, noise VARCHAR,
+                                   confirmed BOOLEAN, primary_ BOOLEAN)""")
+    st.con.sql("""CREATE TABLE trig(object_id INT, channel_id INT, ts TIMESTAMP, type VARCHAR,
+                                    stype VARCHAR, what VARCHAR)""")
+    st.con.sql("CREATE TABLE guard(object_id INT, ts TIMESTAMP, armed BOOLEAN)")
+    st.con.sql("CREATE OR REPLACE VIEW ev AS SELECT object_id, channel_id, ts, stype, state, num FROM ev_all")
+    return st
+
+
 class FactTest(unittest.TestCase):
     NOW = datetime(2026, 9, 23, 7, 0)
 
@@ -62,6 +75,30 @@ class FactTest(unittest.TestCase):
 
     def test_first_by_pass_types(self):
         self.assertEqual(fact.FIRST_BY_PASS, {'equipment'})
+
+    def test_recommendations_fact_mode(self):
+        """§2.3/M8: объявление «по факту» несёт рекомендацию в режиме «факт» с признаком эпизода."""
+        with tempfile.TemporaryDirectory() as d:
+            st = mk_fact_store(d)
+            t0 = self.NOW - timedelta(minutes=30)
+            st.con.execute(
+                f"""INSERT INTO inc VALUES
+                    (90, 9090, 'equipment', TIMESTAMP '{t0.isoformat()}',
+                     TIMESTAMP '{self.NOW.isoformat()}', 3, 1, NULL, false, true)""")
+            st.con.execute(
+                """INSERT INTO trig(object_id, channel_id, ts, type, stype, what)
+                   VALUES (?,?,?,?,?,?), (?,?,?,?,?,?), (?,?,?,?,?,?)""",
+                (90, 7001, t0 + timedelta(minutes=1), 'equipment', 'Состояние насоса', 'Неисправен',
+                 90, 7001, t0 + timedelta(minutes=4), 'equipment', 'Состояние насоса', 'Неисправен',
+                 90, 7001, t0 + timedelta(minutes=9), 'equipment', 'Состояние насоса', 'Неисправен'))
+            recs = fact.recommendations(st.con, {(90, 'equipment')}, self.NOW)
+            self.assertEqual(set(recs), {(90, 'equipment')})
+            rec = recs[(90, 'equipment')]
+            self.assertEqual(rec['mode'], 'факт')
+            self.assertEqual(rec['trigger'], 'pump_fault')    # (Состояние насоса, Неисправен)
+            self.assertEqual(rec['produced_by'], 'rules')
+            self.assertEqual(len(rec['version']), 10)
+            self.assertGreaterEqual(rec['intensity']['since_hours'], 0.0)
 
 
 if __name__ == '__main__':

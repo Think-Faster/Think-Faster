@@ -44,6 +44,21 @@ def object_recommendation(msg: dict, rec: dict) -> None:
         msg['object_recommendation'] = rec
 
 
+def build_fact(msg: dict, tp: str, *, since_hours, episode_t0, recommendation,
+               evidence=None) -> None:
+    """Канал «по факту» (M8, §2.3): происшествие уже идёт — объявление с рекомендацией режим «факт».
+
+    Отдельное поле `facts` (аддитивно к §2.3): прогноз модели не предсказал — диспетчер всё равно
+    должен увидеть, что эпизод идёт, и что делать. По мере развития эпизода рекомендация
+    пересчитывается каждый такт (поток обновлений, §2.3).
+    """
+    facts = msg.setdefault('facts', {})
+    facts[tp] = {'since_hours': int(since_hours), 'episode_t0': str(episode_t0),
+                 'recommendation': recommendation}
+    if evidence:
+        facts[tp]['evidence'] = evidence
+
+
 class Sink:
     def send(self, msg: dict) -> None: ...
 

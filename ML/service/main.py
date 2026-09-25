@@ -89,6 +89,11 @@ def tick(store, predictor, history, rules, settings, sink, observer, now: dateti
     # 6a: факт-канал — разметку numerator построил snapshot, второй раз не строим
     facts = factmod.detect(store, now, need_build=False)
     rules.on_fact(facts, h)
+    # M8: объявления «по факту» — рекомендация режим «факт» каждому эпизоду, один прогон на такт
+    fact_recs = factmod.recommendations(store.con, facts, now)
+    fact_by_obj: dict[int, list[str]] = {}
+    for oid, tp in fact_recs:
+        fact_by_obj.setdefault(oid, []).append(tp)
 
     # 6b: правила (склейка 6 ч / отклонение / mute)
     rules.history = {tp: history.history(tp) for tp in config.TYPES}
@@ -111,9 +116,17 @@ def tick(store, predictor, history, rules, settings, sink, observer, now: dateti
     # §7: свежесть данных по типам — флаг «данные несвежие N часов» едет в каждое сообщение
     fres = snapmod.freshness(store, now)
 
+    sent_objects = set()
+
     for i, oid in enumerate(objects):
         msg = outbox.build_message(int(oid), hour_iso(h), model_version, config.TYPES)
         msg['data_freshness_hours'] = {tp: round(float(fres.get(tp, 0.0)), 1) for tp in config.TYPES}
+        for tp in fact_by_obj.get(int(oid), ()):
+            rec = fact_recs[(int(oid), tp)]
+            src = rec['intensity'].get('since_hours') or 0.0
+            outbox.build_fact(msg, tp, since_hours=float(src), episode_t0=rec['episode_t0'],
+                              recommendation=rec,
+                              evidence=snapmod.evidence(store, int(oid), tp, now))
         comp = []
         for tp in config.TYPES:
             alarm, since = applied[tp][0][i], applied[tp][1][i]
@@ -143,6 +156,19 @@ def tick(store, predictor, history, rules, settings, sink, observer, now: dateti
             comp.append(rec)
         if len(comp) >= 2:
             outbox.object_recommendation(msg, recmod.compose(comp))
+        sink.send(msg)
+        sent_objects.add(int(oid))
+
+    # факты по объектам вне кадра витрины — отдельные сообщения (типы без оценок прогноза)
+    for oid in set(fact_by_obj) - sent_objects:
+        msg = outbox.build_message(int(oid), hour_iso(h), model_version, config.TYPES)
+        msg['data_freshness_hours'] = {tp: round(float(fres.get(tp, 0.0)), 1) for tp in config.TYPES}
+        for tp in fact_by_obj[oid]:
+            rec = fact_recs[(oid, tp)]
+            src = rec['intensity'].get('since_hours') or 0.0
+            outbox.build_fact(msg, tp, since_hours=float(src), episode_t0=rec['episode_t0'],
+                              recommendation=rec,
+                              evidence=snapmod.evidence(store, oid, tp, now))
         sink.send(msg)
 
     # 8: наблюдение и обслуживание

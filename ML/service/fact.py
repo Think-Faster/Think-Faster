@@ -11,6 +11,7 @@
 """
 from datetime import datetime, timedelta
 
+import advisor as ad
 import svc as config
 
 # типы, где факт объявляется без фильтра Н7/Н8 — правило `first` из factalert (раздел 15 аналитики)
@@ -55,3 +56,32 @@ def last_end(store, t: datetime, pairs: set[tuple[int, str]] | None = None) -> d
         f"""SELECT object_id, type, max(t1) AS t1 FROM inc WHERE {cond} GROUP BY ALL"""
     ).fetchall()
     return {(int(o), tp): max(0.0, (t - t1).total_seconds() / 3600.0) for o, tp, t1 in rows}
+
+
+def recommendations(con, facts: set[tuple[int, str]], at: datetime) -> dict:
+    """Рекомендация в режиме «факт» по каждой паре объявления (M8, §2.3).
+
+    Один вызов `recommend.context` на все факт-пары такта — парк-широкая сборка контекста
+    дорогая, факты редки, такт считает её один раз. Момент решения — `at` (такт на границе часа):
+    эпизод уже начался, рекомендации считаются по событиям до `at`; по мере развития эпизода
+    тот же такт даёт новое объявление (поток обновлений, §2.3).
+    """
+    import recommend
+    if not facts:
+        return {}
+    objs = ', '.join(str(o) for o, _ in facts)
+    tps = ', '.join(f"'{tp}'" for _, tp in facts)
+    rows = recommend.context(
+        con,
+        f"e.object_id IN ({objs}) AND e.type IN ({tps}) AND e.t0 <= TIMESTAMP '{at.isoformat()}'"
+        f" AND e.t0 >= TIMESTAMP '{at.isoformat()}' - INTERVAL 3 HOUR",
+        upto=f"TIMESTAMP '{at.isoformat()}'"
+    ).group_by(['object_id', 'type']).tail(1)
+    import advisor as ad
+    rules, recur, ver = ad.load()
+    out = {}
+    for r in rows.iter_rows(named=True):
+        r['since_hours'] = float(max(0, (at - r['t0']).total_seconds() / 3600.0))
+        r['co_types'] = sorted(set(r.get('co_types') or ()))
+        out[(int(r['object_id']), str(r['type']))] = recommend.recommend(r, rules, ver, recur)
+    return out
