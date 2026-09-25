@@ -61,17 +61,23 @@ class Block(nn.Module):
 
 
 class Net(nn.Module):
-    def __init__(self, c_in: int, c_static: int, n_out: int, width: int, dropout: float, blocks: int = 7):
+    def __init__(self, c_in: int, c_static: int, n_out: int, width: int, dropout: float, blocks: int = 7,
+                 n_obj: int = 0, emb: int = 0):
         super().__init__()
         self.inp = nn.Conv1d(c_in, width, 1)
         # шаг свёртки удваивается от блока к блоку: охват = 1 + 2·(2^blocks − 1), при семи блоках 255 ч
         self.blocks = nn.Sequential(*[Block(width, 2 ** i, dropout) for i in range(blocks)])
-        self.head = nn.Sequential(nn.Linear(2 * width + c_static, 256), nn.GELU(), nn.Dropout(dropout),
+        # раздел 63: вектор объекта (`--emb`) — семь объектов дают половину карточек (раздел 56)
+        self.emb = nn.Embedding(n_obj, emb) if emb else None
+        self.head = nn.Sequential(nn.Linear(2 * width + c_static + emb, 256), nn.GELU(), nn.Dropout(dropout),
                                   nn.Linear(256, n_out))
 
-    def forward(self, x, s):
+    def forward(self, x, s, o=None):
         h = self.blocks(self.inp(x.transpose(1, 2)))
-        return self.head(torch.cat([h[:, :, -1], h.mean(-1), s], 1))
+        parts = [h[:, :, -1], h.mean(-1), s]
+        if self.emb is not None:
+            parts.append(self.emb(o))
+        return self.head(torch.cat(parts, 1))
 
 
 def index(years: list[int]) -> tuple[np.ndarray, np.ndarray]:
@@ -102,6 +108,15 @@ def main() -> None:
     ap.add_argument('--eval-every', type=int, default=1, help='проверять каждую N-ю эпоху (и последнюю)')
     ap.add_argument('--ongoing-w', type=float, default=1.0,
                     help='вес часов, когда у объекта был эпизод того же типа за последние 168 ч (раздел 60)')
+    ap.add_argument('--aux', default='', help='раздел 63: доп. горизонты-подсказки в часах через запятую, '
+                                              'например 72,168; в прогноз идёт только основной')
+    ap.add_argument('--aux-w', type=float, default=0.5, help='вес доп. горизонтов в потере')
+    ap.add_argument('--emb', type=int, default=0, help='раздел 63: размер вектора объекта, 0 — без него')
+    ap.add_argument('--pw-cap', type=float, default=10.0, help='потолок веса положительных строк')
+    ap.add_argument('--per-type', action='store_true',
+                    help='раздел 63: дописать семейство <имя>_pt — у каждого типа своя лучшая эпоха по проверке')
+    ap.add_argument('--predict-only', action='store_true',
+                    help='без обучения: взять models/<имя>.pt (и <имя>_pt.pt) и заново записать прогнозы')
     args = ap.parse_args()
     # Потолок эпох для очереди, которая уже запущена: в `work/epoch_cap.txt` одно число, и каждый
     # следующий прогон берёт минимум из него и `--epochs`. Лучшая эпоха во всех прогонах сети была
@@ -169,12 +184,24 @@ def main() -> None:
     ev = {s: to_idx(idx[s]['object_id'], idx[s]['h']) for s in idx}
 
     x0, s0 = batch(tr_o[:2], tr_h[:2])
-    net = Net(x0.shape[-1], s0.shape[-1], len(types), args.width, args.dropout, args.blocks).to(dev)
+    nt = len(types)
+    hz = [H] + [int(a) for a in args.aux.split(',') if a]            # столбцы выхода: j·6 + k, j = горизонт
+    hz_t = torch.tensor(hz, device=dev, dtype=nxt.dtype)
+    net = Net(x0.shape[-1], s0.shape[-1], nt * len(hz), args.width, args.dropout, args.blocks,
+              n_obj=len(objects), emb=args.emb).to(dev)
     roll_dir = config.WORK / 'roll'
     if args.init:
         net.load_state_dict(torch.load(roll_dir / f'{args.init}.pt'))
-    p = y_all[tr_o, tr_h].float().mean(0)
-    pos_weight = ((1 - p) / p.clamp(min=1e-4)).sqrt().clamp(1, 10)
+
+    def target(o, h):
+        if len(hz) == 1:
+            return y_all[o, h]
+        return (nxt[o, h].unsqueeze(1) <= hz_t[None, :, None]).reshape(len(o), -1)
+
+    p = torch.cat([target(tr_o[i:i + 200_000], tr_h[i:i + 200_000]).float()
+                   for i in range(0, len(tr_o), 200_000)]).mean(0)
+    pos_weight = ((1 - p) / p.clamp(min=1e-4)).sqrt().clamp(1, args.pw_cap)
+    colw = torch.tensor([1.0] * nt + [args.aux_w] * (nt * (len(hz) - 1)), device=dev)
     opt = torch.optim.AdamW(net.parameters(), lr=args.lr, weight_decay=1e-2)
     steps = args.epochs * (args.per_epoch // args.batch)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=args.lr, total_steps=steps, pct_start=0.1)
@@ -184,17 +211,26 @@ def main() -> None:
     def predict(o_all, h_all) -> np.ndarray:
         net.eval()
         out = []
-        for i in range(0, len(o_all), 4096):
-            x, s = batch(o_all[i:i + 4096], h_all[i:i + 4096])
+        for i in range(0, len(o_all), 2048):
+            x, s = batch(o_all[i:i + 2048], h_all[i:i + 2048])
             with torch.autocast('cuda', dtype=torch.bfloat16):
-                out.append(torch.sigmoid(net(x, s).float()))
+                out.append(torch.sigmoid(net(x, s, o_all[i:i + 2048])[:, :nt].float()))
         net.train()
         return torch.cat(out).cpu().numpy()
 
     best, best_state = -1.0, None
+    best_k, best_k_state, best_k_ep = [-1.0] * nt, [None] * nt, [0] * nt
     vo, vh = ev['val']
     yv = y_all[vo, vh].cpu().numpy()
-    for epoch in range(args.epochs):
+    if args.predict_only:
+        mdir = out_dir / 'models'
+        tag0 = args.name or ('tcn' if args.seed == 0 else f'tcn_s{args.seed}')
+        best_state = torch.load(mdir / f'{tag0}.pt', map_location=dev)
+        if args.per_type:
+            ck = torch.load(mdir / f'{tag0}_pt.pt', map_location=dev)
+            best_k_state = [ck['states'][u] for u in ck['use']]
+            best_k_ep = [ck['epochs'][tp] for tp in types]
+    for epoch in range(0 if args.predict_only else args.epochs):
         t1 = time.time()
         perm = torch.from_numpy(rng.choice(len(tr_o), args.per_epoch,
                                            replace=len(tr_o) < args.per_epoch)).to(dev)
@@ -204,8 +240,13 @@ def main() -> None:
             o, h = tr_o[j], tr_h[j]
             x, s = batch(o, h)
             with torch.autocast('cuda', dtype=torch.bfloat16):
-                logit = net(x, s)
-            if args.ongoing_w == 1.0:
+                logit = net(x, s, o)
+            if len(hz) > 1:
+                # доп. горизонты: те же строки, метка «эпизод в ближайшие 72/168 ч», вес colw
+                w = torch.where(since[o, h].float() < ONGOING, args.ongoing_w, 1.0).repeat(1, len(hz)) * colw
+                loss = (F.binary_cross_entropy_with_logits(logit.float(), target(o, h).float(), pos_weight=pos_weight,
+                                                           reduction='none') * w).sum() / w.sum()
+            elif args.ongoing_w == 1.0:
                 loss = F.binary_cross_entropy_with_logits(logit.float(), y_all[o, h].float(), pos_weight=pos_weight)
             else:
                 # серия уже идёт: такие часы учат сеть держать тревогу, а не предупреждать о начале
@@ -232,6 +273,12 @@ def main() -> None:
               f'{time.time() - t1:.0f} с, пик {torch.cuda.max_memory_allocated() / 2 ** 30:.2f} ГБ', flush=True)
         if score > best:
             best, best_state = score, {k: v.detach().clone() for k, v in net.state_dict().items()}
+        if args.per_type:
+            snap = None
+            for k in range(nt):
+                if aps[k] > best_k[k]:
+                    snap = snap or {n: v.detach().clone() for n, v in net.state_dict().items()}
+                    best_k[k], best_k_state[k], best_k_ep[k] = aps[k], snap, epoch + 1
     if roll:
         # проверка 2025 здесь уже в обучении, эпоха не выбирается: берётся последняя
         roll_dir.mkdir(exist_ok=True)
@@ -246,6 +293,13 @@ def main() -> None:
     tag = args.name or ('tcn' if args.seed == 0 else f'tcn_s{args.seed}')
     (out_dir / 'models').mkdir(parents=True, exist_ok=True)
     torch.save(best_state, out_dir / 'models' / f'{tag}.pt')
+    if args.per_type:
+        uq = {id(x): x for x in best_k_state}
+        torch.save({'epochs': dict(zip(types, best_k_ep)), 'states': list(uq.values()),
+                    'use': [list(uq).index(id(x)) for x in best_k_state]}, out_dir / 'models' / f'{tag}_pt.pt')
+    # смоук 26.09 с --aux --emb упал здесь на 3,9 ГБ из 4: кэш обучения отдаётся до полного предсказания
+    del opt, sched
+    torch.cuda.empty_cache()
 
     preds = {s: predict(*ev[s]) for s in ev}
     report = {}
@@ -267,6 +321,19 @@ def main() -> None:
         print(f'  {tp:9s} tcn test PR-AUC {s_["pr_auc"]:.3f} P {s_["precision"]:.3f} R(эп) {s_["recall_episodes"]:.3f}'
               f' | первичные PR-AUC {sp["pr_auc"]:.3f}', flush=True)
     (out_dir / f'report_{tag}.json').write_text(json.dumps(report, ensure_ascii=False, indent=1), encoding='utf-8')
+    if args.per_type:
+        # своя эпоха каждому типу: газ, датчик и проникновение лучше на 3-й, оборудование растёт до 12-й
+        pt = {s: np.zeros((len(ev[s][0]), nt), np.float32) for s in ev}
+        for st in {id(x): x for x in best_k_state}.values():
+            net.load_state_dict(st)
+            cols = [k for k in range(nt) if best_k_state[k] is st]
+            for s in ev:
+                pt[s][:, cols] = predict(*ev[s])[:, cols]
+        for k, tp in enumerate(types):
+            for s in ev:
+                np.save(out_dir / 'preds' / f'{tag}_pt_{tp}_{s}.npy', pt[s][:, k])
+        (out_dir / f'epochs_{tag}_pt.json').write_text(json.dumps(dict(zip(types, best_k_ep))), encoding='utf-8')
+        print('эпоха по типам: ' + ' '.join(f'{tp} {e}' for tp, e in zip(types, best_k_ep)), flush=True)
     print(f'готово за {time.time() - t:.0f} с')
 
 
