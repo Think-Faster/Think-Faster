@@ -1,0 +1,17 @@
+# Работа сервиса tf-model. Тяжёлые исследовательские зависимости лежат в ../requirements.txt;
+# этот файл — только то, что нужно сервису сверх них (и для стенда без моделей).
+#
+#   python -m pip install -r requirements.txt
+#
+# Ядро (нужно всегда):
+numpy
+duckdb
+polars
+pyarrow
+
+# Опционально — конкретная начинка, по одной на задачу:
+#  конfluent-kafka   — чтение tf.ingest.* и запись tf.forecast.results (M1/M11)
+#  xgboost, catboost — бустинг-модели выгрузки (M4)
+#  torch             — сети TCN отказа оборудования (M4)
+#  fastapi, uvicorn  — HTTP-ручки /api/ml/* (M12)
+#  pytest            — ML/service/tests
