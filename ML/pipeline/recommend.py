@@ -23,6 +23,16 @@
    газа.
 
 Вариант `A` у поправки, паттерна и сочетания — гипотеза, она встаёт первой; `+` — пометка к мерам.
+
+У каждой меры есть `состав` — кого и сколько посылать: без выезда (диспетчер, план, разбор),
+специалист (энергетик, связь и автоматика — один человек у щита или шкафа), звено из 3 (спуск в
+коллектор: один внутри, наблюдающий и страхующий наверху — Правила 902н и 758н), бригада из 4
+(газоопасные работы, откачка, подъём агрегата: двое внутри, двое наверху, не меньше трёх по правилам
+газоопасных работ). Состав зависит от вида работ, а не от масштаба сработки: когда горят несколько
+объектов коллектора, выезд короче, а не шире — это общая причина в одной точке (раздел 61).
+Основные оперативные меры с выездом собираются в один выезд (`visit`): самый большой состав из
+нужных, всё остальное делает тот же выезд.
+
 Несколько типов на объекте разом (несколько тревог прогноза) собираются в составную рекомендацию
 (`compose`): оперативные меры всех типов по сроку, у каждой — свой тип и правило.
 
@@ -62,6 +72,9 @@ SECOND = 0.2        # доля сработок эпизода, с которо�
 BURST_MIN = 2       # мин: каналы, сработавшие в первые 2 мин, — «разом»
 CO_MIN = 60         # мин: другой тип на объекте в пределах часа — сочетание
 STANDING_H = 168    # ч: тревога прогноза стоит неделю — стоящая (ISA-18.2, раздел 60)
+# Состав выезда → человек (раздел 61): звено — 1 в коллекторе + наблюдающий + страхующий (902н, 758н),
+# бригада — 2 в коллекторе + 2 наверху (газоопасные работы: не меньше 3, внутри не больше 2)
+CREW = {'без выезда': 0, 'специалист': 1, 'звено': 3, 'бригада': 4}
 
 # Датчик и состояние эпизода → признак словаря
 TRIGGER = {
@@ -119,7 +132,7 @@ def load_rules(path=RULES) -> tuple[list[dict], str]:
     raw = path.read_bytes()
     rows = list(csv.DictReader(raw.decode('utf-8').splitlines(), delimiter=';'))
     for r in rows:
-        assert len(r) == 14 and None not in r, f"{path.name}: {r['rule_id']} — не 14 полей"
+        assert len(r) == 15 and None not in r, f"{path.name}: {r['rule_id']} — не 15 полей"
         r['срок_ч'] = int(r['срок_ч']) if r['срок_ч'] else None
     return rows, hashlib.sha1(raw).hexdigest()[:10]
 
@@ -262,7 +275,32 @@ def triggers(r: dict) -> list[str]:
     return list(dict.fromkeys(out))
 
 
-KEEP = ('rule_id', 'режим', 'признак', 'мера', 'вид_работ', 'срок_ч', 'исполнитель', 'обоснование', 'источник', 'сверка_ртэк')
+KEEP = ('rule_id', 'вариант', 'режим', 'признак', 'мера', 'вид_работ', 'срок_ч', 'исполнитель', 'состав', 'обоснование', 'источник',
+        'сверка_ртэк')
+
+
+def item(x: dict, tp: str, mode: str) -> dict:
+    """Строка словаря в выход: состав и число людей. Пока по факту горит газ, любой спуск на этот объект —
+    газоопасная работа, и звено поднимается до бригады."""
+    m = {k: x[k] for k in KEEP}
+    if tp == 'gas' and mode == 'факт' and m['состав'] == 'звено':
+        m['состав'] = 'бригада'
+    m['людей'] = CREW.get(m['состав'])
+    return m
+
+
+def visit(now: list[dict]) -> dict | None:
+    """Один выезд на основные оперативные меры (вариант A): самый большой состав, срок — самый ранний.
+    Запасные варианты B и C несут свой состав в строке меры, но выезд не раздувают. `после_проверки` —
+    раньше выезда стоит мера без выезда (камера, связь, перезапуск): выезд, только если она не сняла тревогу."""
+    go = [m for m in now if (m.get('людей') or 0) > 0 and m['вариант'] == 'A']
+    if not go:
+        return None
+    big = max(go, key=lambda m: m['людей'])
+    first = min(m['срок_ч'] for m in go)
+    return {'состав': big['состав'], 'людей': big['людей'], 'срок_ч': first,
+            'исполнители': sorted({m['исполнитель'] for m in go}), 'меры': [m['rule_id'] for m in go],
+            'после_проверки': any(m['людей'] == 0 and m['вариант'] == 'A' and m['срок_ч'] < first for m in now)}
 
 
 def recommend(r: dict, rules: list[dict], version: str, recur: dict) -> dict:
@@ -306,7 +344,7 @@ def recommend(r: dict, rules: list[dict], version: str, recur: dict) -> dict:
     blocks = {'оперативно': [], 'ТО': []}
     for x in order:
         blocks['оперативно' if x['срок_ч'] <= (OPER_H if mode == 'факт' else HORIZON_H) else 'ТО'].append(
-            {k: x[k] for k in KEEP})
+            item(x, tp, mode))
     blocks['оперативно'].sort(key=lambda x: x['срок_ч'])
     ref = recur.get((tp, st), {})
     first = {b: (v[0] if v else None) for b, v in blocks.items()}
@@ -319,8 +357,8 @@ def recommend(r: dict, rules: list[dict], version: str, recur: dict) -> dict:
         'with_types': sorted(co), 'stage': st, 'k30': int(r['k30']),
         'repeat_7d': float(ref['p7']) if ref else None, 'repeat_30d': float(ref['p30']) if ref else None,
         'context': sorted(on), 'hypothesis': [x['rule_id'] for x in hyp],
-        'now': blocks['оперативно'], 'maintenance': blocks['ТО'],
-        'notes': [{k: x[k] for k in KEEP} for x in notes],
+        'now': blocks['оперативно'], 'maintenance': blocks['ТО'], 'visit': visit(blocks['оперативно']),
+        'notes': [item(x, tp, mode) for x in notes],
         'text': ' / '.join(v['мера'] for v in first.values() if v),
         'produced_by': 'rules', 'version': version,
     }
@@ -339,6 +377,7 @@ def compose(recs: list[dict]) -> dict:
                     out.append({'type': x['type'], **m})
     now.sort(key=lambda m: m['срок_ч'])
     return {'object_id': recs[0]['object_id'], 'types': [x['type'] for x in recs], 'now': now, 'maintenance': to,
+            'visit': visit(now),
             'parts': recs, 'produced_by': 'rules', 'version': recs[0]['version']}
 
 
@@ -509,6 +548,16 @@ def retro(con, full: bool = False) -> None:
     a = [r for r, x in recs if lead(x) is None]
     if a:
         print(f"| оперативной меры нет, только ТО | {len(a)} | {sum(bool(r['confirmed']) for r in a) / len(a):.0%} |")
+
+    # 5б. кого посылать: состав выезда рекомендации против выезда на деле
+    print('\n**Состав выезда в рекомендации против выезда на деле** (след выезда в 2 ч, 2026)\n')
+    print('| состав | эпизодов | доля | выезд был |')
+    print('|---|---:|---:|---:|')
+    crew = lambda x: x['visit']['состав'] if x['visit'] else 'без выезда'
+    for c in CREW:
+        a = [r for r, x in recs if crew(x) == c]
+        if a:
+            print(f"| {c} | {len(a)} | {len(a) / len(recs):.0%} | {sum(bool(r['confirmed']) for r in a) / len(a):.0%} |")
 
     # 6. паттерн эпизода: разводит ли он выезд и повтор того же канала
     pats = ('mass', 'spreading', 'chatter', 'fleeting', 'sustained', 'short')
