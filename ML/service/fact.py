@@ -77,7 +77,6 @@ def recommendations(con, facts: set[tuple[int, str]], at: datetime) -> dict:
         f" AND e.t0 >= TIMESTAMP '{at.isoformat()}' - INTERVAL 3 HOUR",
         upto=f"TIMESTAMP '{at.isoformat()}'"
     ).group_by(['object_id', 'type']).tail(1)
-    import advisor as ad
     rules, recur, ver = ad.load()
     out = {}
     for r in rows.iter_rows(named=True):

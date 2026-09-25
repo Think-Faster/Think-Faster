@@ -147,7 +147,7 @@ def tick(store, predictor, history, rules, settings, sink, observer, now: dateti
             if tp == 'equipment' and oid in coll:
                 same_col = collectors_by_tp[tp] & {coll[oid]}
                 line_n = len({o for o in al_by[tp] if coll.get(o) in same_col}) - 1
-            rec = advisor.build(store.con, int(oid), tp, now,
+            rec = ad.build(store.con, int(oid), tp, now,
                                 reasons=[r['feature'] for r in reasons],
                                 since_h=int(since), co_types=[t for t in config.TYPES if t != tp
                                                               and applied[t][0][i]], line_n=line_n)
