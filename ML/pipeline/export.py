@@ -55,6 +55,9 @@ MIX = {'fire': ('main_h24_tunedh24', 'cat', 'tunedh24'),
        'sensor': ('main_h24_tuned', 'xgb', 'tuned'),
        'intrusion': ('main_h24', 'cat', 'default')}
 YEARS = [2022, 2023, 2024, 2025, 2026]
+# Версия разметки бустинга в выгрузке (INTEGRATION.md §11.2, ml.model_version.labels): раздел 62 —
+# Н10 по графику работ, эпизоды Н10 вне счётчиков признаков
+LABELS = 'r62'
 # Сеть отказа оборудования (раздел 48): обучена прогоном вперёд на всём до даты минус горизонт
 TCN_CUTOFF = '2026-07-01'
 
@@ -272,7 +275,8 @@ def main() -> None:
             name = f'{model}_s{seed}.' + ('json' if model == 'xgb' else 'cbm')
             m.save_model(str(out / tp / name))
             manifest.setdefault('models', {}).setdefault(tp, {})[str(seed)] = {
-                'file': f'{tp}/{name}', 'family': model, 'params': kind, 'trees': n, 'from_run': ref}
+                'file': f'{tp}/{name}', 'family': model, 'params': kind, 'trees': n, 'from_run': ref,
+                'labels': LABELS}
             print(f'{tp} {model} зерно {seed}: {n} деревьев, доля положительных {y.mean():.4f}, '
                   f'{time.time() - t1:.0f} с', flush=True)
             path.write_text(json.dumps(manifest, ensure_ascii=False, indent=1), encoding='utf-8')
