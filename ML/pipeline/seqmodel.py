@@ -100,6 +100,8 @@ def main() -> None:
     ap.add_argument('--blocks', type=int, default=7, help='число свёрточных блоков: охват 1 + 2·(2^blocks − 1) ч')
     ap.add_argument('--name', default='', help='имя семейства в файлах; по умолчанию tcn / tcn_s<зерно>')
     ap.add_argument('--eval-every', type=int, default=1, help='проверять каждую N-ю эпоху (и последнюю)')
+    ap.add_argument('--ongoing-w', type=float, default=1.0,
+                    help='вес часов, когда у объекта был эпизод того же типа за последние 168 ч (раздел 60)')
     args = ap.parse_args()
     # Потолок эпох для очереди, которая уже запущена: в `work/epoch_cap.txt` одно число, и каждый
     # следующий прогон берёт минимум из него и `--epochs`. Лучшая эпоха во всех прогонах сети была
@@ -139,6 +141,7 @@ def main() -> None:
     comp = torch.from_numpy(np.log1p(z['composition'])).to(dev)
     nxt = torch.from_numpy(np.stack([z[f'next_{tp}'] for tp in types], -1)).to(dev)   # int16
     y_all = (nxt <= H)
+    ONGOING = float(np.log1p(168))                                  # since хранится как log1p часов
     print(f'ряды на GPU {tuple(base.shape)} за {time.time() - t:.0f} с, '
           f'{torch.cuda.memory_allocated() / 2 ** 30:.2f} ГБ', flush=True)
 
@@ -202,7 +205,13 @@ def main() -> None:
             x, s = batch(o, h)
             with torch.autocast('cuda', dtype=torch.bfloat16):
                 logit = net(x, s)
-            loss = F.binary_cross_entropy_with_logits(logit.float(), y_all[o, h].float(), pos_weight=pos_weight)
+            if args.ongoing_w == 1.0:
+                loss = F.binary_cross_entropy_with_logits(logit.float(), y_all[o, h].float(), pos_weight=pos_weight)
+            else:
+                # серия уже идёт: такие часы учат сеть держать тревогу, а не предупреждать о начале
+                w = torch.where(since[o, h].float() < ONGOING, args.ongoing_w, 1.0)
+                loss = (F.binary_cross_entropy_with_logits(logit.float(), y_all[o, h].float(), pos_weight=pos_weight,
+                                                           reduction='none') * w).sum() / w.sum()
             opt.zero_grad(set_to_none=True)
             loss.backward()
             nn.utils.clip_grad_norm_(net.parameters(), 1.0)
