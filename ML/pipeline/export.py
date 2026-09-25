@@ -24,10 +24,16 @@
     python export.py
     python export.py --types fire --seeds 0   # проба
     python export.py --check                  # проверка допущения (раздел 39)
+    python export.py --equipment-version 2    # версия отказа оборудования для выбора главным диспетчером
 
 `--check` проверяет само допущение «больше лет при том же числе деревьев — не хуже». Смесь
 обучается так же, но на 2022–2025, то есть с годом проверки внутри, и сравнивается с рабочими
 прогонами на тесте 2026 при долях часов раздела 38. Модели кладутся в `work/export_check/`.
+
+`--equipment-version N` собирает одну из четырёх версий отказа оборудования (раздел 60, «Версии для
+главного диспетчера») в `work/export_equipment_vN/`: только папка `equipment/` и `manifest.json` с
+блоком `version`. Ничего не обучает, берёт готовые модели. Остальные типы у всех версий общие —
+из `work/export`. Переключение идёт по типу (INTEGRATION.md §11, `ml.model_switch`).
 """
 import argparse
 import json
@@ -51,6 +57,26 @@ MIX = {'fire': ('main_h24_tunedh24', 'cat', 'tunedh24'),
 YEARS = [2022, 2023, 2024, 2025, 2026]
 # Сеть отказа оборудования (раздел 48): обучена прогоном вперёд на всём до даты минус горизонт
 TCN_CUTOFF = '2026-07-01'
+
+# Версии отказа оборудования (раздел 60, «Версии для главного диспетчера»). Номер — выбор главного
+# диспетчера; по умолчанию 1. Версия — одна или две части; оценка версии — взвешенное среднее оценок
+# частей, оценка части — среднее рангов её зёрен (как у остальных типов). Переобучать по расписанию
+# нужно только версию 3; 1 и 2 заморожены, модуль дообучения по ТЗ §8 — по согласованию.
+CAT = {'family': 'cat', 'run': 'main_h24_tunedh24', 'seeds': 5, 'trained_to': '2025-01-01'}
+NET24 = {'family': 'tcn', 'tag': 'all', 'cutoff': '2024-01-01', 'seeds': 3}
+EQ_VERSIONS = {
+    1: {'name': 'тихая', 'parts': [(0.75, CAT), (0.25, NET24)],
+        'about': 'смесь: бустинг CatBoost 2022–2024 с весом 0,75 и сеть TCN 2022–2023 с весом 0,25, '
+                 'заморожена; при тех же ложных сигналах ловит больше всех'},
+    2: {'name': 'перевзвод', 'parts': [(1.0, NET24)],
+        'about': 'сеть TCN, 2022–2023, заморожена; короткие тревоги к каждому эпизоду, '
+                 'больше всего свежих поимок; долю часов стоит опустить до 0,035, иначе шумнее версии 1'},
+    3: {'name': 'разрыв в год', 'parts': [(1.0, {'family': 'tcn', 'tag': 'prodgap365', 'cutoff': '2026-07-01',
+                                                   'seeds': 3})],
+        'about': 'сеть TCN на всей истории, кроме последних 365 суток; переобучается с тем же разрывом'},
+    4: {'name': 'липкая', 'parts': [(1.0, {'family': 'tcn', 'tag': 'prod', 'cutoff': '2026-07-01', 'seeds': 5})],
+        'about': 'сеть TCN на всей истории — прежний прод; дольше всех держит тревогу'},
+}
 
 
 def trees(run: str, tp: str, model: str) -> int:
@@ -120,6 +146,42 @@ def export_tcn(tp: str, seeds: list[int], out, manifest: dict) -> None:
     prune(tp, out, manifest)
 
 
+def export_equipment_version(k: int) -> None:
+    """Версия отказа оборудования из готовых моделей в `work/export_equipment_v<k>/`."""
+    import shutil
+    v, tp, H = EQ_VERSIONS[k], 'equipment', config.HORIZON
+    out = config.WORK / f'export_equipment_v{k}'
+    (out / tp).mkdir(parents=True, exist_ok=True)
+    meta = json.loads((train.FEAT / 'meta.json').read_text(encoding='utf-8'))
+    manifest = {'features': meta['features'], 'horizon': H, 'built': date.today().isoformat(),
+                'score': 'по частям blend: среднее рангов зёрен семейства; части — со своими весами', 'threshold': 'доля часов, окно 90 суток',
+                'version': {'type': tp, 'number': k, **{x: v[x] for x in ('name', 'about')}},
+                'models': {tp: {}}}
+    manifest['blend'] = []
+    for w, part in v['parts']:
+        manifest['blend'].append({'family': part['family'], 'weight': w})
+        for seed in range(part['seeds']):
+            if part['family'] == 'cat':
+                ref = part['run'] if seed == 0 else f"{part['run']}_s{seed}"
+                src = config.WORK / 'runs' / ref / 'models' / f'cat_{tp}.cbm'
+                entry = {'family': 'cat', 'params': 'tunedh24', 'trees': trees(ref, tp, 'cat'), 'from_run': ref,
+                         'trained_to': part['trained_to']}
+                name = f'cat_s{seed}.cbm'
+            else:
+                ref = f"{part['tag']}_s{seed}_{part['cutoff']}"
+                src = config.WORK / 'roll' / f'{ref}.pt'
+                entry = {'family': 'tcn', 'params': 'seq', 'from_run': ref, 'trained_to': part['cutoff']}
+                name = f'tcn_s{seed}.pt'
+                manifest['seq'] = seq_spec(H)
+            if not src.exists():
+                raise FileNotFoundError(f'нет модели {src}')
+            shutil.copyfile(src, out / tp / name)
+            manifest['models'][tp][name.split('.')[0]] = {'file': f'{tp}/{name}', **entry}
+            print(f'версия {k}: {tp} {entry["family"]} зерно {seed} из {ref}', flush=True)
+    prune(tp, out, manifest)
+    (out / 'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=1), encoding='utf-8')
+
+
 def prune(tp: str, out, manifest: dict) -> None:
     """Убрать файлы прежней выгрузки, которых нет в манифесте: у типа могло смениться семейство."""
     keep = {v['file'].rsplit('/', 1)[-1] for v in manifest.get('models', {}).get(tp, {}).values()}
@@ -152,7 +214,12 @@ def main() -> None:
     ap.add_argument('--seeds', default='0,1,2,3,4')
     ap.add_argument('--step', type=int, default=3, help='шаг по часам, как в train.py')
     ap.add_argument('--check', action='store_true', help='обучить на 2022–2025 и сравнить на тесте 2026')
+    ap.add_argument('--equipment-version', type=int, choices=sorted(EQ_VERSIONS), default=0,
+                    help='собрать версию отказа оборудования из готовых моделей (раздел 60)')
     args = ap.parse_args()
+    if args.equipment_version:
+        export_equipment_version(args.equipment_version)
+        return
     years = YEARS[:-1] if args.check else YEARS
     H = config.HORIZON
     meta = json.loads((train.FEAT / 'meta.json').read_text(encoding='utf-8'))
@@ -178,7 +245,7 @@ def main() -> None:
     manifest.update({'features': features, 'years': years, 'horizon': H, 'step': args.step,
                      'rows': int(X.shape[0]) if X is not None else manifest.get('rows'),
                      'built': date.today().isoformat(),
-                     'score': 'среднее рангов зёрен по типу', 'threshold': 'доля часов, окно 90 суток'})
+                     'score': 'по частям blend: среднее рангов зёрен семейства; части — со своими весами', 'threshold': 'доля часов, окно 90 суток'})
     if any(MIX[tp][1] == 'tcn' for tp in types):
         manifest['seq'] = seq_spec(H)
     for tp in types:

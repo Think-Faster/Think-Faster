@@ -12,6 +12,9 @@
     python sticky.py eqsig   tcn:all:0,1,2 tcn:all#2024-01-01:0,1,2 tcn:gap365:0,1,2
     python sticky.py where   tcn:all#2024-01-01:0,1,2 tcn:gap365:0,1,2 tcn:all:0,1,2
     python sticky.py data    equipment
+    python sticky.py cost@work mix tcn:all#2024-01-01:0,1,2 tcn:gap365:0,1,2 tcn:all:0,1,2
+    python sticky.py blend   tcn:all#2024-01-01:0,1,2
+    python sticky.py types   mix tcn:all#2024-01-01:0,1,2 tcn:gap365:0,1,2 tcn:all:0,1,2 tcn:owr03:0,1,2
 
 folds   — поймано / свежих по каждому отрезку: держится ли разница на всём тесте или на одном месяце;
 runs    — форма тревог: сколько серий, их длина, доля часов в сериях дольше 7 суток и сколько тревога
@@ -32,6 +35,10 @@ where   — где сети расходятся: свежих (поймано) 
           и по паузе с прошлого эпизода; доля часов под тревогой в тех же корзинах;
 data    — серии в самих данных по годам: P(эпизод в 24 ч) по часам с прошлого эпизода, во сколько раз
           внутри серии выше, чем вне, доля положительных часов внутри серии, медианная пауза в серии.
+blend   — смесь рангов бустинга (смесь раздела 34) и сети с весом w: на тесте с заданной сетью и на
+          проверке 2025 с сетью раздела 42, чтобы вес не выбирался по тесту;
+types   — те же версии у загазованности, подтопления и проникновения;
+@work   — приписка к режиму (`cost@work`): доля часов не раздела 38, а рабочая из settings/operating.json.
 """
 import sys
 
@@ -289,11 +296,70 @@ def data(tp):
               f'| {np.median(gaps[gaps < 168]):.0f} |', flush=True)
 
 
+def point(d, p, share):
+    a = alarm_at(p, share)
+    c, f = catches(d, a)
+    tot, true = metrics.signals(d['o'], d['h'], d['y'], a, gap=6)
+    return dict(caught=int(c.sum()), fresh=int(f.sum()), true=true, false=tot - true, fh=int((a & ~d['y']).sum()))
+
+
+def blend(specs, tp='equipment'):
+    ws = (0, 0.25, 0.5, 0.75, 1)
+    d = R.test_rows(tp)
+    weeks = (d['h'].max() - d['h'].min() + 1) / 168
+    pb, pn = R.score('mix', tp, d), R.score(specs[0], tp, d)
+    print(f'тест 2026, сеть {specs[0]}, доля {R.S38[tp]}')
+    print()
+    print('| вес сети | поймано / свежих | ложных сигналов | в неделю | ложных ч |')
+    print('|---:|---|---:|---:|---:|')
+    for w in ws:
+        a = point(d, (1 - w) * pb + w * pn, R.S38[tp])
+        print(f'| {w} | {a["caught"]} / {a["fresh"]} | {a["false"]} | {a["false"] / weeks:.1f} | {a["fh"]} |', flush=True)
+    o, h, n, qb = operating.load_mix(R.MIX, 'val', [2025], tp, 'xgb', '')
+    o2, h2, _, qn = operating.load_mix(R.SEEDS5, 'val', [2025], tp, 'xgb', '')
+    k1, k2 = o.astype(np.int64) * 10**7 + h, o2.astype(np.int64) * 10**7 + h2
+    i1, i2 = np.argsort(k1), np.argsort(k2)
+    assert np.array_equal(k1[i1], k2[i2])
+    o, h, n, key = o[i1], h[i1], n[i1], k1[i1]
+    rank = lambda q: q.argsort().argsort() / len(q)
+    qb, qn = rank(qb[i1]), rank(qn[i2])
+    eps = np.array(sorted(metrics.onsets(o, h, n, metrics.RUN_CAP)), dtype=np.int64).reshape(-1, 2)
+    wk = eps[:, :1] * 10**7 + eps[:, 1:] - np.arange(H, 0, -1)[None, :]
+    pos = np.minimum(np.searchsorted(key, wk), len(key) - 1)
+    W = np.where(key[pos] == wk, pos, -1)
+    v = dict(o=o, h=h, y=n <= H, W=W[(W >= 0).any(1)])
+    weeks = (h.max() - h.min() + 1) / 168
+    print()
+    print(f'проверка 2025, сеть раздела 42 (пять зёрен), эпизодов {len(v["W"])}')
+    print()
+    print('| вес сети | поймано / свежих | ложных сигналов | в неделю | ложных ч |')
+    print('|---:|---|---:|---:|---:|')
+    for w in ws:
+        a = point(v, (1 - w) * qb + w * qn, R.S38[tp])
+        print(f'| {w} | {a["caught"]} / {a["fresh"]} | {a["false"]} | {a["false"] / weeks:.1f} | {a["fh"]} |', flush=True)
+
+
+def types(specs):
+    print('| тип | версия | эпизодов | поймано / свежих | ложных сигналов | в неделю | ложных ч |')
+    print('|---|---|---:|---|---:|---:|---:|')
+    for tp in ('gas', 'flood', 'intrusion'):
+        d = R.test_rows(tp)
+        weeks = (d['h'].max() - d['h'].min() + 1) / 168
+        for spec in specs:
+            a = point(d, R.score(spec, tp, d), R.S38[tp])
+            print(f'| {tp} | {spec} | {len(d["eps"])} | {a["caught"]} / {a["fresh"]} | {a["false"]} '
+                  f'| {a["false"] / weeks:.1f} | {a["fh"]} |', flush=True)
+
+
 if __name__ == '__main__':
     mode, args = sys.argv[1], sys.argv[2:]
+    if mode.endswith('@work'):
+        mode = mode[:-5]
+        R.S38.update(config.shares())
     if mode == 'detrend':
         detrend(args[0], args[1:])
     elif mode == 'data':
         data(args[0] if args else 'equipment')
     else:
-        {'folds': folds, 'runs': runs, 'chronic': chronic, 'cost': cost, 'eqsig': eqsig, 'where': where}[mode](args)
+        {'folds': folds, 'runs': runs, 'chronic': chronic, 'cost': cost, 'eqsig': eqsig, 'where': where,
+         'blend': blend, 'types': types}[mode](args)
