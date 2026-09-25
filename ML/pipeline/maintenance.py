@@ -147,7 +147,7 @@ def suppress(con, args) -> None:
 
 
 def in_works(con, obj: np.ndarray, h: np.ndarray, tp: str, shift: int = 0) -> np.ndarray:
-    """Час объекта лежит в окне плановых работ по типу `tp` на коллекторе объекта (M7, раздел 62).
+    """Час объекта лежит в окне плановых работ по типу `tp` на самом объекте или его коллекторе (M7, раздел 62).
     `shift` — сдвиг окон в сутках: проверка на случай, когда работы ушли от графика."""
     ts = np.datetime64(T0, 'h') + h.astype('timedelta64[h]')
     labels.works_windows(con, sorted({int(y) + 1970 for y in np.unique(ts.astype('datetime64[Y]').astype(int))}))
@@ -155,9 +155,9 @@ def in_works(con, obj: np.ndarray, h: np.ndarray, tp: str, shift: int = 0) -> np
     uo, inv = np.unique(obj, return_inverse=True)
     c = np.array([coll.get(int(o), -1) for o in uo])[inv]
     m = np.zeros(len(obj), bool)
-    for cid, a, b in con.sql(f"""SELECT collector_id, a + INTERVAL {shift} DAY, b + INTERVAL {shift} DAY
-                                 FROM works_win WHERE type = '{tp}'""").fetchall():
-        m |= (c == cid) & (ts >= np.datetime64(a, 'h')) & (ts < np.datetime64(b, 'h'))
+    for oid, a, b in con.sql(f"""SELECT object_id, a + INTERVAL {shift} DAY, b + INTERVAL {shift} DAY
+                                 FROM works_win WHERE list_contains(types, '{tp}')""").fetchall():
+        m |= ((c == oid) | (obj == oid)) & (ts >= np.datetime64(a, 'h')) & (ts < np.datetime64(b, 'h'))
     return m
 
 

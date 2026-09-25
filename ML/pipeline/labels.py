@@ -27,8 +27,8 @@ INTRUSION_STEP = '10 minutes'  # проникновение: движение н
 ARRIVAL = '15 minutes'       # охрану сняли так скоро после открытия — это персонал, а не нарушитель
 CONFIRM = '2 hours'          # окно сопоставления эпизода и выезда
 PRIMARY = '7 days'           # эпизод первичный, если такого же типа на объекте не было столько времени
-WORKS = config.ML / 'settings' / 'works_2026.csv'  # график плановых работ организатора, раздел 62
-WORKS_PAD = 7                # сут: в прошлые годы окно графика ставится на те же дни года ± столько
+WORKS = config.ML / 'settings' / 'works_2026.csv'  # таблица графика работ (INTEGRATION.md §1.6), раздел 62
+WORKS_PAD = 7                # сут: в год без строки графика окно переносится на те же дни года ± столько
 
 EQUIPMENT = "('Состояние насоса', 'Состояние вентилятора', 'Состояние фазы', 'ИБП', 'Переключатель')"
 OPENINGS = "('КД Дверь', 'КД Люк', 'Стекло', '9-секционный люк')"
@@ -154,41 +154,51 @@ def build(con) -> None:
         FROM prev p JOIN obj3 o USING (object_id)
         ASOF LEFT JOIN visit v ON v.collector_id = o.collector_id AND p.t0 < v.t0""")
 
-    # 6. Н10 — плановые работы по графику (раздел 62, INTEGRATION.md §1.6): эпизод типа из графика,
-    #    начавшийся на своём коллекторе в окне работ (works_windows), — шум. У ППР газа сюда же отказ
-    #    датчика, начавшийся с газового датчика: датчик снят и увезён в метрологию. Как прочий шум,
-    #    эпизод Н10 не входит ни в цель, ни в счётчики эпизодов в признаках (features.py);
-    #    срабатывания его датчиков в признаках остаются.
+    # 6. Н10 — плановые работы по графику (раздел 62, INTEGRATION.md §1.6): эпизод типа из строки
+    #    графика, начавшийся на её объекте в окне работ (works_windows), — шум. Сюда же отказ датчика,
+    #    начавшийся с датчика, который работы снимают (`removed_sensor`; у ППР газа — газовый, его
+    #    увозят в метрологию). Как прочий шум, эпизод Н10 не входит ни в цель, ни в счётчики эпизодов
+    #    в признаках (features.py); срабатывания его датчиков в признаках остаются.
     works_windows(con)
     con.sql("""
         UPDATE inc SET noise = 'Н10'
         FROM (SELECT DISTINCT i.object_id, i.type, i.t0
               FROM inc i JOIN works_win w
-                ON w.collector_id = i.collector_id AND i.t0 >= w.a AND i.t0 < w.b
+                ON w.object_id IN (i.object_id, i.collector_id) AND i.t0 >= w.a AND i.t0 < w.b
               WHERE i.noise IS NULL
-                AND (i.type = w.type OR i.type = 'sensor' AND w.type = 'gas' AND EXISTS (
+                AND (list_contains(w.types, i.type) OR i.type = 'sensor' AND EXISTS (
                      SELECT 1 FROM trig t WHERE t.object_id = i.object_id AND t.ts = i.t0
-                                          AND t.type = 'sensor' AND t.stype = 'Газовый датчик'))) c
+                                          AND t.type = 'sensor' AND t.stype = w.sensor))) c
         WHERE inc.object_id = c.object_id AND inc.type = c.type AND inc.t0 = c.t0 AND inc.noise IS NULL""")
 
 
 def works_windows(con, years: list[int] | None = None) -> None:
-    """Окна графика плановых работ — временная таблица `works_win` (collector_id, type, a, b), час
-    входит в окно при a <= ts < b. В год графика окно — его даты от демонтажа до конца дня приёмки.
-    В другие годы — те же дни года с запасом WORKS_PAD: по журналу график из года в год почти не
-    сдвигается (раздел 62). Одно правило на разметку (Н10) и на молчание M7 (maintenance.py --mode works);
-    годы по умолчанию — все, где есть эпизоды."""
+    """Окна графика работ — временная таблица `works_win` (object_id, types, sensor, a, b), час входит
+    в окно при a <= ts < b. Строка графика — объект любого уровня (коллектор накрывает все свои
+    объекты), вид работ, типы происшествий и время начала и конца с точностью до часа; это та же
+    таблица, которую правит главный диспетчер (INTEGRATION.md §1.6). В свой год окно берётся как есть.
+    В год, где у объекта нет строки того же вида работ, окно переносится со строки ближайшего года на
+    те же дни с запасом WORKS_PAD: по журналу график из года в год почти не сдвигается (раздел 62).
+    Одно правило на разметку (Н10) и на молчание M7 (maintenance.py --mode works); годы по умолчанию —
+    все, где есть эпизоды."""
     if years is None:
         years = [r[0] for r in con.sql('SELECT DISTINCT year(t0) FROM inc ORDER BY 1').fetchall()]
     con.sql(f"""
         CREATE OR REPLACE TEMP TABLE works_win AS
-        SELECT w.collector_id, w.тип AS type,
-               CASE WHEN y = year(w.демонтаж) THEN w.демонтаж::TIMESTAMP
-                    ELSE (make_date(y, month(w.демонтаж), day(w.демонтаж)) - {WORKS_PAD})::TIMESTAMP END AS a,
-               CASE WHEN y = year(w.демонтаж) THEN (w.приёмка + 1)::TIMESTAMP
-                    ELSE (make_date(y, month(w.приёмка), day(w.приёмка)) + {1 + WORKS_PAD})::TIMESTAMP END AS b
-        FROM read_csv('{WORKS.as_posix()}', delim=';', header=true) w, (SELECT unnest({list(years)}) AS y)
-        WHERE w.collector_id IS NOT NULL""")
+        WITH w AS (SELECT object_id::BIGINT AS object_id, work_kind, string_split(incident_types, ',') AS types,
+                          removed_sensor AS sensor, starts_at::TIMESTAMP AS s, ends_at::TIMESTAMP AS e,
+                          year(starts_at::TIMESTAMP) AS wy
+                   FROM read_csv('{WORKS.as_posix()}', delim=';', header=true, all_varchar=true)
+                   WHERE object_id IS NOT NULL),
+             src AS (SELECT k.object_id, k.work_kind, y, arg_min(k.wy, abs(k.wy - y)) AS wy
+                     FROM (SELECT DISTINCT object_id, work_kind, wy FROM w) k, (SELECT unnest({list(years)}) AS y)
+                     GROUP BY ALL HAVING NOT bool_or(k.wy = y))
+        SELECT object_id, types, sensor, s AS a, e AS b FROM w
+        UNION ALL
+        SELECT w.object_id, w.types, w.sensor,
+               w.s + to_years((c.y - w.wy)::INT) - INTERVAL {WORKS_PAD} DAY,
+               w.e + to_years((c.y - w.wy)::INT) + INTERVAL {WORKS_PAD} DAY
+        FROM w JOIN src c USING (object_id, work_kind, wy)""")
 
 
 def main() -> None:
