@@ -203,6 +203,21 @@ if app is not None:
         return {'settings_version': st.settings.version if st.settings else None,
                 'thresholds': st.history.thresholds if st.history else None}
 
+    @app.get('/api/ml/retrain')
+    def retrain_status(auth: dict = Depends(require_auth)):
+        """§9.5: статус переобучения — очередь/идёт/готово/ошибка + ссылка на версию."""
+        ensure_app()
+        from retrainer import Retrainer
+        return Retrainer().status()
+
+    @app.post('/api/ml/retrain')
+    def retrain_request(by: str, reason: str, note: str = '', strategy: str = 'all',
+                        auth: dict = Depends(require_auth)):
+        """§9.5: переобучение по кнопке; статус в GET /api/ml/retrain."""
+        ensure_app()
+        from retrainer import Retrainer
+        return Retrainer().request(by, reason, note, strategy)
+
 
 def start_api(state: State, host: str | None = None, port: int | None = None) -> threading.Thread:
     """П8: uvicorn из процесса сервиса (поток-демон); bind в момент старта."""

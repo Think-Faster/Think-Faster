@@ -187,12 +187,13 @@ def pull_decisions(rules, kafka: bool = False) -> int:
                 if 'object_id' in d and 'action' in d:
                     decoded.append(d)
             r.commit()
-            return decisions.apply(rules, decoded)
+            return decisions.apply(rules, decoded, audit_path=config.DECISIONS_AUDIT)
     p = config.DECISIONS_LOG
     if not p.exists():
         return 0
     import polars as pl
-    return decisions.apply(rules, pl.read_parquet(p).rows(named=True))
+    return decisions.apply(rules, pl.read_parquet(p).rows(named=True),
+                           audit_path=config.DECISIONS_AUDIT)
 
 
 def main() -> None:

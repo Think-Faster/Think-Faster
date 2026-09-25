@@ -75,8 +75,30 @@ class OperatingSettings:
 
     def save(self, path: Path | None = None) -> None:
         p = Path(path) if path else config.SETTINGS
+        # §9.3: старые версии хранятся рядом — по ним объясняется, почему поток тревог был другим
+        if p.exists():
+            try:
+                before = json.loads(p.read_text(encoding='utf-8'))
+            except json.JSONDecodeError:
+                before = None
+            if before and int(before.get('version', -1)) != self.version:
+                _append_history(before)
         p.parent.mkdir(parents=True, exist_ok=True)
         json.dump(self.as_dict(), p.open('w', encoding='utf-8'), ensure_ascii=False, indent=1)
+
+
+def _append_history(before: dict) -> None:
+    """Дописать прежнюю версию в OUT_DIR/operating.history.json (список, начиная со старой)."""
+    p = config.OPERATING_HISTORY
+    hist = []
+    if p.exists():
+        try:
+            hist = json.loads(p.read_text(encoding='utf-8'))
+        except json.JSONDecodeError:
+            pass
+    hist.append(before)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    json.dump(hist[-2000:], p.open('w', encoding='utf-8'), ensure_ascii=False, indent=1)
 
 
 def _validate(raw: dict) -> None:

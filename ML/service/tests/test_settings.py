@@ -6,6 +6,7 @@ from helpers import make_settings, write_operating
 from settings import OperatingSettings, SettingError, estimate
 
 import numpy as np
+import svc as config
 
 
 class SettingsTest(unittest.TestCase):
@@ -38,6 +39,32 @@ class SettingsTest(unittest.TestCase):
             self.assertEqual(new.changed_by, 'disp-01')
             self.assertEqual(new.share('fire'), 0.035)
             self.assertEqual(st.share('fire'), 0.030)   # оригинал не тронут
+
+    def test_save_keeps_old_versions(self):
+        """§9.3: каждая запись новой версии оставляет прежнюю в operating.history.json."""
+        import json
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            saved = config.OPERATING_HISTORY
+            config.OPERATING_HISTORY = d / 'operating.history.json'
+            try:
+                p = d / 'operating.json'
+                v1 = OperatingSettings.load(write_operating(d))
+                v2 = v1.rebase({'gas': {'share': 0.022}}, by='disp-01',
+                               reason='ползунок', now='2026-09-24T00:00:00+03:00')
+                v2.save(p)
+                v3 = v2.rebase({'gas': {'share': 0.020}}, by='disp-01',
+                               reason='ещё ползунок', now='2026-09-25T00:00:00+03:00')
+                v3.save(p)
+                hist = json.loads((d / 'operating.history.json').read_text(encoding='utf-8'))
+                self.assertEqual([h['version'] for h in hist], [1, 2])
+                self.assertEqual(hist[0]['changed_by'], 'ml-test')
+                self.assertEqual(hist[1]['types']['gas']['share'], 0.022)
+                # текущий файл — только последняя версия
+                cur = json.loads(p.read_text(encoding='utf-8'))
+                self.assertEqual(cur['version'], 3)
+            finally:
+                config.OPERATING_HISTORY = saved
 
     def test_estimate_sanity(self):
         rng = np.random.default_rng(7)

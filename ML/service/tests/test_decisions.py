@@ -1,6 +1,10 @@
-"""M11: обратный поток решений (INTEGRATION §9.1) — схема, часы от витрины, действия."""
+"""M11: обратный поток решений (INTEGRATION §9.1) — схема, часы от витрины, действия, аудит §9.2."""
+import tempfile
 import unittest
 from datetime import datetime, timedelta
+from pathlib import Path
+
+import polars as pl
 
 import decisions
 import features as ft
@@ -74,6 +78,31 @@ class DecisionsTest(unittest.TestCase):
                                        'decided_at': '2026-01-04T12:00:00+03:00'},
             {'object_id': 1, 'type': 'gas', 'action': 'REJECT'}])
         self.assertEqual(n, 0)
+
+    def test_audit_writes_applied_decisions(self):
+        """§9.2: применённые решения складываются в parquet-таблицу для обучения."""
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / 'audit.parquet'
+            rules = Recorder()
+            n = decisions.apply(rules, [
+                {'object_id': 5122, 'type': 'gas', 'action': 'REJECT', 'reason_code': 'known_works',
+                 'user_id': 'disp-01', 'task_id': 7,
+                 'decided_at': '2026-01-04T12:25:00+03:00'},
+                {'object_id': 5, 'type': 'gas', 'action': 'SOMETHING',
+                 'decided_at': '2026-01-04T12:25:00+03:00'}], audit_path=p)
+            self.assertEqual(n, 1)                    # неизвестное действие в аудит не пишется
+            n2 = decisions.apply(rules, [
+                {'object_id': 6, 'type': 'fire', 'action': 'MUTE', 'mute_hours': 3,
+                 'decided_at': '2026-01-04T13:00:00+03:00'}], audit_path=p)
+            self.assertEqual(n2, 1)
+            df = pl.read_parquet(p)
+            self.assertEqual(df.height, 2)            # оба вызова дописались к одной таблице
+            rows = df.sort('object_id').rows(named=True)
+            self.assertEqual([r['object_id'] for r in rows], [6, 5122])
+            self.assertEqual(rows[0]['action'], 'MUTE')
+            self.assertEqual(rows[1]['action'], 'REJECT')
+            self.assertEqual(rows[1]['type'], 'gas')
+            self.assertEqual(rows[1]['reason_code'], 'known_works')
 
 
 if __name__ == '__main__':

@@ -27,7 +27,9 @@ MANIFEST = EXPORT / 'manifest.json'
 FEATURES = WORK / 'features'
 STATE_DIR = OUT_DIR
 HISTORY = OUT_DIR / 'history.parquet'
-DECISIONS_LOG = OUT_DIR / 'decisions.parquet'
+DECISIONS_LOG = OUT_DIR / 'decisions.parquet'      # стенд-журнал входящих решений
+DECISIONS_AUDIT = OUT_DIR / 'decisions_audit.parquet'  # §9.2: применённые решения для обучения
+OPERATING_HISTORY = OUT_DIR / 'operating.history.json'  # §9.3: старые версии настроек
 RETRAIN_LOG = OUT_DIR / 'retrain.json'
 OBS_LOG = OUT_DIR / 'observe.json'
 

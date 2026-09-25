@@ -32,14 +32,21 @@ def to_hour(ts) -> int:
     return int((t - ft.T0).total_seconds() // 3600)
 
 
-def apply(rules, rows: list[dict]) -> int:
+def apply(rules, rows: list[dict], audit_path=None) -> int:
     """Применить решения диспетчера к состоянию правил; возврат — число применённых.
 
     Строки без object_id/type/action/времени или с неизвестным действием пропускаются:
     неизвестное действие логируем в правила как есть, если оно в VALID_ACTIONS. Шум топика —
     это проблема шины, а не аварийная остановка такта.
+
+    audit_path (необязателен, чтобы тесты оставались без побочных файлов) — parquet §9.2: пары
+    «прогноз — решение — происшествие» складываются в таблицу, которую читает обучение (M9).
+    Хранится сторона решения: час h (тот же индекс, что у оценок), пара и мета решения. Оценку
+    прогноза и сбывшееся происшествие обучение подтягивает по (object_id, type, h) из истории —
+    там же, где считает пары для отчёта «отклонили-и-случилось» (INTEGRATION §9.2).
     """
     n = 0
+    entries = []
     for d in rows:
         try:
             oid, tp, action = int(d['object_id']), str(d['type']), str(d['action'])
@@ -52,4 +59,22 @@ def apply(rules, rows: list[dict]) -> int:
         rules.on_decision(oid, tp, action, to_hour(ts),
                           mute_hours=int(mute) if mute is not None else None)
         n += 1
+        entries.append({'h': to_hour(ts), 'object_id': oid, 'type': tp, 'action': action,
+                        'reason_code': d.get('reason_code'), 'user_id': d.get('user_id'),
+                        'decided_at': ts, 'task_id': d.get('task_id'),
+                        'mute_hours': int(mute) if mute is not None else None})
+    if audit_path and entries:
+        _append_audit(audit_path, entries)
     return n
+
+
+def _append_audit(path, rows: list[dict]) -> None:
+    import polars as pl
+    df = (pl.DataFrame(rows)
+          .with_columns([pl.col('h').cast(pl.Int64),
+                         pl.col('object_id').cast(pl.Int64),
+                         pl.col('mute_hours').cast(pl.Int64)]))
+    if path.exists():
+        df = pl.concat([pl.read_parquet(path), df])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.write_parquet(path)
