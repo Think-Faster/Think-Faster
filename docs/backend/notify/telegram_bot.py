@@ -28,8 +28,13 @@ def client(settings: Settings) -> httpx.Client:
     return httpx.Client(base_url=f'{settings.telegram_api_url}/bot{token}', timeout=settings.telegram_timeout)
 
 
-def send(settings: Settings, chats: list[int | str], subject: str, text: str) -> tuple[list[str], dict[str, str]]:
-    """Шлёт сообщение в каждый чат по очереди. Возвращает, куда ушло и куда нет с причиной."""
+def send(settings: Settings, chats: list[int | str], subject: str, text: str,
+         later: list[str] | None = None) -> tuple[list[str], dict[str, str]]:
+    """Шлёт сообщение в каждый чат по очереди. Возвращает, куда ушло и куда нет с причиной.
+
+    `later` — если передан, сюда же попадают чаты, которым не ушло по временной причине (сеть,
+    частота, сбой у Telegram): их стоит повторить позже (очередь, rabbit.py).
+    """
     payload = {'text': render(subject, text), 'parse_mode': 'HTML', 'link_preview_options': {'is_disabled': True}}
     sent: list[str] = []
     failed: dict[str, str] = {}
@@ -44,6 +49,8 @@ def send(settings: Settings, chats: list[int | str], subject: str, text: str) ->
                 else:
                     status, reason = 503, f'Telegram недоступен: {scrub(e, settings)}'
                 failed.update({str(c): reason for c in chats[i:]})
+                if later is not None:
+                    later.extend(str(c) for c in chats[i:])
                 if not sent:
                     raise TelegramError(status, reason, failed) from None
                 break
@@ -51,6 +58,8 @@ def send(settings: Settings, chats: list[int | str], subject: str, text: str) ->
                 sent.append(str(chat))
             else:
                 failed[str(chat)] = explain(reply)
+                if later is not None and (reply.get('error_code') or 0) in (429, 500, 502, 503, 504):
+                    later.append(str(chat))
     return sent, failed
 
 

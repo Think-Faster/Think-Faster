@@ -115,13 +115,14 @@ class Verifier:
 
     def __init__(self, public_key: str | bytes | None = None, jwks_url: str | None = None,
                  audience: str | None = 'api', issuers=('auth-service', 'tf-auth'),
-                 service_subs=(), key_ttl: float = 3600.0):
+                 service_subs=(), key_ttl: float = 3600.0, algorithms=('RS256',)):
         self._pem = public_key.encode() if isinstance(public_key, str) else public_key
         self.jwks_url = jwks_url
         self.audience = audience
         self.issuers = tuple(issuers)
         self.service_subs = set(service_subs)
         self.key_ttl = key_ttl
+        self.algorithms = list(algorithms)
         self._key, self._key_at = None, 0.0
 
     def _load_key(self):
@@ -149,7 +150,7 @@ class Verifier:
         """Claims проверенного токена доступа; иначе TokenError с кодом 401 или 403."""
         import jwt
         try:
-            claims = jwt.decode(token, self.key(), algorithms=['RS256'], audience=self.audience,
+            claims = jwt.decode(token, self.key(), algorithms=self.algorithms, audience=self.audience,
                                 options={'require': ['exp', 'sub'], 'verify_aud': self.audience is not None})
         except jwt.ExpiredSignatureError:
             raise TokenError(401, 'срок токена истёк', audit=False) from None

@@ -836,7 +836,7 @@ compose с тем же составом, что в `think-infra`), и тольк
 |---|---|---|
 | модель | 30 файлов в `work/export`, версии оборудования 1–4 (§9.4), газ на разметке r62 | ML |
 | сервис модели `ML/service` | из ветки `ml` 5492264 влит в main (6d190c2), доведён по 13.1–13.6 (870644c): 91 тест проходит | Захар → ML |
-| уведомления `docs/backend/notify` | FastAPI, `/mail`, `/telegram`, `/telegram/chats`; RS256/ES256, scope `notify.send`; без ключа принимает запросы без токена; RabbitMQ нет | Александр |
+| уведомления `docs/backend/notify` | FastAPI, `/mail`, `/telegram`, `/telegram/chats`; токен через tfkit (оба варианта полей, техучётка по `service_subs`), без ключа — только dev; очереди `tf.notify.email` и `tf.notify.telegram`; секреты из Vault; события в аудит; Dockerfile (13.7) | Александр |
 | Kafka, RabbitMQ, Redis, Vault, PostgreSQL, nginx | развёрнуты, §4 | Гриша |
 | аутентификация | RS256, токены выпускает, состав полей не совпадает с концептом (12.2, Н10) | Гриша |
 | BFF | пользователи, группы и права; RabbitMQ и Kafka в коде нет | Гриша |
@@ -864,7 +864,7 @@ compose с тем же составом, что в `think-infra`), и тольк
 | Н12 | PostgreSQL в сети `app-network`, остальные контейнеры — в `think-fast-net`; схем `ml` и `audit` нет | `think-infra/postgree` | Гриша |
 | Н13 | Vault в dev-режиме: секреты в памяти, после перезапуска пусто; порт 8200 открыт на хост | `think-infra/hashicorp` | Гриша |
 | Н14 | в nginx нет `/api/ml`, `/api/dispatch`, `/api/funnel` и `X-Request-ID` (права-и-аудит §6.5) | `think-infra/web-server` | Гриша |
-| Н15 | notify без `JWT_PUBLIC_KEY` принимает запросы без токена; в контуре это открытая рассылка | `docs/backend/notify` | Александр: без ключа — только при `TF_ENV=dev` |
+| Н15 | notify без `JWT_PUBLIC_KEY` принимает запросы без токена; в контуре это открытая рассылка | `docs/backend/notify` | исправлено: без ключа — только при `TF_ENV=dev`, иначе ключ с JWKS аутентификации |
 | Н16 | аудита нет, а чекпойнт Ф4 (вечер 26.09) требует действий в аудите | Ф4-3 | Гриша; мы пишем события своих сервисов и готовый блок записи по §6 (этап 3) |
 | Н17 | `tasks/plan.md` не берёт Kafka и MLflow, а Kafka, RabbitMQ и Vault уже развёрнуты | план | сообщить, §6 |
 | Н18 | для ТЗ §14 нужна полная сопроводительная документация, а прежнее правило — «без доп. файлов документации» | правило команды | сообщить: документация — один файл (этап 7) |
@@ -991,8 +991,9 @@ compose с тем же составом, что в `think-infra`), и тольк
 `access`. Тип читается из поля `typ` или `token_type`: пока токены не приведены к концепту (Н10),
 принимаются оба. Для техучётки нужен `scope` с требуемым правом; пока `think-auth` не кладёт
 `scope`, техучётка опознаётся по `sub` из списка в Vault (`secret/tf/model`, поле `service_subs`).
-Любой отказ — `401` или `403` и событие `token.refused` или `access.denied` в аудит. В событии
-только `jti`, самого токена нет.
+Любой отказ — `401` или `403` и событие `token.refused` или `access.denied` в аудит; протухший токен
+— `401` без события (Н29). В событии только `jti`, самого токена нет. Список техучёток без `scope` у
+каждого сервиса свой: `secret/tf/model`, `secret/tf/notify`, `secret/tf/audit`, поле `service_subs`.
 
 ### 13.3 Команды в `tf.model.commands`
 
@@ -1085,7 +1086,7 @@ compose с тем же составом, что в `think-infra`), и тольк
 | `secret/tf/kafka` | `model_password` | tf-model |
 | `secret/tf/rabbit` | `model_password`, `email_password`, `telegram_password` | tf-model, notify |
 | `secret/tf/auth` | `public_key` | tf-model, notify, audit |
-| `secret/tf/notify` | `smtp_user`, `smtp_password`, `telegram_bot_token` | notify |
+| `secret/tf/notify` | `smtp_user`, `smtp_password`, `telegram_bot_token`, `service_subs` | notify |
 | `secret/tf/model` | `service_subs` | tf-model |
 | `secret/tf/audit` | `db_password` (роль `audit_writer`), `service_subs` | audit |
 
@@ -1162,6 +1163,30 @@ export_check (обучение 2022–2025, тест 2026) она даёт то�
 при неверном адресате и неразборчивом сообщении `reject`, и тогда сообщение уходит в DLQ.
 `notice_id` защищает от двойной отправки при повторе: отправленные хранятся сутки в Redis. Без
 ключа проверки токена сервис стартует только при `TF_ENV=dev` (Н15).
+
+Как сделано (`rabbit.py`, 26.09):
+
+- Каждую очередь читает своя учётка брокера — `tf-notify-email` и `tf-notify-telegram`, пароли в
+  `secret/tf/rabbit`. Какие очереди читает экземпляр — `NOTIFY_CHANNELS` (по умолчанию обе), так
+  почту и Telegram можно развести по двум контейнерам. Очередь канала, которому нечем отправлять
+  (нет SMTP или токена бота в Vault), не читается: сообщения ждут в ней сутки, а не уходят в DLQ.
+- `prefetch 1`. Повтор — `nack` с паузой 5, 15, 30, 60 с; пятая доставка (`x-delivery-count`
+  кворумной очереди, как `delivery-limit` в think-infra) — `reject` и `notify.failed`.
+- Постоянный отказ — это сообщение не разобрать (не JSON, `notice_id` не uuid, пустые тема или
+  адреса, текст длиннее предела Telegram) или его не принял ни один адресат. Отказ части адресатов —
+  `ack` и `notify.sent` с числом отказов.
+- Отправленное помнится по адресату: повтор после обрыва на середине шлёт только тем, кому не ушло.
+  Ключ Redis — `notify:sent:<notice_id>:<канал>`, лёг Redis — помнит процесс.
+- Письмо уходит пачками по `MAX_RECIPIENTS` адресатов: Gmail больше 100 в одном письме не принимает.
+  Лёг сервер на середине — остальные пачки ждут повтора.
+- В журнал — канал, `notice_id`, вид, тема, число адресатов, отправлено, отказов, попытка и причина:
+  код SMTP без адреса. Ручки пишут те же события с `via: http`, заявка — необязательное поле
+  `ticket_id` запроса.
+
+Образ: `docker build -f docs/backend/notify/Dockerfile -t tf-notify docs/backend`. Файла `.env` в
+образе нет (`TF_NOTIFY_ENV_FILE=`), процесс не от root, проверка жизни — `/health`, где видно, какие
+очереди читаются. Окружение: `TF_RABBIT_URL` (без пароля), `TF_REDIS_URL`, `TF_AUTH_JWKS`, `VAULT_ADDR`
+и `VAULT_TOKEN_FILE`. Тесты — `docs/backend/notify/test_notify.py`, без сети.
 
 **Уведомление по факту.** Канал M8 публикует в `tf.forecast.results` сообщение с `kind: fact`. BFF
 по нему создаёт заявку и публикует уведомление в `tf.notifications`. Модель адресатов не знает, в

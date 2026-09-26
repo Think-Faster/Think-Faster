@@ -12,53 +12,81 @@ r"""Сервис уведомлений о происшествиях: пись�
 
 Настройки — в файле .env рядом с этим файлом, git его не видит:
 
+    TF_ENV=dev
     SMTP_USER=адрес@gmail.com
     SMTP_PASSWORD=пароль приложения Google, 16 букв
     TELEGRAM_BOT_TOKEN=токен от @BotFather
     JWT_PUBLIC_KEY=публичный ключ или сертификат сервиса аутентификации, PEM
 
-Без JWT_PUBLIC_KEY сервис принимает запросы без токена — так удобно проверять
-руками. С ключом нужен токен техучётки со scope notify.send в заголовке
-Authorization: Bearer. Остальные настройки — в config.py.
+Без ключа проверки токенов сервис принимает запросы без токена только при TF_ENV=dev — так удобно
+проверять руками. Иначе нужен токен техучётки со scope notify.send в заголовке Authorization: Bearer;
+ключ — из Vault secret/tf/auth, файла JWT_PUBLIC_KEY или с JWKS аутентификации. Остальные
+настройки — в config.py.
+
+В контуре (ML/INTEGRATION.md §13.7) сервис ещё читает очереди RabbitMQ tf.notify.email и
+tf.notify.telegram (rabbit.py), секреты берёт только из Vault, а отправки и отказы пишет в журнал
+аудита: notify.sent, notify.failed, token.refused, access.denied — без текста и адресов.
 """
 import logging
-from pathlib import Path
+import threading
+from contextlib import asynccontextmanager
 from typing import Literal
 
-import jwt
-from cryptography import x509
-from cryptography.hazmat.primitives import serialization
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
+import config
 import mailer
+import rabbit
 import telegram_bot
-from config import Settings
+import tfkit
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s: %(message)s')
 logging.getLogger('httpx').setLevel(logging.WARNING)  # httpx пишет в лог адрес запроса, а в нём токен бота
+logging.getLogger('pika').setLevel(logging.WARNING)
 log = logging.getLogger('notify')
 
 
-def load_public_key(path: Path):
-    pem = path.read_bytes()
-    if b'BEGIN CERTIFICATE' in pem:
-        return x509.load_pem_x509_certificate(pem).public_key()
-    return serialization.load_pem_public_key(pem)
+def make_verifier(settings: config.Settings) -> tfkit.Verifier | None:
+    """Ключ — из Vault или файла, иначе с JWKS аутентификации. Без ключа ручки открыты только в dev.
+    Поля токена принимаются в обоих вариантах, техучётка без scope — по списку service_subs (§13.2)."""
+    pem = config.public_key(settings)
+    jwks = settings.tf_auth_jwks or None
+    if pem is None and jwks is None:
+        if settings.tf_env == 'dev':
+            log.warning('dev: ключа проверки токенов нет — ручки открыты без токена')
+            return None
+        jwks = 'http://tf-auth:8080/.well-known/jwks'
+    return tfkit.Verifier(public_key=pem, jwks_url=None if pem else jwks,
+                          issuers=(settings.jwt_issuer,) if settings.jwt_issuer else ('auth-service', 'tf-auth'),
+                          service_subs=[s.strip() for s in settings.service_subs.split(',') if s.strip()],
+                          algorithms=settings.jwt_algorithms)
 
 
-settings = Settings()
-public_key = load_public_key(settings.jwt_public_key) if settings.jwt_public_key else None
+settings = config.load()
+verifier = make_verifier(settings)
+audit = tfkit.Audit('notify', redis_url=settings.redis() or '', spool=settings.tf_audit_spool)
+consumers: list[threading.Thread] = []
 
-app = FastAPI(title='Think Faster — уведомления', version='0.1.0')
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    stop = threading.Event()
+    consumers[:] = rabbit.start(settings, audit, stop)
+    yield
+    stop.set()
+
+
+app = FastAPI(title='Think Faster — уведомления', version='0.2.0', lifespan=lifespan)
 bearer = HTTPBearer(auto_error=False)
 
 
 class Notice(BaseModel):
     subject: str = Field(min_length=1, max_length=255, examples=['Тревога: газовый датчик, ДУ объект Альфа'])
     text: str = Field(min_length=1, max_length=20000, examples=['Канал 196771 «Газовая охрана». Заявка 1042.'])
+    ticket_id: int | None = Field(default=None, examples=[1042])  # заявка — для журнала аудита
 
     @field_validator('subject')
     @classmethod
@@ -86,22 +114,48 @@ class Failure(Result):
     detail: str
 
 
-def check_token(credentials: HTTPAuthorizationCredentials | None = Depends(bearer)) -> dict | None:
-    if public_key is None:
+def refuse(event: str, status: int, reason: str, request: Request, claims: dict | None = None, jti=None):
+    """Отказ в журнал и ответ. 401 — исполнитель неизвестен, 403 — его `sub`. Из токена — только `jti`."""
+    claims = claims or {}
+    try:
+        audit.event(event, 'denied', actor_kind=verifier.kind(claims) if claims else 'anonymous',
+                    actor_id=claims.get('sub'), request_id=request.headers.get('x-request-id'),
+                    ip=request.client.host if request.client else None, object_type='route',
+                    object_id=request.url.path, details={'reason': reason, 'jti': claims.get('jti', jti)})
+    except Exception:
+        log.exception('аудит %s не записан', event)
+    raise HTTPException(status, reason, headers={'WWW-Authenticate': 'Bearer'} if status == 401 else None)
+
+
+def check_token(request: Request,
+                credentials: HTTPAuthorizationCredentials | None = Depends(bearer)) -> dict | None:
+    if verifier is None:
         return None
     if credentials is None:
-        raise HTTPException(401, 'нужен токен техучётки: Authorization: Bearer <токен>',
-                            headers={'WWW-Authenticate': 'Bearer'})
+        refuse('token.refused', 401, 'нужен токен техучётки: Authorization: Bearer <токен>', request)
     try:
-        claims = jwt.decode(credentials.credentials, public_key, algorithms=settings.jwt_algorithms,
-                            issuer=settings.jwt_issuer or None, options={'require': ['exp', 'sub']})
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(401, 'токен истёк', headers={'WWW-Authenticate': 'Bearer'}) from None
-    except jwt.InvalidTokenError:
-        raise HTTPException(401, 'токен не прошёл проверку', headers={'WWW-Authenticate': 'Bearer'}) from None
-    if settings.jwt_scope not in str(claims.get('scope', '')).split():
-        raise HTTPException(403, f'у учётки нет права {settings.jwt_scope}')
+        claims = verifier.verify(credentials.credentials)
+    except tfkit.TokenError as e:
+        if not e.audit:           # токен протух или ключа нет у нас самих — не событие вызывающего
+            raise HTTPException(e.status, e.reason,
+                                headers={'WWW-Authenticate': 'Bearer'} if e.status == 401 else None) from None
+        refuse('token.refused', e.status, e.reason, request, jti=e.jti)
+    if not verifier.has_scope(claims, settings.jwt_scope):
+        refuse('access.denied', 403, f'у учётки нет права {settings.jwt_scope}', request, claims)
     return claims
+
+
+def journal(event: str, channel: str, notice: Notice, request: Request, caller: dict | None, **details):
+    """notify.sent / notify.failed: канал, число адресатов, тема, заявка, причина. Текста и адресов нет."""
+    try:
+        audit.event(event, 'success' if event == 'notify.sent' else 'error',
+                    actor_kind=verifier.kind(caller) if caller else 'anonymous',
+                    actor_id=(caller or {}).get('sub'), request_id=request.headers.get('x-request-id'),
+                    object_type='ticket' if notice.ticket_id is not None else None, object_id=notice.ticket_id,
+                    details={'channel': channel, 'via': 'http', 'subject': notice.subject,
+                             'recipients': len(notice.to), **details})
+    except Exception:
+        log.exception('аудит %s не записан', event)
 
 
 def recipients(to: list) -> list:
@@ -126,32 +180,37 @@ def failure(channel: str, error: mailer.MailError | telegram_bot.TelegramError) 
 def health() -> dict:
     return {
         'status': 'ok',
+        'env': settings.tf_env,
         'mail': bool(settings.mail_from or settings.smtp_user),
         'telegram': bool(settings.telegram_bot_token.get_secret_value()),
-        'token_check': public_key is not None,
+        'token_check': verifier is not None,
+        'queues': [t.name.removeprefix('rabbit-') for t in consumers if t.is_alive()],
     }
 
 
 @app.post('/mail', response_model=Result, responses={422: {'model': Failure}, 502: {'model': Failure},
                                                       503: {'model': Failure}})
-def send_mail(notice: MailNotice, caller: dict | None = Depends(check_token)):
+def send_mail(notice: MailNotice, request: Request, caller: dict | None = Depends(check_token)):
     """Одно письмо всем адресатам. `sent` — кого принял почтовый сервер."""
     to = recipients([str(address) for address in notice.to])
     if not (settings.mail_from or settings.smtp_user):
+        journal('notify.failed', 'email', notice, request, caller, sent=0, reason='не задан SMTP_USER')
         return failure('mail', mailer.MailError(503, 'не задан SMTP_USER'))
     try:
         refused = mailer.send(settings, to, notice.subject, notice.text)
     except mailer.MailError as e:
         log.warning('почта от %s, тема «%s»: %s', who(caller), notice.subject, e.message)
+        journal('notify.failed', 'email', notice, request, caller, sent=0, reason=f'{e.status}')
         return failure('mail', e)
     sent = [address for address in to if address not in refused]
     log.info('почта от %s, тема «%s»: принято %d, отказ %d', who(caller), notice.subject, len(sent), len(refused))
+    journal('notify.sent', 'email', notice, request, caller, sent=len(sent), failed=len(refused))
     return Result(channel='mail', sent=sent, failed=refused)
 
 
 @app.post('/telegram', response_model=Result, responses={422: {'model': Failure}, 502: {'model': Failure},
                                                           503: {'model': Failure}})
-def send_telegram(notice: TelegramNotice, caller: dict | None = Depends(check_token)):
+def send_telegram(notice: TelegramNotice, request: Request, caller: dict | None = Depends(check_token)):
     """Сообщение от бота в каждый чат: тема жирным, под ней текст."""
     to = recipients(notice.to)
     if len(telegram_bot.render(notice.subject, notice.text)) > telegram_bot.LIMIT:
@@ -160,10 +219,14 @@ def send_telegram(notice: TelegramNotice, caller: dict | None = Depends(check_to
         sent, failed = telegram_bot.send(settings, to, notice.subject, notice.text)
     except telegram_bot.TelegramError as e:
         log.warning('telegram от %s, тема «%s»: %s', who(caller), notice.subject, e.message)
+        journal('notify.failed', 'telegram', notice, request, caller, sent=0, reason=f'{e.status}')
         return failure('telegram', e)
     log.info('telegram от %s, тема «%s»: доставлено %d, отказ %d', who(caller), notice.subject, len(sent), len(failed))
     if not sent:
+        journal('notify.failed', 'telegram', notice, request, caller, sent=0, failed=len(failed),
+                reason='ни в один чат не доставлено')
         return failure('telegram', telegram_bot.TelegramError(422, 'ни в один чат не доставлено', failed))
+    journal('notify.sent', 'telegram', notice, request, caller, sent=len(sent), failed=len(failed))
     return Result(channel='telegram', sent=sent, failed=failed)
 
 
