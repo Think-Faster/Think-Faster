@@ -25,7 +25,7 @@ def token(**over):
 
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch):
-    for v in ('TF_ENV', 'VAULT_ADDR', 'VAULT_TOKEN', 'VAULT_TOKEN_FILE', 'TF_REDIS_URL', 'X_PASS'):
+    for v in ('TF_ENV', 'VAULT_ADDR', 'VAULT_TOKEN', 'VAULT_TOKEN_FILE', 'TF_REDIS_URL', 'X_PASS', 'TF_VAULT_WAIT'):
         monkeypatch.delenv(v, raising=False)
     tfkit._cache.clear()
 
@@ -93,6 +93,44 @@ def test_vault_token_file(vault, monkeypatch, tmp_path):
     (tmp_path / 'tok').write_text('t0\n', encoding='utf-8')
     monkeypatch.setenv('VAULT_TOKEN_FILE', str(tmp_path / 'tok'))
     assert tfkit.secret('kafka', 'model_password') == 'p1'
+
+
+def test_sealed_vault_waits_then_reads(monkeypatch):
+    calls = []
+
+    class H(BaseHTTPRequestHandler):
+        def do_GET(self):
+            calls.append(self.path)
+            if len(calls) < 3:                                 # запечатан: 503, пока не распечатают
+                self.send_response(503)
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(json.dumps({'data': {'data': {'x': 'v'}}}).encode())
+
+        def log_message(self, *a):
+            pass
+
+    srv = HTTPServer(('127.0.0.1', 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    monkeypatch.setenv('VAULT_ADDR', f'http://127.0.0.1:{srv.server_port}')
+    monkeypatch.setenv('VAULT_TOKEN', 't0')
+    monkeypatch.setattr(tfkit, 'VAULT_RETRY', 0.01)
+    with pytest.raises(tfkit.SecretError, match='503'):       # без TF_VAULT_WAIT — сразу ошибка
+        tfkit.secret('model', 'x')
+    monkeypatch.setenv('TF_VAULT_WAIT', '5')
+    assert tfkit.secret('model', 'x') == 'v' and len(calls) == 3
+    srv.shutdown()
+
+
+def test_vault_forbidden_is_not_waited(vault, monkeypatch):
+    monkeypatch.setenv('VAULT_TOKEN', 't-other')
+    monkeypatch.setenv('TF_VAULT_WAIT', '30')
+    t = time.monotonic()
+    with pytest.raises(tfkit.SecretError, match='403'):
+        tfkit.secret('kafka', 'model_password')
+    assert time.monotonic() - t < 2
 
 
 def test_verify_think_auth_token():

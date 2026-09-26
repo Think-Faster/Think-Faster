@@ -51,8 +51,15 @@ def _vault_token() -> str | None:
     return None
 
 
+VAULT_RETRY = 5.0          # пауза между попытками, пока Vault запечатан или не поднялся
+
+
 def vault_read(path: str, timeout: float = 5.0) -> dict:
-    """Все поля `secret/tf/<path>` (KV v2). Кэш на время жизни процесса: секреты читаются при старте."""
+    """Все поля `secret/tf/<path>` (KV v2). Кэш на время жизни процесса: секреты читаются при старте.
+
+    Vault Гриши после каждого перезапуска запечатан и отвечает 503, пока его не распечатают ключами
+    (think-infra/hashicorp/README.md). Чтобы сервис не падал по кругу, `TF_VAULT_WAIT` секунд он ждёт
+    распечатывания (или подъёма Vault) и пишет об этом в лог; 403 и 404 — сразу ошибка."""
     with _lock:
         if path in _cache:
             return _cache[path]
@@ -61,14 +68,25 @@ def vault_read(path: str, timeout: float = 5.0) -> dict:
         raise SecretError(f'Vault не настроен (VAULT_ADDR и VAULT_TOKEN), нужен secret/tf/{path}')
     req = urllib.request.Request(f'{addr.rstrip("/")}/v1/secret/data/tf/{path}',
                                  headers={'X-Vault-Token': tok})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            data = json.loads(r.read())['data']['data']
-    except urllib.error.HTTPError as e:
-        raise SecretError(f'Vault ответил {e.code} на secret/tf/{path}') from None
-    except (urllib.error.URLError, OSError, KeyError, ValueError) as e:
-        raise SecretError(f'Vault недоступен или ответ не KV v2 для secret/tf/{path}: '
-                          f'{type(e).__name__}') from None
+    deadline = time.monotonic() + float(os.environ.get('TF_VAULT_WAIT') or 0)
+    said = None
+    while True:
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                data = json.loads(r.read())['data']['data']
+            break
+        except urllib.error.HTTPError as e:
+            problem, again = f'Vault ответил {e.code} на secret/tf/{path}', e.code in (502, 503, 504)
+        except (urllib.error.URLError, OSError) as e:
+            problem, again = (f'Vault недоступен для secret/tf/{path}: {type(e).__name__}', True)
+        except (KeyError, ValueError) as e:
+            raise SecretError(f'ответ Vault не KV v2 для secret/tf/{path}: {type(e).__name__}') from None
+        if not again or time.monotonic() >= deadline:
+            raise SecretError(problem)
+        if said is None or time.monotonic() - said >= 60:
+            log.warning('%s; жду распечатывания Vault', problem)
+            said = time.monotonic()
+        time.sleep(VAULT_RETRY)
     with _lock:
         _cache[path] = data
     return data

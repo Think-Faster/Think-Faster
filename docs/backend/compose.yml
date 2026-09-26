@@ -18,6 +18,7 @@ x-env: &env
   TF_ENV: ${TF_ENV:-prod}
   VAULT_ADDR: ${TF_VAULT_ADDR:-http://host.docker.internal:8200}
   VAULT_TOKEN_FILE: /run/tf/vault-token
+  TF_VAULT_WAIT: ${TF_VAULT_WAIT:-900}   # Vault Гриши после перезапуска запечатан: ждать, а не падать
   TF_REDIS_URL: redis://tf-redis:6379/0
   TF_AUTH_JWKS: ${TF_AUTH_JWKS:-http://tf-auth:8080/.well-known/jwks}
 
