@@ -8797,4 +8797,4 @@ export_check (обучение 2022–2025, тест 2026), смесь зёре�
 
     python bundle.py <папка> --export <выгрузка> --work work_pa
     python bundle.py <папка> --check --export <выгрузка> --work work_pa --hot <горячий журнал>
-    TF_MODEL_BUNDLE=<папка> TF_KAFKA_BOOTSTRAP=off TF_RABBIT_URL=off TF_MODEL_SINK=file         python main.py --replay 2026-01-02T00:00 --days 2
+    TF_MODEL_BUNDLE=<папка> TF_KAFKA_BOOTSTRAP=off TF_RABBIT_URL=off TF_MODEL_SINK=file python main.py --replay 2026-01-02T00:00 --days 2
