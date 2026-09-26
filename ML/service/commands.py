@@ -73,11 +73,12 @@ class Consumer:
 
 
 def parameters(url: str = config.RABBIT_URL):
-    """Адрес — из TF_RABBIT_URL без пароля; пароль учётки tf-model — из Vault secret/tf/rabbit."""
+    """Адрес — из TF_RABBIT_URL без пароля; пароль учётки tf-model — из Vault secret/tf/rabbit/model."""
     import pika
     import tfkit
     params = pika.URLParameters(url)
-    password = tfkit.secret('rabbit', 'model_password', 'TF_RABBIT_PASSWORD', required=config.ENV != 'dev')
+    password = tfkit.secret('rabbit/model', 'TF_RABBIT_MODEL_PASSWORD', 'TF_RABBIT_MODEL_PASSWORD',
+                            required=config.ENV != 'dev')
     if password:
         params.credentials = pika.PlainCredentials(unquote(urlsplit(url).username or config.RABBIT_USER), password)
     params.heartbeat, params.blocked_connection_timeout = 60, 300

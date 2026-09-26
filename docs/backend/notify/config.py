@@ -1,9 +1,11 @@
 """Настройки сервиса: переменные окружения или файл .env рядом с кодом.
 
-В контуре (TF_ENV=prod) секреты — только из Vault: `secret/tf/notify` (smtp_user, smtp_password,
-telegram_bot_token, service_subs), `secret/tf/rabbit` (email_password, telegram_password),
-`secret/tf/auth` (public_key). Значения секретов из окружения и .env берутся только при TF_ENV=dev
-(ML/INTEGRATION.md §13.5).
+В контуре (TF_ENV=prod) секреты — только из Vault, по схеме think-infra: `secret/tf/app/tf-notify`
+(TF_NOTIFY_SMTP_USER, TF_NOTIFY_SMTP_PASSWORD, TF_NOTIFY_TELEGRAM_BOT_TOKEN, TF_NOTIFY_SERVICE_SUBS),
+`secret/tf/rabbit/email` и `rabbit/telegram` (TF_RABBIT_EMAIL_PASSWORD, TF_RABBIT_TELEGRAM_PASSWORD),
+`secret/tf/redis` (TF_REDIS_PASSWORD). Значения секретов из окружения и .env берутся только при TF_ENV=dev
+(ML/INTEGRATION.md §13.5). Открытый ключ think-auth — не секрет: TF_AUTH_PUBLIC_KEY, файл JWT_PUBLIC_KEY
+или JWKS.
 """
 import logging
 import os
@@ -59,7 +61,7 @@ class Settings(BaseSettings):
     tf_rabbit_url: str = ''
     notify_channels: str = 'email,telegram'  # какие очереди читает этот экземпляр
     notify_retries: int = 5  # как delivery-limit у очередей в think-infra
-    rabbit_password: SecretStr = SecretStr('')  # только dev; в prod — Vault secret/tf/rabbit
+    rabbit_password: SecretStr = SecretStr('')  # только dev; в prod — Vault secret/tf/rabbit/<канал>
     # кому уже ушло по notice_id — сутки в Redis; пусто — в dev в памяти, в prod redis://tf-redis:6379/0
     tf_redis_url: str = ''
     tf_audit_spool: Path | None = None  # файл досылки событий аудита, пока Redis лежит
@@ -88,14 +90,16 @@ class Settings(BaseSettings):
     def redis(self) -> str | None:
         if self.tf_redis_url == 'off' or (not self.tf_redis_url and self.tf_env == 'dev'):
             return None
-        return self.tf_redis_url or 'redis://tf-redis:6379/0'
+        return tfkit.redis_url(self.tf_redis_url or 'redis://tf-redis:6379/0')      # пароль — из Vault
 
     def channels(self) -> list[str]:
         return [c for c in (x.strip() for x in self.notify_channels.split(',')) if c in ('email', 'telegram')]
 
 
-SECRETS = (('notify', 'smtp_user'), ('notify', 'smtp_password'), ('notify', 'telegram_bot_token'),
-           ('notify', 'service_subs'))
+APP = 'app/tf-notify'
+SECRETS = ((APP, 'TF_NOTIFY_SMTP_USER', 'smtp_user'), (APP, 'TF_NOTIFY_SMTP_PASSWORD', 'smtp_password'),
+           (APP, 'TF_NOTIFY_TELEGRAM_BOT_TOKEN', 'telegram_bot_token'),
+           (APP, 'TF_NOTIFY_SERVICE_SUBS', 'service_subs'))            # путь, ключ в Vault, поле настроек
 
 
 def load(**over) -> Settings:
@@ -104,30 +108,31 @@ def load(**over) -> Settings:
     base = Settings(**over)
     os.environ.setdefault('TF_ENV', base.tf_env)        # TF_ENV из .env виден и tfkit
     vault = {}
-    for path, field in SECRETS:
-        value = tfkit.secret(path, field, required=False)
+    for path, key, field in SECRETS:
+        value = tfkit.secret(path, key, required=False)
         if value:
             vault[field] = value
         elif base.tf_env != 'dev':
             vault[field] = ''
             if field != 'service_subs':
-                log.warning('нет secret/tf/%s поля %s — канал без него не работает', path, field)
+                log.warning('нет secret/tf/%s поля %s — канал без него не работает', path, key)
     return Settings(**{**over, **vault}) if vault else base
 
 
 def rabbit_password(settings: Settings, channel: str) -> str | None:
-    field = f'{channel}_password'
-    value = tfkit.secret('rabbit', field, required=False)
+    path, key = f'rabbit/{channel}', f'TF_RABBIT_{channel.upper()}_PASSWORD'
+    value = tfkit.secret(path, key, required=False)
     if value:
         return value
     if settings.tf_env == 'dev' and settings.rabbit_password.get_secret_value():
         return settings.rabbit_password.get_secret_value()
-    raise tfkit.SecretError(f'нет secret/tf/rabbit поля {field}')
+    raise tfkit.SecretError(f'нет secret/tf/{path} поля {key}')
 
 
 def public_key(settings: Settings) -> bytes | None:
-    """Ключ проверки токенов: Vault secret/tf/auth, иначе файл JWT_PUBLIC_KEY (ключ не секрет)."""
-    pem = tfkit.secret('auth', 'public_key', required=False)
+    """Ключ проверки токенов: TF_AUTH_PUBLIC_KEY, иначе файл JWT_PUBLIC_KEY (ключ не секрет, в Vault
+    think-infra его нет)."""
+    pem = os.environ.get('TF_AUTH_PUBLIC_KEY')
     if pem:
         return pem.encode()
     return settings.jwt_public_key.read_bytes() if settings.jwt_public_key else None

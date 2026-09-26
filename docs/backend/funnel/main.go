@@ -46,7 +46,7 @@ func kafkaConf() (*KafkaConf, error) {
 	if bootstrap == "off" {
 		return nil, nil
 	}
-	password, err := Secret("kafka", "funnel_password", "TF_KAFKA_FUNNEL_PASSWORD", !IsDev())
+	password, err := Secret("kafka/funnel", "TF_KAFKA_FUNNEL_PASSWORD", "TF_KAFKA_FUNNEL_PASSWORD", !IsDev())
 	if err != nil {
 		return nil, err
 	}
@@ -68,13 +68,10 @@ func makeSink() (Sink, func(), error) {
 	return &KafkaSink{P: client, Timeout: 30 * time.Second}, client.Close, nil
 }
 
-// makeVerifier — ключ из secret/tf/auth, иначе по адресу TF_AUTH_JWKS (think-auth). nil — dev без ключа:
-// пакеты принимаются без токена.
+// makeVerifier — ключ из TF_AUTH_PUBLIC_KEY (открытый, в Vault его нет), иначе по адресу TF_AUTH_JWKS
+// (think-auth). nil — dev без ключа: пакеты принимаются без токена.
 func makeVerifier() (*Verifier, error) {
-	pemKey, err := Secret("auth", "public_key", "TF_AUTH_PUBLIC_KEY", false)
-	if err != nil {
-		return nil, err
-	}
+	pemKey := os.Getenv("TF_AUTH_PUBLIC_KEY")
 	keyURL := os.Getenv("TF_AUTH_JWKS")
 	if pemKey == "" && keyURL == "" {
 		if IsDev() {
@@ -83,7 +80,7 @@ func makeVerifier() (*Verifier, error) {
 		}
 		keyURL = "http://tf-auth:8080/.well-known/jwks"
 	}
-	subs, err := Secret("funnel", "service_subs", "TF_FUNNEL_SERVICE_SUBS", false)
+	subs, err := Secret("app/tf-funnel", "TF_FUNNEL_SERVICE_SUBS", "TF_FUNNEL_SERVICE_SUBS", false)
 	if err != nil {
 		return nil, err
 	}

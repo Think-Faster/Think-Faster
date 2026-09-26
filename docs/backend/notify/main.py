@@ -20,7 +20,7 @@ r"""Сервис уведомлений о происшествиях: пись�
 
 Без ключа проверки токенов сервис принимает запросы без токена только при TF_ENV=dev — так удобно
 проверять руками. Иначе нужен токен техучётки со scope notify.send в заголовке Authorization: Bearer;
-ключ — из Vault secret/tf/auth, файла JWT_PUBLIC_KEY или с JWKS аутентификации. Остальные
+ключ — из TF_AUTH_PUBLIC_KEY, файла JWT_PUBLIC_KEY или с JWKS аутентификации. Остальные
 настройки — в config.py.
 
 В контуре (ML/INTEGRATION.md §13.7) сервис ещё читает очереди RabbitMQ tf.notify.email и

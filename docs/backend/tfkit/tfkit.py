@@ -10,6 +10,12 @@
 Режим контура — переменная TF_ENV: `prod` (по умолчанию) или `dev`. В dev секрет, которого нет в
 Vault, берётся из переменной окружения. В prod — только из Vault, иначе SecretError с путём (без значения).
 
+Секреты лежат по схеме think-infra (secrets.conf, hashicorp/services.conf): `secret/tf/<путь>`, путь —
+учётка сервиса (`kafka/model`, `rabbit/email`, `postgres/audit`, `redis`) или его собственные секреты
+(`app/tf-model`); имя поля = имя переменной окружения (`TF_KAFKA_MODEL_PASSWORD`). В Vault сервис входит
+ролью AppRole (VAULT_ROLE_ID и VAULT_SECRET_ID, как docs/vault-entrypoint.sh think-infra) или готовым
+токеном (VAULT_TOKEN, VAULT_TOKEN_FILE — наш стенд).
+
 Воронка показаний написана на Go и держит то же самое в docs/backend/funnel/kit.go: при правке
 проверки токенов, аудита или чтения Vault здесь — поправить и там.
 """
@@ -21,6 +27,7 @@ import socket
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from datetime import datetime, timezone
@@ -44,16 +51,45 @@ class SecretError(RuntimeError):
 
 _cache: dict[str, dict] = {}
 _lock = threading.Lock()
+_login: dict[str, str] = {}         # токен, выданный по AppRole, на время жизни процесса
 
 
-def _vault_token() -> str | None:
+def _approle() -> tuple[str, str] | None:
+    role = os.environ.get('VAULT_ROLE_ID', '').strip()
+    sid = os.environ.get('VAULT_SECRET_ID', '').strip()
+    return (role, sid) if role and sid else None
+
+
+def _vault_configured() -> bool:
+    return bool(os.environ.get('VAULT_TOKEN') or os.environ.get('VAULT_TOKEN_FILE') or _approle())
+
+
+def _vault_token(addr: str, timeout: float) -> str | None:
+    """Готовый токен (VAULT_TOKEN, VAULT_TOKEN_FILE) или вход ролью AppRole. Ошибки входа — те же
+    HTTPError и URLError, что у чтения: запечатанный Vault ждётся так же."""
     tok = os.environ.get('VAULT_TOKEN')
     if tok:
         return tok.strip()
     path = os.environ.get('VAULT_TOKEN_FILE')
     if path and Path(path).exists():
         return Path(path).read_text(encoding='utf-8').strip()
-    return None
+    creds = _approle()
+    if creds is None:
+        return None
+    with _lock:
+        if 'token' in _login:
+            return _login['token']
+    body = json.dumps({'role_id': creds[0], 'secret_id': creds[1]}).encode()
+    req = urllib.request.Request(f'{addr.rstrip("/")}/v1/auth/approle/login', data=body,
+                                 headers={'Content-Type': 'application/json'})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            tok = json.loads(r.read())['auth']['client_token']
+    except (KeyError, ValueError) as e:
+        raise SecretError(f'ответ Vault на вход AppRole без токена: {type(e).__name__}') from None
+    with _lock:
+        _login['token'] = tok
+    return tok
 
 
 VAULT_RETRY = 5.0          # пауза между попытками, пока Vault запечатан или не поднялся
@@ -68,20 +104,31 @@ def vault_read(path: str, timeout: float = 5.0) -> dict:
     with _lock:
         if path in _cache:
             return _cache[path]
-    addr, tok = os.environ.get('VAULT_ADDR'), _vault_token()
-    if not addr or not tok:
-        raise SecretError(f'Vault не настроен (VAULT_ADDR и VAULT_TOKEN), нужен secret/tf/{path}')
-    req = urllib.request.Request(f'{addr.rstrip("/")}/v1/secret/data/tf/{path}',
-                                 headers={'X-Vault-Token': tok})
+    addr = os.environ.get('VAULT_ADDR')
+    if not addr or not _vault_configured():
+        raise SecretError('Vault не настроен (VAULT_ADDR и VAULT_ROLE_ID/VAULT_SECRET_ID или VAULT_TOKEN), '
+                          f'нужен secret/tf/{path}')
     deadline = time.monotonic() + float(os.environ.get('TF_VAULT_WAIT') or 0)
-    said = None
+    said, relogged = None, False
     while True:
+        stage = 'вход AppRole'
         try:
+            tok = _vault_token(addr, timeout)
+            if not tok:
+                raise SecretError(f'нет токена Vault (файл VAULT_TOKEN_FILE не найден), нужен secret/tf/{path}')
+            stage = f'secret/tf/{path}'
+            req = urllib.request.Request(f'{addr.rstrip("/")}/v1/secret/data/tf/{path}',
+                                         headers={'X-Vault-Token': tok})
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 data = json.loads(r.read())['data']['data']
             break
         except urllib.error.HTTPError as e:
-            problem, again = f'Vault ответил {e.code} на secret/tf/{path}', e.code in (502, 503, 504)
+            problem, again = f'Vault ответил {e.code} на {stage}', e.code in (502, 503, 504)
+            if e.code == 403 and stage != 'вход AppRole' and _login and not relogged:
+                # токен AppRole истёк: один раз войти заново, сразу
+                _login.clear()
+                relogged = True
+                continue
         except (urllib.error.URLError, OSError) as e:
             problem, again = (f'Vault недоступен для secret/tf/{path}: {type(e).__name__}', True)
         except (KeyError, ValueError) as e:
@@ -113,6 +160,19 @@ def secret(path: str, field: str, env_var: str | None = None, required: bool = T
     if required:
         raise SecretError(problem)
     return None
+
+
+def redis_url(url: str | None) -> str | None:
+    """Адрес Redis с паролем. Redis think-infra закрыт паролем (`secret/tf/redis`, поле TF_REDIS_PASSWORD).
+    Если в адресе пароля нет, он берётся из Vault (в dev — из переменной TF_REDIS_PASSWORD). Пароля нигде
+    нет — адрес как есть (наш стенд без пароля)."""
+    if not url or '@' in url.split('//', 1)[-1]:
+        return url
+    pw = secret('redis', 'TF_REDIS_PASSWORD', 'TF_REDIS_PASSWORD', required=False)
+    if not pw:
+        return url
+    scheme, rest = url.split('//', 1)
+    return f'{scheme}//:{urllib.parse.quote(pw, safe="")}@{rest}'
 
 
 # ----- токены ----------------------------------------------------------------------------------
@@ -223,7 +283,7 @@ class Audit:
     def _redis(self):
         if self._r is None and self.redis_url:
             import redis
-            self._r = redis.Redis.from_url(self.redis_url, socket_timeout=2, socket_connect_timeout=2)
+            self._r = redis.Redis.from_url(redis_url(self.redis_url), socket_timeout=2, socket_connect_timeout=2)
         return self._r
 
     @staticmethod

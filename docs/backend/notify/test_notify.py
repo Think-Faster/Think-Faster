@@ -188,7 +188,8 @@ def test_prod_takes_secrets_only_from_vault(monkeypatch):
     monkeypatch.setenv('SMTP_USER', 'leak@example.com')
     assert config.load(tf_env='prod').smtp_user == ''
     assert config.load(tf_env='dev').smtp_user == 'leak@example.com'
-    vault = {('notify', 'smtp_user'): 'bot@example.com', ('notify', 'telegram_bot_token'): '1:v'}
+    vault = {('app/tf-notify', 'TF_NOTIFY_SMTP_USER'): 'bot@example.com',
+             ('app/tf-notify', 'TF_NOTIFY_TELEGRAM_BOT_TOKEN'): '1:v'}
     monkeypatch.setattr(config.tfkit, 'secret', lambda p, f, required=True: vault.get((p, f)))
     s = config.load(tf_env='prod')
     assert (s.smtp_user, s.telegram_bot_token.get_secret_value()) == ('bot@example.com', '1:v')

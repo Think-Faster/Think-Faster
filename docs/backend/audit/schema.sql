@@ -1,22 +1,29 @@
 -- Журнал аудита: docs/common/права-и-аудит.md §6.4 и §6.6, ML/INTEGRATION.md §13.4.
--- Прогоняет административная учётка (владелец схемы), один раз и повторно без вреда:
+-- Прогоняет владелец схемы, один раз и повторно без вреда. В контуре — audit_admin: схему audit,
+-- роли audit_admin и audit_user с паролями из Vault (secret/tf/postgres/audit) создаёт bootstrap
+-- think-infra по строке `audit` в postgree/db/schemas.conf:
 --
---   psql -v ON_ERROR_STOP=1 -f schema.sql
+--   psql -U audit_admin -d tf -v ON_ERROR_STOP=1 -f schema.sql
 --
--- Паролей здесь нет. Роль audit_writer создаётся без пароля, пароль ставит администратор из Vault
--- (secret/tf/audit, поле db_password). Переменные psql подставляются только во входном потоке, не в -c:
---   echo "alter role audit_writer password :'pw';" | psql -v pw="$(vault kv get -field=db_password secret/tf/audit)"
+-- Роль записи — переменная psql `writer`, по умолчанию audit_user (роль приложения think-infra).
+-- Если её нет (наш стенд), она создаётся без пароля — это может только роль с CREATEROLE; пароль
+-- ставится отдельно. Паролей здесь нет.
+--
+-- bootstrap think-infra выдаёт audit_user через audit_read_write ещё UPDATE и DELETE на все таблицы
+-- схемы. Правку и удаление строк журнала всё равно запрещают триггеры ниже (§6.6), права тут не опора.
 --
 -- Отличия от §6.4: у события есть event_id — повтор той же записи из потока (перезапуск сервиса
 -- аудита, досылка из файла tfkit) отбрасывается уникальным ключом, а не пишется второй раз.
 
+\if :{?writer}
+\else
+    \set writer audit_user
+\endif
+
 create schema if not exists audit;
 
-do $$ begin
-    if not exists (select from pg_roles where rolname = 'audit_writer') then
-        create role audit_writer login;
-    end if;
-end $$;
+select format('create role %I login', :'writer')
+where not exists (select from pg_roles where rolname = :'writer') \gexec
 
 create table if not exists audit.events (
     id          bigint generated always as identity,
@@ -129,7 +136,7 @@ create trigger requests_no_change before update or delete on audit.requests
 revoke all on schema audit from public;
 revoke all on all tables in schema audit from public;
 revoke all on function audit.ensure_partitions(int, int), audit.drop_old_requests(int), audit.forbid_change() from public;
-grant usage on schema audit to audit_writer;
-grant insert, select on audit.events, audit.requests to audit_writer;
-revoke update, delete, truncate on all tables in schema audit from audit_writer;
-grant execute on function audit.ensure_partitions(int, int) to audit_writer;
+grant usage on schema audit to :"writer";
+grant insert, select on audit.events, audit.requests to :"writer";
+revoke update, delete, truncate on all tables in schema audit from :"writer";
+grant execute on function audit.ensure_partitions(int, int) to :"writer";

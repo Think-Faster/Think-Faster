@@ -29,11 +29,12 @@ SCOPE = 'ml.read'
 
 
 def make_verifier():
-    """Ключ — из Vault (secret/tf/auth public_key), иначе с JWKS think-auth; техучётки без `scope` —
-    по списку `sub` из Vault (secret/tf/model service_subs), пока think-auth не кладёт `scope`."""
+    """Ключ — из TF_AUTH_PUBLIC_KEY (открытый, не секрет; в Vault think-infra его нет), иначе с JWKS
+    think-auth; техучётки без `scope` — по списку `sub` из Vault (secret/tf/app/tf-model
+    TF_MODEL_SERVICE_SUBS), пока think-auth не кладёт `scope`."""
     import tfkit
-    pem = tfkit.secret('auth', 'public_key', 'TF_AUTH_PUBLIC_KEY', required=False)
-    subs = tfkit.secret('model', 'service_subs', 'TF_MODEL_SERVICE_SUBS', required=False) or ''
+    pem = os.environ.get('TF_AUTH_PUBLIC_KEY') or None
+    subs = tfkit.secret('app/tf-model', 'TF_MODEL_SERVICE_SUBS', 'TF_MODEL_SERVICE_SUBS', required=False) or ''
     if pem is None and config.ENV == 'dev' and not os.environ.get('TF_AUTH_JWKS'):
         log.warning('dev: ключа проверки токенов нет — ручки открыты')
         return None

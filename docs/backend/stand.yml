@@ -1,11 +1,12 @@
 # Стенд у нас (ML/INTEGRATION.md §12.3, этап 6): инфраструктура — файлами think-infra без изменений
 # (Redis, RabbitMQ, Kafka с их пользователями, топиками и ACL), плюс то, чего в ней для стенда нет:
-# Vault на think-fast-net с секретами и токенами ролей, PostgreSQL со схемой аудита, эмулятор
+# Vault с секретами и ролями AppRole по схеме think-infra, PostgreSQL со схемой аудита, эмулятор
 # think-test. Пароли — тестовые, только в stand.env (не в git; образец — stand.env.example).
 #
 #   docker network create think-fast-net
 #   docker compose -f docs/backend/stand.yml --env-file docs/backend/stand.env up -d
-#   docker compose -f docs/backend/compose.yml --env-file docs/backend/stand.env up -d --build
+#   docker compose -f docs/backend/compose.yml --env-file docs/backend/stand.env \
+#     --env-file docs/backend/.vault/approle.env up -d --build
 #
 # Проверка цепочки: эмулятор → воронка (забирает сама, TF_FUNNEL_PULL) → tf.ingest.* → модель →
 # tf.forecast.results; /status воронки и модели, события — в audit.events.
@@ -13,6 +14,7 @@ name: tf-stand
 
 include:
   - path: ${TF_INFRA:?TF_INFRA — клон think-infra}/redis/docker-compose.yml
+    env_file: stand.env
   - path: ${TF_INFRA}/rabbitmq/docker-compose.yml
     env_file: stand.env
   - path: ${TF_INFRA}/kafka/docker-compose.yml
@@ -20,7 +22,7 @@ include:
 
 services:
 
-  # У Гриши Vault вне think-fast-net, порт 8200 на хосте (Н13); на стенде — в сети, адрес tf-vault.
+  # Dev-Vault; в сети под тем же именем, что у Гриши: vault:8200.
   tf-vault:
     container_name: tf-vault
     image: hashicorp/vault:1.20.0          # как в think-infra (hashicorp/docker-compose.yml)
@@ -28,15 +30,19 @@ services:
     environment:
       VAULT_DEV_ROOT_TOKEN_ID: ${TF_VAULT_ROOT_TOKEN:?TF_VAULT_ROOT_TOKEN is not set}
     cap_add: [IPC_LOCK]
-    networks: [think-fast-net]
+    networks:
+      think-fast-net:
+        aliases: [vault]
     healthcheck:
       test: ["CMD", "vault", "status", "-address=http://127.0.0.1:8200"]
       interval: 5s
       retries: 20
     restart: unless-stopped
 
-  # Одноразовый: секреты по §13.5 и по токену роли на сервис — читать только свои пути.
-  # Dev-Vault хранит всё в памяти: после перезапуска tf-vault — снова `up tf-vault-seed`.
+  # Одноразовый: секреты по схеме think-infra (§13.5) и роли AppRole tf-svc-<сервис>, как у
+  # hashicorp/scripts/setup.sh, — читать только свои пути. role_id и secret_id — в .vault/approle.env
+  # (env-файл для compose.yml). Dev-Vault хранит всё в памяти: после перезапуска tf-vault — снова
+  # `up tf-vault-seed`.
   tf-vault-seed:
     container_name: tf-vault-seed
     image: hashicorp/vault:1.20.0          # как в think-infra (hashicorp/docker-compose.yml)
@@ -51,8 +57,8 @@ services:
       RABBIT_MODEL: ${TF_RABBIT_MODEL_PASSWORD}
       RABBIT_EMAIL: ${TF_RABBIT_EMAIL_PASSWORD}
       RABBIT_TELEGRAM: ${TF_RABBIT_TELEGRAM_PASSWORD}
-      AUDIT_DB: ${TF_AUDIT_DB_PASSWORD:?TF_AUDIT_DB_PASSWORD is not set}
-      AUTH_PUBLIC_KEY: ${TF_STAND_AUTH_PUBLIC_KEY:-}
+      REDIS: ${TF_REDIS_PASSWORD:?TF_REDIS_PASSWORD is not set}
+      AUDIT_DB: ${TF_PG_AUDIT_USER_PASSWORD:?TF_PG_AUDIT_USER_PASSWORD is not set}
       SMTP_USER: ${TF_STAND_SMTP_USER:-}
       SMTP_PASSWORD: ${TF_STAND_SMTP_PASSWORD:-}
       TELEGRAM_BOT_TOKEN: ${TF_STAND_TELEGRAM_BOT_TOKEN:-}
@@ -71,30 +77,39 @@ services:
           for kv in "$$@"; do [ -n "$${kv#*=}" ] && args="$$args $$kv"; done
           if [ -n "$$args" ]; then vault kv put "secret/tf/$$p" $$args >/dev/null; echo "secret/tf/$$p"; fi
         }
-        put kafka model_password="$$KAFKA_MODEL" funnel_password="$$KAFKA_FUNNEL"
-        put rabbit model_password="$$RABBIT_MODEL" email_password="$$RABBIT_EMAIL" telegram_password="$$RABBIT_TELEGRAM"
-        put audit db_password="$$AUDIT_DB" service_subs="$$AUDIT_SUBS"
-        put model service_subs="$$MODEL_SUBS"
-        put funnel service_subs="$$FUNNEL_SUBS"
-        put notify smtp_user="$$SMTP_USER" smtp_password="$$SMTP_PASSWORD" telegram_bot_token="$$TELEGRAM_BOT_TOKEN" service_subs="$$NOTIFY_SUBS"
-        # ключ проверки токенов — многострочный PEM, пишется отдельно
-        if [ -n "$$AUTH_PUBLIC_KEY" ]; then vault kv put secret/tf/auth public_key="$$AUTH_PUBLIC_KEY" >/dev/null; echo secret/tf/auth; fi
-        # role <сервис> <путь>...: политика только на чтение своих путей и токен роли в файл
+        put kafka/model TF_KAFKA_MODEL_PASSWORD="$$KAFKA_MODEL"
+        put kafka/funnel TF_KAFKA_FUNNEL_PASSWORD="$$KAFKA_FUNNEL"
+        put rabbit/model TF_RABBIT_MODEL_PASSWORD="$$RABBIT_MODEL"
+        put rabbit/email TF_RABBIT_EMAIL_PASSWORD="$$RABBIT_EMAIL"
+        put rabbit/telegram TF_RABBIT_TELEGRAM_PASSWORD="$$RABBIT_TELEGRAM"
+        put redis TF_REDIS_PASSWORD="$$REDIS"
+        put postgres/audit TF_PG_AUDIT_USER_PASSWORD="$$AUDIT_DB"
+        put app/tf-model TF_MODEL_SERVICE_SUBS="$$MODEL_SUBS"
+        put app/tf-funnel TF_FUNNEL_SERVICE_SUBS="$$FUNNEL_SUBS"
+        put app/tf-audit TF_AUDIT_SERVICE_SUBS="$$AUDIT_SUBS"
+        put app/tf-notify TF_NOTIFY_SMTP_USER="$$SMTP_USER" TF_NOTIFY_SMTP_PASSWORD="$$SMTP_PASSWORD" \
+          TF_NOTIFY_TELEGRAM_BOT_TOKEN="$$TELEGRAM_BOT_TOKEN" TF_NOTIFY_SERVICE_SUBS="$$NOTIFY_SUBS"
+        # role <сервис> <имя в env> <путь>...: политика и AppRole tf-svc-<сервис>, как setup.sh think-infra
+        vault auth list | grep -q '^approle/' || vault auth enable approle >/dev/null
+        : > /tokens/approle.env
         role() {
-          s=$$1; shift
+          s=$$1; e=$$2; shift 2
           for p in "$$@"; do printf 'path "secret/data/tf/%s" {\n  capabilities = ["read"]\n}\n' "$$p"; done \
-            | vault policy write "tf-$$s" - >/dev/null
-          vault token create -policy="tf-$$s" -ttl=768h -display-name="tf-$$s" -field=token > "/tokens/$$s.token"
-          chmod 644 "/tokens/$$s.token"
-          echo "токен tf-$$s: $$*"
+            | vault policy write "tf-svc-$$s" - >/dev/null
+          vault write "auth/approle/role/tf-svc-$$s" token_policies="tf-svc-$$s" token_ttl=5m token_max_ttl=15m \
+            secret_id_ttl=0 secret_id_num_uses=0 >/dev/null
+          echo "TF_$${e}_VAULT_ROLE_ID=$$(vault read -field=role_id "auth/approle/role/tf-svc-$$s/role-id")" >> /tokens/approle.env
+          echo "TF_$${e}_VAULT_SECRET_ID=$$(vault write -f -field=secret_id "auth/approle/role/tf-svc-$$s/secret-id")" >> /tokens/approle.env
+          echo "роль tf-svc-$$s: $$*"
         }
-        role model kafka rabbit auth model
-        role funnel kafka auth funnel
-        role notify rabbit auth notify
-        role audit audit auth
+        role tf-model MODEL kafka/model rabbit/model redis app/tf-model
+        role tf-funnel FUNNEL kafka/funnel redis app/tf-funnel
+        role tf-notify NOTIFY rabbit/email rabbit/telegram redis app/tf-notify
+        role tf-audit AUDIT postgres/audit redis app/tf-audit
+        chmod 644 /tokens/approle.env
     restart: "no"
 
-  # У Гриши tf-postgres в app-network (Н12); на стенде — в think-fast-net, схема аудита сразу.
+  # У Гриши роли и схему создаёт bootstrap think-infra (postgree/db); на стенде — tf-audit-db-init.
   tf-postgres:
     container_name: tf-postgres
     image: postgres:16
@@ -111,7 +126,7 @@ services:
       retries: 20
     restart: unless-stopped
 
-  # Одноразовый: schema.sql (повторно без вреда) и пароль роли audit_writer — тот же, что в Vault.
+  # Одноразовый: schema.sql (повторно без вреда) и пароль роли audit_user — тот же, что в Vault.
   tf-audit-db-init:
     container_name: tf-audit-db-init
     image: postgres:16
@@ -123,14 +138,14 @@ services:
       PGUSER: tf
       PGDATABASE: tf
       PGPASSWORD: ${POSTGRES_PASSWORD}
-      AUDIT_DB: ${TF_AUDIT_DB_PASSWORD}
+      AUDIT_DB: ${TF_PG_AUDIT_USER_PASSWORD}
     volumes:
       - ./audit/schema.sql:/schema.sql:ro
     entrypoint: ["sh", "-euc"]
     command:
       - |
-        psql -q -v ON_ERROR_STOP=1 -f /schema.sql
-        echo "alter role audit_writer password :'pw';" | psql -q -v ON_ERROR_STOP=1 -v pw="$$AUDIT_DB"
+        psql -q -v ON_ERROR_STOP=1 -v writer=audit_user -f /schema.sql
+        echo "alter role audit_user password :'pw';" | psql -q -v ON_ERROR_STOP=1 -v pw="$$AUDIT_DB"
         echo "схема audit готова"
     restart: "no"
 

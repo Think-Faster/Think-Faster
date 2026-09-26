@@ -28,7 +28,7 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	for _, v := range []string{"VAULT_ADDR", "VAULT_TOKEN", "VAULT_TOKEN_FILE", "TF_REDIS_URL", "TF_AUTH_PUBLIC_KEY",
+	for _, v := range []string{"VAULT_ADDR", "VAULT_TOKEN", "VAULT_TOKEN_FILE", "VAULT_ROLE_ID", "VAULT_SECRET_ID", "TF_REDIS_URL", "TF_AUTH_PUBLIC_KEY",
 		"TF_AUTH_JWKS", "TF_FUNNEL_SERVICE_SUBS", "TF_KAFKA_FUNNEL_PASSWORD", "TF_FUNNEL_PULL", "TF_KAFKA_BOOTSTRAP"} {
 		os.Unsetenv(v)
 	}

@@ -314,11 +314,11 @@ Docker на машине), переноса на сервер — тоже (эт
 |---|---|---|
 | Kafka 4.0 (KRaft), один брокер | `think-infra/kafka` | топики `tf.ingest.readings` (6 партиций), `tf.ingest.journal` (3), `tf.ingest.reference` (compact), `tf.forecast.results` (3), `tf.dlq` |
 | права для модели | `think-infra/kafka/acls.conf` | пользователь `tf-model`: чтение `tf.ingest.*`, запись `tf.forecast.results` и `tf.dlq`, группы с префиксом `tf-model` |
-| пароль модели | `TF_KAFKA_MODEL_PASSWORD` в `.env`, копия в Vault (`secret/tf/kafka`) | в git не лежит |
+| пароль модели | `TF_KAFKA_MODEL_PASSWORD` в Vault (`secret/tf/kafka/model`) | в git не лежит |
 | PostgreSQL 16 | `think-infra/postgree` | схемы `auth` и `bff`; **схем `ml` и `audit` нет**; контейнер в сети `app-network`, остальные сервисы — в `think-fast-net` |
 | RabbitMQ 4.1, vhost `tf` | `think-infra/rabbitmq` (26.09) | `tf.model.commands` (topic, любой ключ) → очередь того же имени, TTL 1 ч; `tf.notifications` (direct, ключи `email`, `telegram`) → `tf.notify.email`, `tf.notify.telegram`, TTL 24 ч; `tf.dlx` → `tf.dlq`. Публикует только `tf-bff`, `tf-model` читает `tf.model.commands`. Права configure нет ни у кого: очереди объявляются пассивно |
 | Redis 7 | `think-infra/redis` | сохранение на диск (AOF); на нём поток аудита `audit` (права-и-аудит §6.5, вариант Б) |
-| Vault | `think-infra/hashicorp` | KV v2: `secret/tf/kafka`, `secret/tf/rabbit`. Запущен **в dev-режиме** (`server -dev`): хранит всё в памяти, после перезапуска секреты пропадают, порт 8200 открыт на хост |
+| Vault | `think-infra/hashicorp` | KV v2: `secret/tf/<учётка>` (`kafka/<сервис>`, `rabbit/<сервис>`, `postgres/<схема>`, `redis`) и `secret/tf/app/tf-<сервис>`, ключ — имя переменной окружения; сервисы входят ролью AppRole `tf-svc-<сервис>` (Н33). В `dev` — обычный режим с raft, после старта запечатан (Н13); порт 8200 открыт на хост |
 | nginx | `think-infra/web-server` | маршруты `/api/auth/`, `/api/bff/` (префикс срезается) и фронт; **`/api/ml`, `/api/dispatch`, `/api/funnel` нет**, `X-Request-ID` не ставится |
 | аутентификация | `think-auth` | RS256, `kid main-key`, `iss auth-service`, `aud api`; в токене `sub`, `nameidentifier`, `token_type` (`access`/`refresh`), `jti`; публичный ключ — `GET /.well-known/jwks` (PEM) |
 | маршрут `/api/ml` | `docs/common/структура.md` | в схеме контура есть, в nginx пока нет (строка выше) |
@@ -908,6 +908,7 @@ compose с тем же составом, что в `think-infra`), и тольк
 | Н30 | модель подписывала события `service = tf-model`, а в §6.4 сервисы названы `auth, bff, dispatch, funnel, ml, notify` | `core.py` | ML — исправлено |
 | Н31 | `tf-bff` по ACL читает `tf.ingest.journal`, но не `tf.ingest.readings`: числовые показания (последнее значение в карточке датчика, D2) до BFF не доходят. Дублировать их в `journal` нельзя — модель читает оба топика и посчитала бы дважды | `think-infra/kafka/acls.conf` | Гриша: добавить `tf-bff` чтение `tf.ingest.readings` |
 | Н32 | Samba AD (каталог для LDAP/AD, ТЗ §11) публикует на хост 53, 88, 389, 445, 464, 636, 3268, 3269 — LDAP без TLS и SMB торчат наружу вместе с сервером; при пустом `ADMIN_PASSWORD` берётся пароль по умолчанию из `entrypoint.sh`; строка `--skip-sysvolacl` без переноса роняет первый запуск (исправлена в ветке `TF-Samba`, в `master` не влита); сервис аутентификации каталог пока не спрашивает | `think-infra/samba`, `think-auth` | Гриша: порты — только внутрь сети или 636 с TLS, пароль без умолчания; вход через каталог — метод `ldap` в `auth.credentials` (права-и-аудит §5.1) |
+| Н33 | наши сервисы читали секреты из `secret/tf/<сервис>` с полями `*_password` токеном из файла, а think-infra кладёт их в `secret/tf/<учётка>` и `app/tf-<сервис>` с ключами — именами переменных и пускает по AppRole; Redis с паролем; аудит писал под `audit_writer`, а bootstrap заводит `audit_user` | `tfkit`, `notify`, `audit`, `funnel`, `compose.yml` | ML — исправлено (13.5); в think-infra нужны строки `services.conf` и `schemas.conf` для `tf-model`, `tf-notify`, `tf-audit` — PR в `dev` |
 
 ### 12.3 Этапы
 
@@ -919,7 +920,7 @@ compose с тем же составом, что в `think-infra`), и тольк
 | 0 | видеокарта на ночь | очереди `queue_i`–`queue_k`: рычаги сети (analytics.md §63); `queue_l`: шкалы сетей на входах сервиса (Н20, Н22) и зёрна 3–4 версий 2 и 3 | все очереди дошли до «готово», итог в §63 | сделано: §60–§63; ночью 26.09 — опыты улучшения показателей (срочный контур 6 ч, смеси) |
 | 1 | сервис модели в main | влить `ML/service` из `ml`; Н1–Н6; `.gitignore` (`.venv/`, `data/`) | 51 тест + новые проходят; `--tick-now` на 2026-01-04 12:00 даёт те же оценки, что `retro.py` | сделано: 95 тестов; `bundle.py --check` — расхождение 0 по входам, шести типам и версиям 1–4 (analytics.md §64) |
 | 2 | общий пакет `docs/backend/tfkit` | чтение Vault KV v2 по HTTP с запасом из окружения; проверка JWT RS256 (оба варианта полей, 13.2); отправка события аудита `XADD audit` | модульные тесты; секреты нигде не логируются | сделано: 20 тестов; добавлен журнал запросов `audit:requests` |
-| 3 | аудит | каталог событий ML и notify (13.4) в `docs/backend/домены-и-сущности.md`; готовый блок записи `docs/backend/audit`: DDL §6.4 с партициями, читатель потока группой потребителей, роль `audit_writer` только INSERT и SELECT | событие из ML доходит до `audit.events`; UPDATE под `audit_writer` — отказ | код и тесты (23); проверка на живом PostgreSQL — на стенде, этап 6 |
+| 3 | аудит | каталог событий ML и notify (13.4) в `docs/backend/домены-и-сущности.md`; готовый блок записи `docs/backend/audit`: DDL §6.4 с партициями, читатель потока группой потребителей, роль записи `audit_user`, правку и удаление строк запрещают триггеры (Н33) | событие из ML доходит до `audit.events`; UPDATE под `audit_user` — отказ | код и тесты (23); проверка на живом PostgreSQL — на стенде, этап 6 |
 | 4 | уведомления | потребители `tf.notify.email` и `tf.notify.telegram` (ack, nack с повтором, reject → DLQ); токен обязателен вне dev; секреты из Vault; `notify.sent`/`notify.failed` в аудит; Dockerfile | сообщение в `tf.notifications` с ключом `telegram` приходит в чат, событие — в аудит | код и тесты (32); доставка в живой чат — на стенде, этап 6 |
 | 5 | модель в контуре | приём `tf.model.commands` (13.3); M7, M9а, M13; события аудита; выход в `tf.forecast.results` | сквозной тест 48 ч из §10.2; команда `settings.works` глушит газ на объекте со следующего часа | код: команды, M7, M9а, M13, аудит, выход в Kafka, `tf.ingest.reference`; 48 тактов на пакете без отказов (analytics.md §64); команды через живой RabbitMQ — на стенде, этап 6 |
 | 6 | стенд у нас | `docker compose` с Kafka, RabbitMQ, Redis, Vault, PostgreSQL, моделью, notify, аудитом, воронкой и эмулятором; `.env.example` без секретов | эмулятор → воронка → модель → `tf.forecast.results` → уведомление по факту | описан (`docs/backend/compose.yml`, `stand.yml`, `stand.env.example`), не поднят: на машине разработки нет Docker |
@@ -997,9 +998,9 @@ compose с тем же составом, что в `think-infra`), и тольк
 | `TF_WORK` | `/work` | горячий журнал, история оценок, состояние правил |
 | `TF_KAFKA_BOOTSTRAP` | `tf-kafka:9092` | `off` — без Kafka (стенд на файлах журнала) |
 | `TF_RABBIT_URL` | `amqp://tf-rabbit:5672/tf` | без пароля: пароль — из Vault; `off` — без команд |
-| `TF_REDIS_URL` | `redis://tf-redis:6379/0` | поток аудита; при `dev` по умолчанию пусто, события — в файл на томе |
-| `VAULT_ADDR`, `VAULT_TOKEN_FILE` | нет; в контуре `http://vault:8200` | токен роли — `VAULT_TOKEN` или файл `VAULT_TOKEN_FILE`; в контейнере — файл, чтобы токена не было в окружении |
-| `TF_AUTH_JWKS` | `http://tf-auth:8080/.well-known/jwks` | публичный ключ, если его нет в Vault |
+| `TF_REDIS_URL` | `redis://tf-redis:6379/0` | поток аудита; пароль — из Vault `secret/tf/redis`; при `dev` по умолчанию пусто, события — в файл на томе |
+| `VAULT_ADDR`, `VAULT_ROLE_ID`, `VAULT_SECRET_ID` | нет; в контуре `http://vault:8200` | вход ролью AppRole `tf-svc-tf-model`, как у сервисов think-infra; `VAULT_TOKEN` или `VAULT_TOKEN_FILE` — готовый токен вместо роли |
+| `TF_AUTH_PUBLIC_KEY`, `TF_AUTH_JWKS` | нет; `http://tf-auth:8080/.well-known/jwks` | открытый ключ think-auth (PEM), без него — с JWKS |
 | `TF_MODEL_SINK` | `kafka`, при `dev` — `file` | куда пишутся сообщения прогноза |
 | `TF_MODEL_SETTINGS` | `<TF_WORK>/service/settings` | таблицы главного диспетчера и их версии |
 | `TF_MODEL_RETRAIN` | `off` | `on` включает очередь переобучения (§9.5); в контуре без журнала — выключено |
@@ -1008,20 +1009,22 @@ compose с тем же составом, что в `think-infra`), и тольк
 | `TF_WORKS`, `TF_GAPS` | таблицы в `ML/settings` | первая версия графика работ и игнорируемых периодов, если на томе их ещё нет |
 | `TF_KIT` | `docs/backend/tfkit` | где лежит общий пакет, если не рядом с сервисом |
 
-В dev-режиме значения секретов можно передать окружением вместо Vault: `TF_RABBIT_PASSWORD`,
-`TF_AUTH_PUBLIC_KEY`, `TF_MODEL_SERVICE_SUBS` (13.5).
+В dev-режиме значения секретов можно передать окружением вместо Vault, под тем же именем, что ключ
+в Vault: `TF_KAFKA_MODEL_PASSWORD`, `TF_RABBIT_MODEL_PASSWORD`, `TF_REDIS_PASSWORD`,
+`TF_MODEL_SERVICE_SUBS` (13.5).
 
 ### 13.2 Токены
 
-Сервис проверяет подпись RS256 публичным ключом `think-auth`: ключ берётся из Vault
-(`secret/tf/auth`, поле `public_key`), если его там нет — с `/.well-known/jwks`, кэш на час.
+Сервис проверяет подпись RS256 публичным ключом `think-auth`: ключ берётся из `TF_AUTH_PUBLIC_KEY`,
+если его нет — с `/.well-known/jwks`, кэш на час.
 Проверяются `exp`, `aud = api`, издатель из списка `auth-service`, `tf-auth` и тип токена
 `access`. Тип читается из поля `typ` или `token_type`: пока токены не приведены к концепту (Н10),
 принимаются оба. Для техучётки нужен `scope` с требуемым правом; пока `think-auth` не кладёт
-`scope`, техучётка опознаётся по `sub` из списка в Vault (`secret/tf/model`, поле `service_subs`).
+`scope`, техучётка опознаётся по `sub` из списка в Vault (`secret/tf/app/tf-model`,
+`TF_MODEL_SERVICE_SUBS`).
 Любой отказ — `401` или `403` и событие `token.refused` или `access.denied` в аудит; протухший токен
 — `401` без события (Н29). В событии только `jti`, самого токена нет. Список техучёток без `scope` у
-каждого сервиса свой: `secret/tf/model`, `secret/tf/notify`, `secret/tf/audit`, поле `service_subs`.
+каждого сервиса свой: `TF_<СЕРВИС>_SERVICE_SUBS` в `secret/tf/app/tf-<сервис>`.
 
 ### 13.3 Команды в `tf.model.commands`
 
@@ -1082,7 +1085,10 @@ compose с тем же составом, что в `think-infra`), и тольк
   `audit.ensure_partitions()`, сервис вызывает её при старте и раз в сутки. Правка, удаление и
   очистка строк запрещены триггером всем, включая владельца. Журнал запросов живёт 90 дней:
   `audit.drop_old_requests()` удаляет старый месяц целиком, её вызывает только администратор.
-  Роль `audit_writer` может только добавлять и читать. Пароль роли — из Vault `secret/tf/audit`.
+  Роль записи — `audit_user`: схему, роли `audit_admin` и `audit_user` и пароли создаёт bootstrap
+  think-infra по строке `audit` в `postgree/db/schemas.conf`, `schema.sql` прогоняется под `audit_admin`.
+  Гранты там шире (UPDATE и DELETE через `audit_read_write`), но правку и удаление строк запрещают
+  триггеры. Пароль роли — из Vault `secret/tf/postgres/audit`, `TF_PG_AUDIT_USER_PASSWORD`.
 - **Запись.** Группа потребителей `audit-writer` читает потоки `audit` и `audit:requests`, пишет
   пачками до 500 строк и подтверждает (`XACK`) только после commit. Если база лежит, события ждут в
   потоке. После перезапуска сервис сначала дочитывает своё неподтверждённое, а зависшее у упавшего
@@ -1099,25 +1105,33 @@ compose с тем же составом, что в `think-infra`), и тольк
   `since`, `until`, `limit` ≤ 1000, страницы по `before_id`. Кто из пользователей что видит (история
   отклонённых прогнозов — только главный диспетчер), решает BFF.
 - **Окружение.** `TF_REDIS_URL`, `TF_AUDIT_DB` (строка подключения без пароля), `TF_AUDIT_PORT`
-  (8000), `TF_AUTH_JWKS`; в dev — `TF_AUDIT_DB_PASSWORD`, `TF_AUDIT_SERVICE_SUBS`. `GET /health`
+  (8000), `TF_AUTH_PUBLIC_KEY` или `TF_AUTH_JWKS`; в dev — `TF_PG_AUDIT_USER_PASSWORD`,
+  `TF_AUDIT_SERVICE_SUBS`. `GET /health`
   отдаёт счётчики: записано, повторов, в `audit:dead`, вытеснено из потока, время последней записи.
 
 ### 13.5 Секреты
 
-Все секреты лежат в Vault, KV v2, путь `secret/tf/<сервис>`. Сервис читает их при старте токеном
-своей роли, в dev-режиме — токеном из окружения. В git и в образах секретов нет, в `.env.example`
-только имена переменных. Ни один сервис не пишет значения секретов в лог, а токены нигде не
-хранятся.
+Все секреты лежат в Vault, KV v2, по схеме think-infra (`secrets.conf`, `hashicorp/services.conf`):
+путь — учётка сервиса (`kafka/model`, `rabbit/email`, `postgres/audit`, `redis`) или его собственные
+секреты (`app/tf-<сервис>`), имя поля — имя переменной окружения. Сервис входит при старте ролью
+AppRole `tf-svc-tf-<сервис>` (`VAULT_ROLE_ID`, `VAULT_SECRET_ID` из
+`setup.sh service-credentials tf-<сервис>`) и читает только свои пути. Токен живёт 5 минут: секреты
+читаются при старте и держатся в памяти, на 403 сервис входит заново. В git и в образах секретов нет,
+в `.env.example` только имена переменных. Ни один сервис не пишет значения секретов в лог, а токены
+нигде не хранятся.
 
 | путь | поля | кто читает |
 |---|---|---|
-| `secret/tf/kafka` | `model_password`, `funnel_password` | tf-model, funnel |
-| `secret/tf/rabbit` | `model_password`, `email_password`, `telegram_password` | tf-model, notify |
-| `secret/tf/auth` | `public_key` | tf-model, notify, audit, funnel |
-| `secret/tf/notify` | `smtp_user`, `smtp_password`, `telegram_bot_token`, `service_subs` | notify |
-| `secret/tf/model` | `service_subs` | tf-model |
-| `secret/tf/audit` | `db_password` (роль `audit_writer`), `service_subs` | audit |
-| `secret/tf/funnel` | `service_subs` (техучётка шины, пока в токене нет `scope`) | funnel |
+| `secret/tf/kafka/model`, `kafka/funnel` | `TF_KAFKA_MODEL_PASSWORD`, `TF_KAFKA_FUNNEL_PASSWORD` | tf-model, tf-funnel |
+| `secret/tf/rabbit/model`, `rabbit/email`, `rabbit/telegram` | `TF_RABBIT_MODEL_PASSWORD`, `TF_RABBIT_EMAIL_PASSWORD`, `TF_RABBIT_TELEGRAM_PASSWORD` | tf-model, tf-notify |
+| `secret/tf/redis` | `TF_REDIS_PASSWORD` | все четыре |
+| `secret/tf/postgres/audit` | `TF_PG_AUDIT_USER_PASSWORD` (роль `audit_user`) | tf-audit |
+| `secret/tf/app/tf-model` | `TF_MODEL_SERVICE_SUBS` | tf-model |
+| `secret/tf/app/tf-notify` | `TF_NOTIFY_SMTP_USER`, `TF_NOTIFY_SMTP_PASSWORD`, `TF_NOTIFY_TELEGRAM_BOT_TOKEN`, `TF_NOTIFY_SERVICE_SUBS` | tf-notify |
+| `secret/tf/app/tf-audit` | `TF_AUDIT_SERVICE_SUBS` | tf-audit |
+| `secret/tf/app/tf-funnel` | `TF_FUNNEL_SERVICE_SUBS` (техучётка шины, пока в токене нет `scope`) | tf-funnel |
+
+Открытый ключ `think-auth` не секрет и в Vault его нет: `TF_AUTH_PUBLIC_KEY` (PEM) или JWKS.
 
 Если Vault недоступен, при `TF_ENV=dev` значения берутся из окружения. При `prod` сервис не
 стартует и пишет в лог, какой путь не прочитался.
@@ -1202,7 +1216,7 @@ export_check (обучение 2022–2025, тест 2026) она даёт то�
 Как сделано (`rabbit.py`, 26.09):
 
 - Каждую очередь читает своя учётка брокера — `tf-notify-email` и `tf-notify-telegram`, пароли в
-  `secret/tf/rabbit`. Какие очереди читает экземпляр — `NOTIFY_CHANNELS` (по умолчанию обе), так
+  `secret/tf/rabbit/email` и `rabbit/telegram`. Какие очереди читает экземпляр — `NOTIFY_CHANNELS` (по умолчанию обе), так
   почту и Telegram можно развести по двум контейнерам. Очередь канала, которому нечем отправлять
   (нет SMTP или токена бота в Vault), не читается: сообщения ждут в ней сутки, а не уходят в DLQ.
 - `prefetch 1`. Повтор — `nack` с паузой 5, 15, 30, 60 с; пятая доставка (`x-delivery-count`
@@ -1220,8 +1234,8 @@ export_check (обучение 2022–2025, тест 2026) она даёт то�
 
 Образ: `docker build -f docs/backend/notify/Dockerfile -t tf-notify docs/backend`. Файла `.env` в
 образе нет (`TF_NOTIFY_ENV_FILE=`), процесс не от root, проверка жизни — `/health`, где видно, какие
-очереди читаются. Окружение: `TF_RABBIT_URL` (без пароля), `TF_REDIS_URL`, `TF_AUTH_JWKS`, `VAULT_ADDR`
-и `VAULT_TOKEN_FILE`. Тесты — `docs/backend/notify/test_notify.py`, без сети.
+очереди читаются. Окружение: `TF_RABBIT_URL` (без пароля), `TF_REDIS_URL` (без пароля), `TF_AUTH_PUBLIC_KEY` или
+`TF_AUTH_JWKS`, `VAULT_ADDR`, `VAULT_ROLE_ID` и `VAULT_SECRET_ID` роли `tf-svc-tf-notify`. Тесты — `docs/backend/notify/test_notify.py`, без сети.
 
 **Уведомление по факту.** Канал M8 публикует в `tf.forecast.results` сообщение с `kind: fact`. BFF
 по нему создаёт заявку и публикует уведомление в `tf.notifications`. Модель адресатов не знает, в
@@ -1264,7 +1278,7 @@ RabbitMQ `tf.notifications` у неё нет права публикации, и
   журнале: `ид_события`, `ид_канала_данных`, `дата`, `время`, `тревожное`, `значение_датчика`.
   Лишние поля эмулятора (курсор, объект, сбой) отбрасываются.
 - **Токен.** RS256 (13.2), проверка та же, что в tfkit, нужно право `telemetry.push`. Техучётка шины без `scope`
-  опознаётся по `service_subs` из `secret/tf/funnel`. Чужой или поддельный токен получает 401 и
+  опознаётся по `TF_FUNNEL_SERVICE_SUBS` из `secret/tf/app/tf-funnel`. Чужой или поддельный токен получает 401 и
   `token.refused`, токен без права — 403 и `access.denied`. Протухший токен даёт 401 без события.
   Без ключа воронка работает только при `TF_ENV=dev`.
 - **Ответ.** 202 `{accepted, rejected: [{index, reason}]}`: хорошие события приняты, плохие
@@ -1277,8 +1291,8 @@ RabbitMQ `tf.notifications` у неё нет права публикации, и
   `tf.ingest.readings`. Каждое событие попадает ровно в один топик, ключ — номер канала: порядок
   внутри канала сохраняется, а модель, читая оба топика, ничего не считает дважды. Про чтение
   `readings` со стороны BFF — Н31.
-- **Запись.** Пользователь Kafka `tf-funnel`, пароль из `secret/tf/kafka`, поле
-  `funnel_password`. Настройки franz-go: `acks=all`, идемпотентность, lz4, пачка до 1 МБ, задержка 20 мс. Пакет засчитывается только после
+- **Запись.** Пользователь Kafka `tf-funnel`, пароль из `secret/tf/kafka/funnel`, поле
+  `TF_KAFKA_FUNNEL_PASSWORD`. Настройки franz-go: `acks=all`, идемпотентность, lz4, пачка до 1 МБ, задержка 20 мс. Пакет засчитывается только после
   подтверждения брокера, до этого каналы не отмечаются услышанными.
 - **Молчание.** Канал, который слышали хотя бы трижды, считается молчащим, если нового события нет
   дольше `max(TF_FUNNEL_SILENT_MIN, 4 × обычный интервал канала)`. По умолчанию
@@ -1307,23 +1321,25 @@ RabbitMQ `tf.notifications` у неё нет права публикации, и
 
 - **`docs/backend/compose.yml`** — наши сервисы: `tf-model`, `tf-funnel`, `tf-notify`, `tf-audit`.
   Этот же файл уедет на сервер (этап 8). Сервисы встают во внешнюю сеть `think-fast-net` и зовут
-  инфраструктуру по именам из think-infra. У каждого сервиса свой токен роли Vault файлом
-  `TF_VAULT_TOKENS/<сервис>.token` → `/run/tf/vault-token`, и читает он только свои пути 13.5:
-  - модель — `kafka`, `rabbit`, `auth`, `model`;
-  - воронка — `kafka`, `auth`, `funnel`;
-  - уведомления — `rabbit`, `auth`, `notify`;
-  - аудит — `audit`, `auth`.
+  инфраструктуру по именам из think-infra. Каждый сервис входит в Vault своей ролью AppRole
+  `tf-svc-tf-<сервис>` (`TF_<СЕРВИС>_VAULT_ROLE_ID`, `TF_<СЕРВИС>_VAULT_SECRET_ID` из env-файла) и
+  читает только свои пути 13.5, как в `hashicorp/services.conf`:
+  - модель — `kafka/model`, `rabbit/model`, `redis`, `app/tf-model`;
+  - воронка — `kafka/funnel`, `redis`, `app/tf-funnel`;
+  - уведомления — `rabbit/email`, `rabbit/telegram`, `redis`, `app/tf-notify`;
+  - аудит — `postgres/audit`, `redis`, `app/tf-audit`.
 
-  Паролей нет ни в окружении, ни в образах. На сервере Vault Гриши слушает 8200 на хосте (Н13),
-  поэтому по умолчанию `VAULT_ADDR=http://host.docker.internal:8200`. PostgreSQL у него в
-  `app-network` (Н12), и аудиту там задаётся `TF_AUDIT_DB=host=host.docker.internal …`.
+  Паролей нет ни в окружении, ни в образах. Vault (`vault:8200`) и `tf-postgres` Гриши стоят в
+  `think-fast-net`, туда же встают наши сервисы. На сервере `role_id` и `secret_id` выдаёт
+  `hashicorp/scripts/setup.sh service-credentials tf-<сервис>`.
 - **`docs/backend/stand.yml`** — инфраструктура стенда:
   - Redis, RabbitMQ и Kafka подключаются через `include` из клона think-infra (`TF_INFRA`) без
     единой правки: те же пользователи, топики, ACL, политики очередей;
   - сверху — только то, чего в think-infra для стенда нет: `tf-vault` (dev, в сети) и одноразовый
     `tf-vault-seed`, `tf-postgres` с одноразовым `tf-audit-db-init`, `tf-emulator`;
-  - `tf-vault-seed` пишет секреты по 13.5 и выпускает четыре токена ролей;
-  - `tf-audit-db-init` прогоняет `schema.sql` и ставит пароль `audit_writer` тот же, что в Vault;
+  - `tf-vault-seed` пишет секреты по 13.5, заводит четыре роли AppRole и кладёт их `role_id` и
+    `secret_id` в `.vault/approle.env`;
+  - `tf-audit-db-init` прогоняет `schema.sql` и ставит пароль `audit_user` тот же, что в Vault;
   - `tf-emulator` — эмулятор из клона think-test (`TF_TEST`), панель на `127.0.0.1:8090`.
 - **`stand.env.example`** — образец тестовых значений. Сам `stand.env` и `.vault/` в git не
   попадают (`docs/backend/.gitignore`).
@@ -1332,7 +1348,8 @@ RabbitMQ `tf.notifications` у неё нет права публикации, и
 
 1. `docker network create think-fast-net`.
 2. `docker compose -f docs/backend/stand.yml --env-file docs/backend/stand.env up -d`.
-3. `docker compose -f docs/backend/compose.yml --env-file docs/backend/stand.env up -d --build`.
+3. `docker compose -f docs/backend/compose.yml --env-file docs/backend/stand.env --env-file
+   docs/backend/.vault/approle.env up -d --build`.
 
 Цепочка на стенде: эмулятор → воронка (`TF_FUNNEL_PULL`) → `tf.ingest.*` → модель →
 `tf.forecast.results`. Уведомление по факту публикует в `tf.notifications` только `tf-bff`
@@ -1343,6 +1360,6 @@ RabbitMQ `tf.notifications` у неё нет права публикации, и
 
 - Dev-Vault держит всё в памяти. После перезапуска `tf-vault` нужно снова выполнить
   `up tf-vault-seed`.
-- Без `TF_STAND_AUTH_PUBLIC_KEY` ключ проверки токенов берётся с JWKS `tf-auth`, которого на стенде
+- Без `TF_AUTH_PUBLIC_KEY` ключ проверки токенов берётся с JWKS `tf-auth`, которого на стенде
   нет. Тогда ручки с токеном отвечают 503, а `/health` и поток данных работают.
 - `TF_MODEL_BUNDLE_DIR` — папка пакета из `bundle.py` (13.6), а не `work/export`.

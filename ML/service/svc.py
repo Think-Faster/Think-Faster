@@ -74,7 +74,7 @@ HOT_RETENTION_DAYS = 100
 GUARD_STYPE = 'Состояние охраны'     # строки охраны не удаляются из горячего журнала никогда
 
 # Kafka (think-infra/kafka): SASL_PLAINTEXT внутри think-fast-net, учётка tf-model, группа — с
-# префикса tf-model (acls.conf); пароль — из Vault secret/tf/kafka (INTEGRATION §13.5)
+# префикса tf-model (acls.conf); пароль — из Vault secret/tf/kafka/model (INTEGRATION §13.5)
 KAFKA_BOOTSTRAP = os.environ.get('TF_KAFKA_BOOTSTRAP', 'tf-kafka:9092')
 KAFKA_USER = 'tf-model'
 KAFKA_GROUP = 'tf-model-ingest'
@@ -86,7 +86,7 @@ TOPIC_DLQ = 'tf.dlq'
 MAX_MSG_BYTES = 1_048_576           # 1 МБ по ТЗ
 
 # RabbitMQ (think-infra/rabbitmq): модель только читает tf.model.commands (13.3), прав на
-# объявление нет — очередь проверяется пассивно; пароль — из Vault secret/tf/rabbit
+# объявление нет — очередь проверяется пассивно; пароль — из Vault secret/tf/rabbit/model
 RABBIT_URL = os.environ.get('TF_RABBIT_URL', 'amqp://tf-rabbit:5672/tf')
 RABBIT_USER = 'tf-model'
 QUEUE_COMMANDS = 'tf.model.commands'
@@ -100,7 +100,7 @@ def kafka_conf(**extra) -> dict:
     """Подключение к Kafka для читателя и писателя: один конфиг на обоих."""
     import tfkit
     conf = {'bootstrap.servers': KAFKA_BOOTSTRAP}
-    password = tfkit.secret('kafka', 'model_password', 'TF_KAFKA_MODEL_PASSWORD',
+    password = tfkit.secret('kafka/model', 'TF_KAFKA_MODEL_PASSWORD', 'TF_KAFKA_MODEL_PASSWORD',
                             required=ENV != 'dev')
     if password:
         conf.update({'security.protocol': 'SASL_PLAINTEXT', 'sasl.mechanism': 'PLAIN',

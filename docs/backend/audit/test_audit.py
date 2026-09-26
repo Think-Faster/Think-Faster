@@ -1,5 +1,5 @@
 """Сервис аудита на поддельных Redis и базе; с живыми — если заданы TF_AUDIT_TEST_REDIS и TF_AUDIT_TEST_DB
-(база с прогнанным schema.sql, пользователь audit_writer; пароль — в строке подключения стенда)."""
+(база с прогнанным schema.sql, пользователь audit_user; пароль — в строке подключения стенда)."""
 import json
 import os
 import time

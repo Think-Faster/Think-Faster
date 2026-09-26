@@ -17,9 +17,10 @@
     python audit.py            запись и ручки
     python audit.py --once     одна пачка из потока и выход (проверка стенда)
 
-Окружение: TF_REDIS_URL, TF_AUDIT_DB (строка подключения без пароля, пользователь audit_writer),
-пароль — Vault `secret/tf/audit` поле `db_password` (в dev — TF_AUDIT_DB_PASSWORD),
-TF_AUTH_JWKS или ключ из Vault `secret/tf/auth`, TF_AUDIT_SERVICE_SUBS (dev) — техучётки без `scope`.
+Окружение: TF_REDIS_URL (пароль Redis — из Vault `secret/tf/redis`), TF_AUDIT_DB (строка подключения
+без пароля, пользователь audit_user), пароль — Vault `secret/tf/postgres/audit` поле
+`TF_PG_AUDIT_USER_PASSWORD` (в dev — переменная с тем же именем), TF_AUTH_PUBLIC_KEY или TF_AUTH_JWKS,
+техучётки без `scope` — Vault `secret/tf/app/tf-audit` поле `TF_AUDIT_SERVICE_SUBS`.
 """
 import argparse
 import ipaddress
@@ -468,8 +469,9 @@ def make_app(connect, verifier, writer: Writer | None = None, audit: 'tfkit.Audi
 # ----- запуск ----------------------------------------------------------------------------------
 def connector():
     import psycopg
-    dsn = os.environ.get('TF_AUDIT_DB', 'host=tf-postgres dbname=tf user=audit_writer')
-    pw = tfkit.secret('audit', 'db_password', 'TF_AUDIT_DB_PASSWORD', required=not tfkit.is_dev())
+    dsn = os.environ.get('TF_AUDIT_DB', 'host=tf-postgres dbname=tf user=audit_user')
+    pw = tfkit.secret('postgres/audit', 'TF_PG_AUDIT_USER_PASSWORD', 'TF_PG_AUDIT_USER_PASSWORD',
+                      required=not tfkit.is_dev())
 
     def connect():
         return psycopg.connect(dsn, password=pw, connect_timeout=5, application_name='tf-audit')
@@ -477,8 +479,8 @@ def connector():
 
 
 def make_verifier():
-    pem = tfkit.secret('auth', 'public_key', 'TF_AUTH_PUBLIC_KEY', required=False)
-    subs = tfkit.secret('audit', 'service_subs', 'TF_AUDIT_SERVICE_SUBS', required=False) or ''
+    pem = os.environ.get('TF_AUTH_PUBLIC_KEY') or None           # открытый ключ, в Vault его нет
+    subs = tfkit.secret('app/tf-audit', 'TF_AUDIT_SERVICE_SUBS', 'TF_AUDIT_SERVICE_SUBS', required=False) or ''
     jwks = os.environ.get('TF_AUTH_JWKS')
     if pem is None and not jwks:
         if tfkit.is_dev():
@@ -496,7 +498,8 @@ def main() -> None:
     ap.add_argument('--port', type=int, default=int(os.environ.get('TF_AUDIT_PORT', '8000')))
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s: %(message)s')
-    r = redis.Redis.from_url(os.environ.get('TF_REDIS_URL', 'redis://tf-redis:6379/0'), decode_responses=True,
+    r = redis.Redis.from_url(tfkit.redis_url(os.environ.get('TF_REDIS_URL', 'redis://tf-redis:6379/0')),
+                             decode_responses=True,
                              socket_timeout=10, socket_connect_timeout=5)
     connect = connector()
     w = Writer(r, connect)

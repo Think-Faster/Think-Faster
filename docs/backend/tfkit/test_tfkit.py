@@ -25,23 +25,45 @@ def token(**over):
 
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch):
-    for v in ('TF_ENV', 'VAULT_ADDR', 'VAULT_TOKEN', 'VAULT_TOKEN_FILE', 'TF_REDIS_URL', 'X_PASS', 'TF_VAULT_WAIT'):
+    for v in ('TF_ENV', 'VAULT_ADDR', 'VAULT_TOKEN', 'VAULT_TOKEN_FILE', 'VAULT_ROLE_ID', 'VAULT_SECRET_ID',
+              'TF_REDIS_URL', 'TF_REDIS_PASSWORD', 'X_PASS', 'TF_VAULT_WAIT'):
         monkeypatch.delenv(v, raising=False)
     tfkit._cache.clear()
+    tfkit._login.clear()
 
 
 @pytest.fixture
 def vault(monkeypatch):
-    seen = []
+    class Seen(list):
+        good = {'t0'}      # действующие токены; тест может «просрочить» токен AppRole
+
+    seen, issued = Seen(), []
+    good = seen.good
 
     class H(BaseHTTPRequestHandler):
-        def do_GET(self):
-            seen.append((self.path, self.headers.get('X-Vault-Token')))
-            if self.headers.get('X-Vault-Token') != 't0' or not self.path.endswith('/tf/kafka'):
-                self.send_response(403 if self.path.endswith('/tf/kafka') else 404)
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+            seen.append((self.path, None))
+            if self.path != '/v1/auth/approle/login' or body != {'role_id': 'r1', 'secret_id': 's1'}:
+                self.send_response(400)
                 self.end_headers()
                 return
-            body = json.dumps({'data': {'data': {'model_password': 'p1'}, 'metadata': {}}}).encode()
+            tok = f'a{len(issued)}'
+            issued.append(tok)
+            good.add(tok)
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(json.dumps({'auth': {'client_token': tok}}).encode())
+
+        def do_GET(self):
+            seen.append((self.path, self.headers.get('X-Vault-Token')))
+            data = {'/tf/kafka': {'model_password': 'p1'}, '/tf/redis': {'TF_REDIS_PASSWORD': 'r/p@1'}}
+            key = next((k for k in data if self.path.endswith(k)), None)
+            if self.headers.get('X-Vault-Token') not in good or key is None:
+                self.send_response(403 if key else 404)
+                self.end_headers()
+                return
+            body = json.dumps({'data': {'data': data[key], 'metadata': {}}}).encode()
             self.send_response(200)
             self.end_headers()
             self.wfile.write(body)
@@ -122,6 +144,50 @@ def test_sealed_vault_waits_then_reads(monkeypatch):
     monkeypatch.setenv('TF_VAULT_WAIT', '5')
     assert tfkit.secret('model', 'x') == 'v' and len(calls) == 3
     srv.shutdown()
+
+
+def test_vault_approle_login(vault, monkeypatch):
+    # как docs/vault-entrypoint.sh think-infra: роль и секрет → токен, дальше чтение по токену
+    monkeypatch.delenv('VAULT_TOKEN')
+    monkeypatch.setenv('VAULT_ROLE_ID', 'r1')
+    monkeypatch.setenv('VAULT_SECRET_ID', 's1')
+    assert tfkit.secret('kafka', 'model_password') == 'p1'
+    assert tfkit.secret('redis', 'TF_REDIS_PASSWORD') == 'r/p@1'
+    assert vault == [('/v1/auth/approle/login', None), ('/v1/secret/data/tf/kafka', 'a0'),
+                     ('/v1/secret/data/tf/redis', 'a0')]          # вход один раз на процесс
+
+
+def test_vault_approle_relogin_on_expired_token(vault, monkeypatch):
+    monkeypatch.delenv('VAULT_TOKEN')
+    monkeypatch.setenv('VAULT_ROLE_ID', 'r1')
+    monkeypatch.setenv('VAULT_SECRET_ID', 's1')
+    tfkit.secret('kafka', 'model_password')
+    vault.good.discard('a0')                                   # токен истёк
+    tfkit._cache.clear()
+    assert tfkit.secret('kafka', 'model_password') == 'p1'
+    assert [p for p, _ in vault].count('/v1/auth/approle/login') == 2
+
+
+def test_vault_approle_wrong_secret_id(vault, monkeypatch):
+    monkeypatch.delenv('VAULT_TOKEN')
+    monkeypatch.setenv('VAULT_ROLE_ID', 'r1')
+    monkeypatch.setenv('VAULT_SECRET_ID', 'чужой')
+    with pytest.raises(tfkit.SecretError, match='400 на вход AppRole') as e:
+        tfkit.secret('kafka', 'model_password')
+    assert 'чужой' not in str(e.value)
+
+
+def test_redis_url_gets_password(vault, monkeypatch):
+    assert tfkit.redis_url('redis://tf-redis:6379/0') == 'redis://:r%2Fp%401@tf-redis:6379/0'
+    assert tfkit.redis_url('redis://:своё@tf-redis:6379') == 'redis://:своё@tf-redis:6379'
+    assert tfkit.redis_url('') == '' and tfkit.redis_url(None) is None
+
+
+def test_redis_url_without_password_stays(monkeypatch):
+    assert tfkit.redis_url('redis://tf-redis:6379/0') == 'redis://tf-redis:6379/0'   # стенд без Vault
+    monkeypatch.setenv('TF_ENV', 'dev')
+    monkeypatch.setenv('TF_REDIS_PASSWORD', 'dev')
+    assert tfkit.redis_url('redis://localhost:6379') == 'redis://:dev@localhost:6379'
 
 
 def test_vault_forbidden_is_not_waited(vault, monkeypatch):

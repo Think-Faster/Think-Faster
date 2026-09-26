@@ -18,7 +18,8 @@ BFF публикует в exchange `tf.notifications` с ключом `email` и
 Повтор не шлёт второй раз тем, кому уже ушло: отправленное по `notice_id` помнится сутки в Redis
 (`notify:sent:<notice_id>:<канал>`). Лёг Redis — рассылка идёт без этой защиты: второе письмо лучше,
 чем ни одного. Учётки брокера — `tf-notify-email` и `tf-notify-telegram`, каждая читает только свою
-очередь; пароль — из Vault `secret/tf/rabbit` (`email_password`, `telegram_password`).
+очередь; пароль — из Vault `secret/tf/rabbit/email` и `rabbit/telegram` (`TF_RABBIT_EMAIL_PASSWORD`,
+`TF_RABBIT_TELEGRAM_PASSWORD`).
 """
 import json
 import logging

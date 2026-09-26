@@ -48,24 +48,68 @@ func (e *SecretError) Error() string { return e.msg }
 var (
 	vaultMu    sync.Mutex
 	vaultCache = map[string]map[string]any{}
+	vaultLogin string                  // токен, выданный по AppRole, на время жизни процесса
 	vaultRetry = 5 * time.Second // пауза между попытками, пока Vault запечатан или не поднялся
 )
 
-func vaultToken() string {
+func approle() (string, string) {
+	return strings.TrimSpace(os.Getenv("VAULT_ROLE_ID")), strings.TrimSpace(os.Getenv("VAULT_SECRET_ID"))
+}
+
+func vaultConfigured() bool {
+	role, sid := approle()
+	return os.Getenv("VAULT_TOKEN") != "" || os.Getenv("VAULT_TOKEN_FILE") != "" || (role != "" && sid != "")
+}
+
+// vaultToken — готовый токен (VAULT_TOKEN, VAULT_TOKEN_FILE) или вход ролью AppRole, как
+// docs/vault-entrypoint.sh think-infra. status — код ответа Vault на вход (0 — не входили или сеть).
+func vaultToken(client *http.Client, addr string) (tok string, status int, err error) {
 	if t := strings.TrimSpace(os.Getenv("VAULT_TOKEN")); t != "" {
-		return t
+		return t, 0, nil
 	}
 	if p := os.Getenv("VAULT_TOKEN_FILE"); p != "" {
 		if b, err := os.ReadFile(p); err == nil {
-			return strings.TrimSpace(string(b))
+			return strings.TrimSpace(string(b)), 0, nil
 		}
 	}
-	return ""
+	role, sid := approle()
+	if role == "" || sid == "" {
+		return "", 0, nil
+	}
+	vaultMu.Lock()
+	cached := vaultLogin
+	vaultMu.Unlock()
+	if cached != "" {
+		return cached, 0, nil
+	}
+	body, _ := json.Marshal(map[string]string{"role_id": role, "secret_id": sid})
+	resp, err := client.Post(strings.TrimRight(addr, "/")+"/v1/auth/approle/login", "application/json",
+		strings.NewReader(string(body)))
+	if err != nil {
+		return "", 0, err
+	}
+	data, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return "", resp.StatusCode, nil
+	}
+	var v struct {
+		Auth struct {
+			ClientToken string `json:"client_token"`
+		} `json:"auth"`
+	}
+	if json.Unmarshal(data, &v) != nil || v.Auth.ClientToken == "" {
+		return "", 200, nil
+	}
+	vaultMu.Lock()
+	vaultLogin = v.Auth.ClientToken
+	vaultMu.Unlock()
+	return v.Auth.ClientToken, 0, nil
 }
 
 // VaultRead — все поля secret/tf/<path> (KV v2), кэш на время жизни процесса. Vault Гриши после
 // перезапуска запечатан и отвечает 503: TF_VAULT_WAIT секунд воронка ждёт, а не падает; 403 и 404 —
-// сразу ошибка.
+// сразу ошибка. Истёкший токен AppRole (403) — один повторный вход.
 func VaultRead(path string) (map[string]any, error) {
 	vaultMu.Lock()
 	if d, ok := vaultCache[path]; ok {
@@ -73,9 +117,10 @@ func VaultRead(path string) (map[string]any, error) {
 		return d, nil
 	}
 	vaultMu.Unlock()
-	addr, tok := os.Getenv("VAULT_ADDR"), vaultToken()
-	if addr == "" || tok == "" {
-		return nil, &SecretError{fmt.Sprintf("Vault не настроен (VAULT_ADDR и VAULT_TOKEN), нужен secret/tf/%s", path)}
+	addr := os.Getenv("VAULT_ADDR")
+	if addr == "" || !vaultConfigured() {
+		return nil, &SecretError{fmt.Sprintf(
+			"Vault не настроен (VAULT_ADDR и VAULT_ROLE_ID/VAULT_SECRET_ID или VAULT_TOKEN), нужен secret/tf/%s", path)}
 	}
 	var wait time.Duration
 	if s := os.Getenv("TF_VAULT_WAIT"); s != "" {
@@ -86,11 +131,32 @@ func VaultRead(path string) (map[string]any, error) {
 	deadline := time.Now().Add(wait)
 	client := &http.Client{Timeout: 5 * time.Second}
 	var said time.Time
+	relogged := false
 	for {
-		req, _ := http.NewRequest("GET", strings.TrimRight(addr, "/")+"/v1/secret/data/tf/"+path, nil)
-		req.Header.Set("X-Vault-Token", tok)
 		var problem string
 		again := false
+		tok, status, err := vaultToken(client, addr)
+		if err != nil {
+			problem, again = fmt.Sprintf("Vault недоступен для входа AppRole: %T", errors.Unwrap(err)), true
+		} else if status != 0 {
+			problem = fmt.Sprintf("Vault ответил %d на вход AppRole", status)
+			again = status == 502 || status == 503 || status == 504
+		} else if tok == "" {
+			return nil, &SecretError{fmt.Sprintf("нет токена Vault (файл VAULT_TOKEN_FILE не найден), нужен secret/tf/%s", path)}
+		}
+		if problem != "" {
+			if !again || !time.Now().Before(deadline) {
+				return nil, &SecretError{problem}
+			}
+			if said.IsZero() || time.Since(said) >= time.Minute {
+				slog.Warn(problem + "; жду распечатывания Vault")
+				said = time.Now()
+			}
+			time.Sleep(vaultRetry)
+			continue
+		}
+		req, _ := http.NewRequest("GET", strings.TrimRight(addr, "/")+"/v1/secret/data/tf/"+path, nil)
+		req.Header.Set("X-Vault-Token", tok)
 		resp, err := client.Do(req)
 		if err != nil {
 			problem, again = fmt.Sprintf("Vault недоступен для secret/tf/%s: %T", path, errors.Unwrap(err)), true
@@ -113,6 +179,16 @@ func VaultRead(path string) (map[string]any, error) {
 			}
 			problem = fmt.Sprintf("Vault ответил %d на secret/tf/%s", resp.StatusCode, path)
 			again = resp.StatusCode == 502 || resp.StatusCode == 503 || resp.StatusCode == 504
+			vaultMu.Lock()
+			expired := resp.StatusCode == 403 && vaultLogin != "" && !relogged
+			if expired {
+				vaultLogin = "" // токен AppRole истёк: один раз войти заново, сразу
+			}
+			vaultMu.Unlock()
+			if expired {
+				relogged = true
+				continue
+			}
 		}
 		if !again || !time.Now().Before(deadline) {
 			return nil, &SecretError{problem}
@@ -370,7 +446,8 @@ func (r redisStream) XAdd(ctx context.Context, stream, payload string) error {
 		Values: map[string]any{"event": payload}}).Err()
 }
 
-// NewRedisStream — поток аудита по TF_REDIS_URL; пусто — без транспорта.
+// NewRedisStream — поток аудита по TF_REDIS_URL; пусто — без транспорта. Пароль, если его нет в
+// адресе, — из Vault secret/tf/redis (TF_REDIS_PASSWORD), как tfkit.redis_url.
 func NewRedisStream(url string) Stream {
 	if url == "" {
 		return nil
@@ -379,6 +456,11 @@ func NewRedisStream(url string) Stream {
 	if err != nil {
 		slog.Warn("TF_REDIS_URL не читается: " + fmt.Sprintf("%T", err))
 		return nil
+	}
+	if opt.Password == "" {
+		if pw, _ := Secret("redis", "TF_REDIS_PASSWORD", "TF_REDIS_PASSWORD", false); pw != "" {
+			opt.Password = pw
+		}
 	}
 	opt.DialTimeout, opt.ReadTimeout, opt.WriteTimeout = 2*time.Second, 2*time.Second, 2*time.Second
 	return redisStream{redis.NewClient(opt), 1_000_000}
