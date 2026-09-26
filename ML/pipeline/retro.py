@@ -99,10 +99,17 @@ def seq_pack(base: np.ndarray, collectors: np.ndarray, comp: np.ndarray, cal: di
     return xin.astype(np.float32), s.astype(np.float32)
 
 
-def snapshot(con, t: datetime, meta: dict, cal: dict, seq: bool = False):
-    """Строки признаков всех объектов на момент t, собранные только из журнала до t."""
+def snapshot(con, t: datetime, meta: dict, cal: dict, seq: bool = False, holes=()):
+    """Строки признаков всех объектов на момент t, собранные только из журнала до t.
+
+    `holes` — игнорируемые периоды (INTEGRATION.md §1.5, команда settings.gaps): события брака данных
+    не идут в счётчики окна, иначе брак тянется по признакам 100 суток. Охрана остаётся — это состояние."""
+    lo = t - timedelta(days=LOOK_DAYS)
+    keep = ' AND '.join(f"NOT (ts >= TIMESTAMP '{a}' AND ts < TIMESTAMP '{b}')"
+                        for a, b in holes if a < t and b > lo)
+    keep = f" AND (stype = 'Состояние охраны' OR ({keep}))" if keep else ''
     con.sql(f"""CREATE OR REPLACE VIEW ev AS SELECT * FROM ev_all WHERE ts < TIMESTAMP '{t}'
-                AND (ts >= TIMESTAMP '{t - timedelta(days=LOOK_DAYS)}' OR stype = 'Состояние охраны')""")
+                AND (ts >= TIMESTAMP '{lo}' OR stype = 'Состояние охраны'){keep}""")
     labels.build(con)
     hi = int((t - ft.T0).total_seconds() // 3600)     # строка витрины h = hi − 1: момент прогноза — конец часа
     lo = hi - LOOK_H

@@ -117,6 +117,9 @@ def main() -> None:
                     help='раздел 63: дописать семейство <имя>_pt — у каждого типа своя лучшая эпоха по проверке')
     ap.add_argument('--predict-only', action='store_true',
                     help='без обучения: взять models/<имя>.pt (и <имя>_pt.pt) и заново записать прогнозы')
+    ap.add_argument('--score-val', action='store_true',
+                    help='без обучения: оценки проверки 2025 сети work/roll/<init>.pt в roll/<init>_<тип>_val.npy '
+                         '(шкала сервиса и выгрузки для сетей прогона вперёд, INTEGRATION §12.2 Н20)')
     args = ap.parse_args()
     # Потолок эпох для очереди, которая уже запущена: в `work/epoch_cap.txt` одно число, и каждый
     # следующий прогон берёт минимум из него и `--epochs`. Лучшая эпоха во всех прогонах сети была
@@ -222,6 +225,14 @@ def main() -> None:
     best_k, best_k_state, best_k_ep = [-1.0] * nt, [None] * nt, [0] * nt
     vo, vh = ev['val']
     yv = y_all[vo, vh].cpu().numpy()
+    if args.score_val:
+        # Н20: сеть прогона вперёд не оставляет оценок проверки 2025, а сервис кладёт её оценку на их шкалу
+        assert args.init, 'нужен --init <имя сети в work/roll>'
+        pv = predict(vo, vh)
+        for k, tp in enumerate(types):
+            np.save(roll_dir / f'{args.init}_{tp}_val.npy', pv[:, k])
+        print(f'{args.init}: оценки проверки 2025, {len(vo):,} строк, готово за {time.time() - t:.0f} с', flush=True)
+        return
     if args.predict_only:
         mdir = out_dir / 'models'
         tag0 = args.name or ('tcn' if args.seed == 0 else f'tcn_s{args.seed}')

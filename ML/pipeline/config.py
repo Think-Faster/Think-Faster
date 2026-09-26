@@ -25,6 +25,12 @@ VAL_END = datetime(2026, 1, 1)     # проверка — 2025, тест — 202
 DATA_END = datetime(2026, 7, 1)
 # Потери данных: в эти часы нет ни событий, ни честной разметки
 GAPS = [(datetime(2024, 4, 6), datetime(2024, 4, 11)), (datetime(2026, 6, 1), datetime(2026, 6, 2))]
+# Таблицы главного диспетчера (INTEGRATION.md §1.5, §1.6): переобучение из сервиса передаёт свои
+# текущие версии — игнорируемые периоды (TF_GAPS, gaps.json сервиса) и график работ (TF_WORKS)
+WORKS = Path(os.environ.get('TF_WORKS', ML / 'settings' / 'works_2026.csv'))
+if os.environ.get('TF_GAPS'):
+    GAPS = [(datetime.fromisoformat(r['a']), datetime.fromisoformat(r['b']))
+            for r in json.loads(Path(os.environ['TF_GAPS']).read_text(encoding='utf-8'))['rows']]
 WARMUP = 7 * 24  # часов: после начала данных и после дыры 2021 окно 7 сут ещё не заполнено
 
 HORIZON = 24  # ч, горизонт прогноза по умолчанию (ТЗ §6: не менее 24 ч)

@@ -199,9 +199,12 @@ def hours_to_next(x: np.ndarray) -> np.ndarray:
     return np.minimum(after - idx, NEXT_CAP).astype(np.int16)
 
 
-def calendar() -> dict[str, np.ndarray]:
-    hours = np.arange(NH)
-    days = [T0 + timedelta(days=d) for d in range(NH // 24 + 1)]
+def calendar(nh: int = NH) -> dict[str, np.ndarray]:
+    """Календарные признаки по часам от T0. `nh` больше NH — для сервиса: живой такт идёт после
+    DATA_END, а значения до DATA_END от длины не зависят (ближайший праздник за ней — 4 ноября,
+    дальше 60 суток, на которых обрезан `days_to_holiday`)."""
+    hours = np.arange(nh)
+    days = [T0 + timedelta(days=d) for d in range(nh // 24 + 1)]
     holiday = np.array([(d.month, d.day) in HOLIDAYS for d in days])
     long_ = np.array([any((m1, d1) <= (d.month, d.day) <= (m2, d2) for m1, d1, m2, d2 in LONG) for d in days])
     to_holiday = np.zeros(len(days), np.float32)

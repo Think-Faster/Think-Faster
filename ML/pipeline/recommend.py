@@ -439,20 +439,23 @@ def ambient(con, obj: int, at) -> dict:
     return {'flash_n': flash or 0, 'cold': cold > 0}
 
 
-def run(con, obj: int, types: list[str], at: str, reasons: list[str] = (), since: dict | None = None) -> None:
+def build(con, obj: int, types: list[str], at, reasons=(), since: dict | None = None,
+          book: tuple | None = None, ctx: pl.DataFrame | None = None) -> dict:
     """Рекомендация по объекту на момент `at` по каждому типу из `types`: по последнему эпизоду за сутки,
     иначе по прогнозу (`reasons` — основания из `tf.forecast.results`, `since` — сколько часов тревога уже
-    стоит, §2.3 INTEGRATION.md). Если типов несколько — ещё и составная рекомендация по объекту."""
-    rules, ver = load_rules()
-    recur = load_recurrence()
-    at = datetime.fromisoformat(at)
+    стоит, §2.3 INTEGRATION.md). Если типов несколько — составная рекомендация по объекту.
+    `book` — (правила, версия, повторы), `ctx` — готовый `context()` на этот момент: сервис строит их
+    один раз на такт для всех объектов с тревогой (`batch`)."""
+    rules, ver, recur = book or (*load_rules(RULES), load_recurrence(RECUR))
+    at = at if isinstance(at, datetime) else datetime.fromisoformat(at)
     since = since or {}
-    tl = ', '.join(f"'{t}'" for t in types)
-    ctx = context(con, f"e.object_id = {obj} AND e.type IN ({tl}) AND e.t0 <= TIMESTAMP '{at}' "
-                       f"AND e.t0 >= TIMESTAMP '{at}' - INTERVAL 24 HOUR", upto=f"TIMESTAMP '{at}'")
+    if ctx is None:
+        tl = ', '.join(f"'{t}'" for t in types)
+        ctx = context(con, f"e.object_id = {obj} AND e.type IN ({tl}) AND e.t0 <= TIMESTAMP '{at}' "
+                           f"AND e.t0 >= TIMESTAMP '{at}' - INTERVAL 24 HOUR", upto=f"TIMESTAMP '{at}'")
     out = []
     for tp in types:
-        ep = ctx.filter(pl.col('type') == tp)
+        ep = ctx.filter((pl.col('object_id') == obj) & (pl.col('type') == tp))
         if len(ep):
             r = ep.row(-1, named=True)
             r['co_types'] = sorted(set(r['co_types'] or ()) | {t for t in types if t != tp})
@@ -467,8 +470,25 @@ def run(con, obj: int, types: list[str], at: str, reasons: list[str] = (), since
                  'reason_triggers': reason_triggers(tp, list(reasons), rules), 'since_hours': since.get(tp),
                  'co_types': [t for t in types if t != tp]}
         out.append(recommend(r, rules, ver, recur))
-    res = out[0] if len(out) == 1 else compose(out)
-    print(json.dumps(res, ensure_ascii=False, indent=2, default=str))
+    return out[0] if len(out) == 1 else compose(out)
+
+
+def batch(con, at: datetime, wanted: dict) -> dict:
+    """Рекомендации такта (M13): `wanted` — объект → (типы с тревогой, основания, since по типу).
+    Контекст эпизодов за сутки до `at` строится один раз на все объекты; ответ — объект → рекомендация
+    (у одного типа — по типу, у нескольких — составная)."""
+    if not wanted:
+        return {}
+    book = (*load_rules(RULES), load_recurrence(RECUR))   # сервис переназначает RULES/RECUR на свою папку
+    objs = ', '.join(str(int(o)) for o in wanted)
+    ctx = context(con, f"e.object_id IN ({objs}) AND e.t0 <= TIMESTAMP '{at}' "
+                       f"AND e.t0 >= TIMESTAMP '{at}' - INTERVAL 24 HOUR", upto=f"TIMESTAMP '{at}'")
+    return {o: build(con, int(o), types, at, reasons, since, book, ctx)
+            for o, (types, reasons, since) in wanted.items()}
+
+
+def run(con, obj: int, types: list[str], at: str, reasons: list[str] = (), since: dict | None = None) -> None:
+    print(json.dumps(build(con, obj, types, at, reasons, since), ensure_ascii=False, indent=2, default=str))
 
 
 def retro(con, full: bool = False) -> None:

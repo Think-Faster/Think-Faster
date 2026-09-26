@@ -27,7 +27,7 @@ INTRUSION_STEP = '10 minutes'  # проникновение: движение н
 ARRIVAL = '15 minutes'       # охрану сняли так скоро после открытия — это персонал, а не нарушитель
 CONFIRM = '2 hours'          # окно сопоставления эпизода и выезда
 PRIMARY = '7 days'           # эпизод первичный, если такого же типа на объекте не было столько времени
-WORKS = config.ML / 'settings' / 'works_2026.csv'  # таблица графика работ (INTEGRATION.md §1.6), раздел 62
+WORKS = config.WORKS  # таблица графика работ (INTEGRATION.md §1.6), раздел 62
 WORKS_PAD = 7                # сут: в год без строки графика окно переносится на те же дни года ± столько
 
 EQUIPMENT = "('Состояние насоса', 'Состояние вентилятора', 'Состояние фазы', 'ИБП', 'Переключатель')"
@@ -190,7 +190,8 @@ def works_windows(con, years: list[int] | None = None) -> None:
                           year(starts_at::TIMESTAMP) AS wy
                    FROM read_csv('{WORKS.as_posix()}', delim=';', header=true, all_varchar=true)
                    WHERE object_id IS NOT NULL),
-             src AS (SELECT k.object_id, k.work_kind, y, arg_min(k.wy, abs(k.wy - y)) AS wy
+             -- ближайший год; при равном удалении — более ранний (arg_min по одному abs выбирал любой)
+             src AS (SELECT k.object_id, k.work_kind, y, arg_min(k.wy, abs(k.wy - y) * 10000 + k.wy) AS wy
                      FROM (SELECT DISTINCT object_id, work_kind, wy FROM w) k, (SELECT unnest({list(years)}) AS y)
                      GROUP BY ALL HAVING NOT bool_or(k.wy = y))
         SELECT object_id, types, sensor, s AS a, e AS b FROM w
