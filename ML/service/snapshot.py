@@ -59,3 +59,9 @@ def freshness(store, t: datetime, back_days: int = 30) -> dict:
         ts = max((lasts.get(f, oldest) for f in fams), default=oldest)
         out[tp] = hours if ts == oldest else (t - ts).total_seconds() / 3600.0
     return out
+
+
+def families_of(stype: str) -> set:
+    """Семейства (`STYPE_PAT`), к которым относится тип датчика из справочника."""
+    s = (stype or '').lower()
+    return {fam for fam, pat in STYPE_PAT.items() if pat in s}

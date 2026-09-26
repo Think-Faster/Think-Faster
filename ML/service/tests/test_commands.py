@@ -83,8 +83,8 @@ class CommandsTest(unittest.TestCase):
 
 # ----- приём журнала ------------------------------------------------------------------------------
 class Msg:
-    def __init__(self, value, key=b'k'):
-        self._v, self._k = value, key
+    def __init__(self, value, key=b'k', topic='tf.ingest.readings'):
+        self._v, self._k, self._t = value, key, topic
 
     def value(self):
         return self._v
@@ -93,7 +93,7 @@ class Msg:
         return self._k
 
     def topic(self):
-        return 'tf.ingest.readings'
+        return self._t
 
     def error(self):
         return None
@@ -132,6 +132,12 @@ class Store:
         self.rows += rows
         self.appends += 1
 
+    def apply_reference(self, d):
+        if d.get('kind') != 'channel.status':
+            raise ValueError(d.get('kind'))
+        self.refs = getattr(self, 'refs', []) + [d]
+        return d['kind']
+
 
 class IngestTest(unittest.TestCase):
     def test_consume_keeps_going_and_sends_garbage_to_dlq(self):
@@ -144,6 +150,20 @@ class IngestTest(unittest.TestCase):
         self.assertRegex(stats['written_at'], r'^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d$')
         self.assertEqual(dead[0][3], 'tf.ingest.readings')
         self.assertTrue(dead[0][2].startswith('JSONDecodeError'))
+
+    def test_consume_applies_reference_without_batch(self):
+        """Н26: tf.ingest.reference — в справочник сразу, не в журнал; непонятное — в tf.dlq."""
+        stop, store, dead = threading.Event(), Store(), []
+        ref = lambda d: Msg(json.dumps(d).encode(), topic='tf.ingest.reference')
+        msgs = [ref({'kind': 'channel.status', 'ид_канала_данных': 1, 'status': 'silent',
+                     'at': '2026-01-04T12:00:00+03:00'}),
+                ref({'kind': 'что-то'}),
+                Msg(json.dumps({'channel_id': 5, 'ts': '2026-01-04T11:00:00', 'value': '1'}).encode())]
+        stats = consume(store, Reader(msgs, stop), stop, dead=lambda *a: dead.append(a))
+        self.assertEqual((stats['reference'], stats['accepted'], stats['dead']), (1, 1, 1))
+        self.assertEqual([r['channel_id'] for r in store.rows], [5])
+        self.assertEqual(store.refs[0]['status'], 'silent')
+        self.assertEqual(dead[0][3], 'tf.ingest.reference')
 
 
 if __name__ == '__main__':

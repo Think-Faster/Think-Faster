@@ -23,6 +23,7 @@ work под теми же именами лежат прежние модели.
 записывает файл в `e['scale']`: он берётся первым.
 """
 import json
+import logging
 import re
 from pathlib import Path
 
@@ -30,6 +31,9 @@ import numpy as np
 import polars as pl
 
 import svc as config
+
+CALIBRATION = 'calibration.json'
+log = logging.getLogger('tf-model')
 
 
 def load_manifest(export: Path | None = None) -> dict:
@@ -147,6 +151,7 @@ class Predictor:
         self._nets: dict[Path, object] = {}
         self._scales: dict[tuple, np.ndarray] = {}
         self._importance: dict[str, dict] = {}
+        self._calib: dict[tuple, dict | None] = {}
 
     def _set_type(self, tp: str, models: dict, blend, root: Path, manifest: dict) -> None:
         self.entries[tp] = [{'key': k, 'seed': seed_of(k), 'family': v['family'], 'path': root / v['file'],
@@ -290,6 +295,48 @@ class Predictor:
                 out[tp] = (h[order], self._blend(tp, parts)[order])
         return out
 
+    # ----- уверенность (analytics §6, INTEGRATION §2.1) -----------------------
+    def labels_2025(self, tp: str) -> np.ndarray:
+        """Метка строки витрины 2025: эпизод типа в ближайшие `HORIZON` ч (как у обучения и `confidence.py`)."""
+        assert self.work is not None, 'метки 2025 есть только в рабочей папке: пакет везёт готовую калибровку'
+        nxt = pl.scan_parquet(self.work / 'features' / '2025.parquet').select(f'next_{tp}').collect()
+        return (nxt[f'next_{tp}'].fill_null(np.inf).to_numpy() <= config.HORIZON).astype(np.int8)
+
+    def mix_2025(self, tp: str) -> np.ndarray:
+        """Смесь типа на строках витрины 2025 в их порядке — те же ранги, что `bootstrap_history`."""
+        parts: dict[str, list] = {}
+        for e in self.entries[tp]:
+            raw = np.load(self.scale_file(tp, e)).astype(np.float32)
+            parts.setdefault(e['family'], []).append(np.searchsorted(np.sort(raw), raw, side='right') / len(raw))
+        return self._blend(tp, parts)
+
+    def calibration(self, tp: str) -> dict | None:
+        """Точки изотонической калибровки типа `{x, y}`: `calibration.json` пакета (или папки версии),
+        при разработке — обучается на проверке 2025 рабочей папки. None — калибровать не на чем."""
+        es = self.entries.get(tp) or []
+        key = (tp, es[0]['root'] if es else None)
+        if key in self._calib:
+            return self._calib[key]
+        cal = None
+        f = key[1] / CALIBRATION if key[1] is not None else None
+        if f is not None and f.exists():
+            cal = json.loads(f.read_text(encoding='utf-8')).get(tp)
+        elif self.work is not None and es:
+            try:
+                cal = fit_calibration(self.mix_2025(tp), self.labels_2025(tp))
+            except (FileNotFoundError, AssertionError, pl.exceptions.PolarsError) as e:
+                log.warning('калибровки %s нет, confidence не выдаётся: %s', tp, e)
+                cal = None
+        self._calib[key] = cal
+        return cal
+
+    def confidence(self, tp: str, score) -> np.ndarray | None:
+        """Доля подтвердившихся тревог с такой оценкой на проверке 2025 — калиброванная вероятность."""
+        cal = self.calibration(tp)
+        if not cal:
+            return None
+        return np.interp(np.asarray(score, dtype=np.float64), cal['x'], cal['y'])
+
     # ----- основания тревоги (ТЗ §5) -----------------------------------------
     def importance(self, tp: str) -> dict[str, float]:
         """Важность признаков типа: `importance.json` пакета или отчёты прогонов-родителей."""
@@ -319,6 +366,21 @@ class Predictor:
         feats = sorted((f for f in self.features if f in imp), key=lambda f: -abs(imp[f]))
         vals = [(f, frame[idx, f]) for f in feats[:k]]
         return [{'feature': f, 'value': None if v is None else float(v)} for f, v in vals]
+
+
+def fit_calibration(mix: np.ndarray, y: np.ndarray) -> dict:
+    """Изотоническая регрессия «смесь → эпизод в ближайшие 24 ч» (analytics §6, `confidence.py`).
+
+    Наружу — точки излома ступенчатой кривой: сервис переводит оценку в вероятность `np.interp`,
+    без sklearn. Шкала монотонна: у оценки выше вероятность не ниже.
+    """
+    from sklearn.isotonic import IsotonicRegression
+    mix, y = np.asarray(mix, dtype=np.float64), np.asarray(y, dtype=np.float64)
+    assert len(mix) == len(y) and len(y), (len(mix), len(y))
+    iso = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds='clip').fit(mix, y)
+    return {'x': [round(float(v), 6) for v in iso.X_thresholds_],
+            'y': [round(float(v), 5) for v in iso.y_thresholds_],
+            'rows': int(len(y)), 'positives': int(y.sum())}
 
 
 def _load_booster(path: Path, family: str):

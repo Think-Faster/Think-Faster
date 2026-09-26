@@ -60,6 +60,56 @@ class CoreTest(unittest.TestCase):
     def make(self):
         return core.Service(settings_dir=self.dir, seed=ML / 'settings', audit=self.audit)
 
+    # ----- сообщение прогноза ---------------------------------------------------------------------
+    def test_forecast_carries_confidence_evidence_silence_staleness(self):
+        """§2.3, §7, §9.7: уверенность по калибровке, минус цена молчания дыма (раздел 55); свидетели —
+        последнее событие каналов семейств типа; несвежесть — у каждого типа, чей поток отстал."""
+        import storage
+
+        class P:
+            version = 'v'
+
+            def reasons(self, frame, i, tp, k=3):
+                return [{'feature': 'smoke_24h', 'value': 3.0}]
+
+            def confidence(self, tp, score):
+                return np.full(len(score), 0.5)
+
+        class Sink(list):
+            def send(self, msg):
+                self.append(msg)
+
+        st = storage.HotStore(Path(self.tmp.name) / 'hot.duckdb')
+        self.addCleanup(st.close)
+        st.con.execute("INSERT INTO ch VALUES (1, 'ПС', 'Датчик дыма', '', 'Дым', 5122),"
+                       "(4, 'Климат', 'Датчик температуры', '', 'Т', 5122),"
+                       "(3, 'Газ', 'Газовый датчик', '', 'Г', 5123)")
+        st.append([st.clean_event(1, datetime(2026, 1, 4, 11, 30), 'Обнаружен дым'),
+                   st.clean_event(4, datetime(2026, 1, 4, 10), '25'),
+                   st.clean_event(3, datetime(2026, 1, 4, 11), '0.1')])
+        st.apply_reference({'kind': 'channel.status', 'ид_канала_данных': 1, 'status': 'silent', 'at': WHEN})
+        self.svc.store, self.svc.predictor, self.svc.sink = st, P(), Sink()
+        objects = np.array([5122, 5123])
+        scores = {tp: np.array([0.99, 0.1]) for tp in config.TYPES}
+        applied = {tp: (np.array([tp == 'fire', False]), np.array([2 if tp == 'fire' else 0, 0]))
+                   for tp in config.TYPES}
+        fres = {tp: 0.2 for tp in config.TYPES} | {'gas': 5.0}
+        n = self.svc._emit_forecasts(datetime(2026, 1, 4, 12), 1, None, objects, scores,
+                                     {tp: 0.9 for tp in config.TYPES}, applied, 'v', 'live', fres)
+        self.assertEqual(n, 1)
+        a, b = self.svc.sink
+        fire = a['types']['fire']
+        self.assertAlmostEqual(fire['confidence'], 0.5 * (1 - config.SILENCE_COST['fire']['smoke']))
+        self.assertEqual(fire['silent'], ['smoke'])
+        self.assertEqual([e['sensor_id'] for e in fire['evidence']], [1, 4])
+        self.assertEqual(fire['evidence'][0], {'sensor_id': 1, 'ts': '2026-01-04T11:30:00+03:00',
+                                               'value': 'Обнаружен дым'})
+        self.assertEqual((a['types']['gas']['stale_hours'], b['types']['gas']['stale_hours']), (5.0, 5.0))
+        self.assertNotIn('stale_hours', fire)
+        self.assertEqual(a['types']['sensor']['silent'], ['smoke'])        # молчание видно и без тревоги
+        self.assertNotIn('confidence', a['types']['sensor'])
+        self.assertNotIn('evidence', b['types']['fire'])
+
     # ----- конверт и повторы ----------------------------------------------------------------------
     def test_broken_envelope_is_rejected(self):
         for bad in ({'schema': 2}, {'schema': 1, 'command_id': 'x', 'kind': 'nope', 'payload': {}},

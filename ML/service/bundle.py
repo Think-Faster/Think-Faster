@@ -4,6 +4,7 @@
 монтируется только для чтения (`TF_MODEL_BUNDLE=/models/current`):
 
     manifest.json, meta.json, importance.json      выгрузка main, описание признаков, основания тревоги
+    calibration.json                                калибровка оценки в вероятность по типу (уверенность)
     <тип>/<семейство>_s<зерно>.*                    модели main
     scales/<тип>_<семейство>_s<зерно>.npy           оценки проверки 2025 в порядке витрины (шкала, П1)
     history/h_2025.npy                              час каждой строки витрины 2025 — для первой истории порога
@@ -27,7 +28,9 @@
   берётся, только если `<work>/roll/<прогон>.pt` совпадает с сетью выгрузки по весам.
 
 Важность признаков (основания тревоги, ТЗ §5) — из самих моделей выгрузки (`train.importance`), а
-не из отчётов прогонов. Модели не обучаются и копируются как есть.
+не из отчётов прогонов. Модели не обучаются и копируются как есть. Калибровка (`confidence` в сообщении, analytics
+§6) — изотоническая регрессия смеси на проверке 2025 против меток «эпизод в ближайшие 24 ч» витрины
+`--work`, по тем же шкалам, что лягут в пакет.
 """
 import argparse
 import json
@@ -137,7 +140,7 @@ def _models_missing(p: predmod.Predictor, types: list[str] | None = None) -> lis
 def _pack(p: predmod.Predictor, types: list[str], src: Path, dst: Path, manifest: dict) -> int:
     """Модели, шкалы и важность типов `types` из выгрузки `src` в папку пакета `dst`."""
     (dst / 'scales').mkdir(parents=True, exist_ok=True)
-    imp, size, origin = {}, 0, {}
+    imp, size, origin, cal = {}, 0, {}, {}
     for tp in types:
         for e in p.entries[tp]:
             to = dst / e['path'].relative_to(src)
@@ -149,10 +152,12 @@ def _pack(p: predmod.Predictor, types: list[str], src: Path, dst: Path, manifest
             origin[f'{tp}/{e["key"]}'] = e['origin']
             size += to.stat().st_size + sc.stat().st_size
         imp[tp] = _importance(tp, p.entries[tp], p.features)
+        cal[tp] = predmod.fit_calibration(p.mix_2025(tp), p.labels_2025(tp))
     manifest = dict(manifest)
     manifest['bundle'] = {**manifest.get('bundle', {}), 'scales': origin}
     (dst / 'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=1), encoding='utf-8')
     (dst / 'importance.json').write_text(json.dumps(imp, ensure_ascii=False), encoding='utf-8')
+    (dst / predmod.CALIBRATION).write_text(json.dumps(cal), encoding='utf-8')
     return size
 
 

@@ -123,6 +123,48 @@ class StorageTest(unittest.TestCase):
             self.assertAlmostEqual(f['flood'], 2.0)
             self.assertEqual(f['gas'], 720.0)                    # газовых событий нет — 30 суток
 
+    def test_reference_status_and_rows(self):
+        """Н26: молчание каналов от воронки и правка справочника на ходу; непонятное — ValueError."""
+        with tempfile.TemporaryDirectory() as d:
+            st = store_with_ch(Path(d))
+            self.addCleanup(st.close)
+            self.assertIsNone(st.clean_event(9, datetime(2026, 1, 4), '1'))
+            st.apply_reference({'kind': 'channel', 'ид_канала_данных': 9, 'тип_инж_системы': 'Газ',
+                                'тип_датчика': 'Газовый датчик', 'тег_инженерной_системы': 17,
+                                'название_датчика': 'Газ 2', 'ид_объект': 5124})
+            self.assertEqual(st.clean_event(9, datetime(2026, 1, 4), '0.3')['object_id'], 5124)
+            for parent in (77, 78):
+                st.apply_reference({'kind': 'object', 'ид_объект': 5124, 'иерархия_уровень': 3,
+                                    'родитель': parent, 'вид_объекта': 'Колодец',
+                                    'диспетчерское_название_объекта': 'Объект 1'})
+            self.assertEqual(st.con.sql('SELECT parent_id FROM obj WHERE object_id = 5124').fetchall(), [(78,)])
+            st.apply_reference({'kind': 'channel.status', 'ид_канала_данных': 1, 'status': 'silent',
+                                'at': '2026-01-04T12:00:00+03:00', 'since': '2026-01-04T08:00:00+00:00'})
+            sil = st.silent_channels()
+            self.assertEqual(sil.select(['object_id', 'channel_id', 'stype']).rows(), [(5122, 1, 'Датчик дыма')])
+            self.assertEqual(sil['since'][0], datetime(2026, 1, 4, 11))        # UTC → московское
+            st.apply_reference({'kind': 'channel.status', 'ид_канала_данных': 1, 'status': 'ok',
+                                'at': '2026-01-04T13:00:00+03:00', 'since': '2026-01-04T13:00:00+03:00'})
+            self.assertEqual(st.silent_channels().height, 0)
+            with self.assertRaises(ValueError):
+                st.apply_reference({'kind': 'channel.status', 'ид_канала_данных': 1, 'status': 'мёртв',
+                                    'at': '2026-01-04T13:00:00'})
+            with self.assertRaises(ValueError):
+                st.apply_reference({'kind': 'что-то'})
+
+    def test_last_events_one_per_channel_in_window(self):
+        with tempfile.TemporaryDirectory() as d:
+            st = store_with_ch(Path(d))
+            self.addCleanup(st.close)
+            st.append([st.clean_event(1, datetime(2026, 1, 4, 9), 'Норма'),
+                       st.clean_event(1, datetime(2026, 1, 4, 11), 'Обнаружен дым'),
+                       st.clean_event(1, datetime(2026, 1, 2, 11), 'Старое'),          # вне 24 ч
+                       st.clean_event(1, datetime(2026, 1, 4, 12, 30), 'После такта'),
+                       st.clean_event(2, datetime(2026, 1, 4, 11), 'Снята')])          # охрана — не свидетель
+            ev = st.last_events([5122, 5123], datetime(2026, 1, 4, 12))
+            self.assertEqual(ev.select(['channel_id', 'value']).rows(), [(1, 'Обнаружен дым')])
+            self.assertEqual(st.last_events([], datetime(2026, 1, 4, 12)).height, 0)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -12,7 +12,7 @@
 (канал, время, значение), как SELECT DISTINCT в events.py; флаг «тревожное» в дублях не участвует.
 """
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import duckdb
@@ -33,6 +33,8 @@ CREATE TABLE IF NOT EXISTS obj(
     object_id INT PRIMARY KEY, level INT, parent_id INT, kind VARCHAR, name VARCHAR);
 CREATE TABLE IF NOT EXISTS ch(
     channel_id INT PRIMARY KEY, system VARCHAR, stype VARCHAR, tag VARCHAR, name VARCHAR, object_id INT);
+CREATE TABLE IF NOT EXISTS ch_status(
+    channel_id INT PRIMARY KEY, status VARCHAR, since TIMESTAMP, changed_at TIMESTAMP);
 """
 
 
@@ -47,6 +49,14 @@ def _load_csv(con: duckdb.DuckDBPyConnection, obj_csv: Path, ch_csv: Path) -> No
                    ид_объект AS object_id
             FROM read_csv('{(ch_csv).as_posix()}', header=true,
                           types={{'тег_инженерной_системы': 'VARCHAR'}})""")
+
+
+def _msk(s: str) -> datetime:
+    """Время из сообщения (ISO, возможно с поясом) → наивное московское, как в журнале."""
+    t = datetime.fromisoformat(s)
+    if t.tzinfo is not None:
+        t = t.astimezone(timezone(timedelta(hours=3))).replace(tzinfo=None)
+    return t
 
 
 class HotStore:
@@ -77,6 +87,56 @@ class HotStore:
 
     def reference_df(self) -> pl.DataFrame:
         return self.con.sql('SELECT * FROM ch').pl()
+
+    def apply_reference(self, d: dict, con=None) -> str:
+        """Сообщение `tf.ingest.reference` (Н26). Возвращает, что применено; непонятное — ValueError.
+
+        - `channel.status` от воронки: канал замолчал (`silent`, с `since`) или заговорил (`ok`);
+        - `object` и `channel` — строка справочника с колонками датасета (`ид_объект`, `родитель`, …,
+          `ид_канала_данных`, `тип_датчика`, …): объект или канал добавлен или изменён на ходу.
+        """
+        con = con or self.con
+        kind = d.get('kind')
+        if kind == 'channel.status':
+            status = d['status']
+            if status not in ('silent', 'ok'):
+                raise ValueError(f'статус канала {status!r}')
+            con.execute('INSERT OR REPLACE INTO ch_status VALUES (?,?,?,?)',
+                        (int(d['ид_канала_данных']), status, _msk(d.get('since') or d['at']), _msk(d['at'])))
+        elif kind == 'object':
+            # справочники из csv пересоздаются CREATE … AS SELECT, без первичного ключа: замена — удалить и вставить
+            con.execute('DELETE FROM obj WHERE object_id = ?', (int(d['ид_объект']),))
+            con.execute('INSERT INTO obj VALUES (?,?,?,?,?)',
+                        (int(d['ид_объект']), int(d['иерархия_уровень']),
+                         None if d.get('родитель') in (None, '') else int(d['родитель']),
+                         d.get('вид_объекта'), d.get('диспетчерское_название_объекта')))
+        elif kind == 'channel':
+            con.execute('DELETE FROM ch WHERE channel_id = ?', (int(d['ид_канала_данных']),))
+            con.execute('INSERT INTO ch VALUES (?,?,?,?,?,?)',
+                        (int(d['ид_канала_данных']), d.get('тип_инж_системы'), d['тип_датчика'],
+                         None if d.get('тег_инженерной_системы') is None else str(d['тег_инженерной_системы']),
+                         d.get('название_датчика'), int(d['ид_объект'])))
+            self._ch = None                              # новый канал сразу проходит чистку
+        else:
+            raise ValueError(f'неизвестный вид справочника {kind!r}')
+        return kind
+
+    def silent_channels(self) -> pl.DataFrame:
+        """Молчащие каналы по воронке: object_id, channel_id, stype, since."""
+        return self.con.sql("""SELECT c.object_id, s.channel_id, c.stype, s.since FROM ch_status s
+                               JOIN ch c USING (channel_id) WHERE s.status = 'silent'""").pl()
+
+    def last_events(self, objects: list[int], t, hours: int = 24) -> pl.DataFrame:
+        """Последнее событие каждого канала объектов `objects` за `hours` ч до t (свидетели тревоги, §9.7)."""
+        if not objects:
+            return pl.DataFrame(schema={'object_id': pl.Int32, 'channel_id': pl.Int32, 'ts': pl.Datetime,
+                                        'stype': pl.Utf8, 'value': pl.Utf8})
+        ids = ','.join(str(int(o)) for o in objects)
+        return self.con.sql(f"""
+            SELECT object_id, channel_id, ts, stype, value FROM ev_all
+            WHERE ts < TIMESTAMP '{t}' AND ts >= TIMESTAMP '{t}' - INTERVAL {int(hours)} HOUR
+              AND object_id IN ({ids}) AND stype <> '{config.GUARD_STYPE}'
+            QUALIFY row_number() OVER (PARTITION BY channel_id ORDER BY ts DESC) = 1""").pl()
 
     # ----- чистка (совпадает с pipeline/events.py) ---------------------------------
     def clean_event(self, channel_id: int, ts, value) -> dict | None:

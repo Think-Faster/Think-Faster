@@ -88,7 +88,7 @@ class KafkaReader(JournalReader):
         except ImportError as e:
             raise RuntimeError('confluent-kafka не установлен — сервис без него не читает '
                                'tf.ingest.* (см. ML/service/requirements.txt)') from e
-        self.topics = topics or [config.TOPIC_READINGS, config.TOPIC_JOURNAL]
+        self.topics = topics or [config.TOPIC_READINGS, config.TOPIC_JOURNAL, config.TOPIC_REFERENCE]
         conf = config.kafka_conf(**{'group.id': group or config.KAFKA_GROUP,
                                     'auto.offset.reset': 'earliest',
                                     'enable.auto.commit': False,     # П3: коммит после пачки
@@ -145,9 +145,12 @@ def consume(store, reader: KafkaReader, stop, dead=None, batch_size: int = 2000,
     тоже коммитится: повторять его бессмысленно. Строка, отброшенная чисткой (чужой канал, пустое
     значение), — только в счётчик `dropped` для наблюдения M10. `written_at` — когда последняя пачка
     легла в журнал; счётчики отдаёт `/status` (поле `ingest`).
+
+    `tf.ingest.reference` (Н26) применяется сразу, мимо пачки: молчание каналов от воронки и правки
+    справочника (`store.apply_reference`); счётчик — `reference`.
     """
     stats = stats if stats is not None else {}
-    for k in ('accepted', 'dropped', 'dead'):
+    for k in ('accepted', 'dropped', 'dead', 'reference'):
         stats.setdefault(k, 0)
     batch: list[dict] = []
     pending = 0
@@ -156,8 +159,13 @@ def consume(store, reader: KafkaReader, stop, dead=None, batch_size: int = 2000,
         if msg is not None and msg.error() is None:
             pending += 1
             try:
-                ev = reader._parse(msg.value())
-                clean = store.clean_event(ev.channel_id, ev.ts, ev.value)
+                if msg.topic() == config.TOPIC_REFERENCE:
+                    store.apply_reference(json.loads(msg.value()))
+                    stats['reference'] += 1
+                    clean = False
+                else:
+                    ev = reader._parse(msg.value())
+                    clean = store.clean_event(ev.channel_id, ev.ts, ev.value)
             except (ValueError, KeyError, TypeError) as e:     # JSONDecodeError и UnicodeDecodeError — тоже ValueError
                 stats['dead'] += 1
                 if dead is not None:
@@ -166,7 +174,7 @@ def consume(store, reader: KafkaReader, stop, dead=None, batch_size: int = 2000,
             else:
                 if clean is None:
                     stats['dropped'] += 1
-            if clean is not None:
+            if clean:
                 batch.append(clean)
         if pending and (len(batch) >= batch_size or msg is None):
             if batch:

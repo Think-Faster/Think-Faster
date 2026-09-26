@@ -19,7 +19,9 @@ def _work(root: Path, n: int = 60) -> Path:
     feat.mkdir(parents=True)
     (feat / 'meta.json').write_text(json.dumps({'features': FEATURES}), encoding='utf-8')
     pl.DataFrame({'object_id': np.repeat([1, 2, 3], n // 3), 'h': np.tile(np.arange(n // 3), 3),
-                  'a': rng.random(n), 'b': rng.random(n)}).write_parquet(feat / '2025.parquet')
+                  'a': (a := rng.random(n)), 'b': rng.random(n),
+                  # метка калибровки: эпизод пожара в ближайшие 24 ч чаще там, где больше признак a
+                  'next_fire': np.where(rng.random(n) < a, 5.0, 500.0)}).write_parquet(feat / '2025.parquet')
     return root / 'work'
 
 
@@ -118,6 +120,11 @@ class BundleTest(unittest.TestCase):
             self.assertEqual(bundle.locate(q, work, root / 'tmp'), [])
             np.testing.assert_allclose(pa, q.predict(frame)['fire'])
             self.assertTrue((np.diff(pa) >= 0).all())
+            cal = json.loads((root / 'bundle' / 'calibration.json').read_text(encoding='utf-8'))['fire']
+            self.assertEqual((cal['rows'], len(cal['x'])), (60, len(cal['y'])))
+            conf = Predictor(root / 'bundle').confidence('fire', pa)
+            self.assertTrue(((conf >= 0) & (conf <= 1)).all() and (np.diff(conf) >= 0).all())
+            np.testing.assert_allclose(conf, q.confidence('fire', pa))   # пакет и рабочая папка — одна кривая
 
 
 if __name__ == '__main__':

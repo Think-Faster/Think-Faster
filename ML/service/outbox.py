@@ -20,15 +20,22 @@ def build_message(object_id: int, hour_end: str, model_version: str,
 
 
 def fill_type(msg: dict, tp: str, *, score, threshold, alarm, since_hours=None,
-              reasons=None, confidence=None, evidence=None) -> None:
+              reasons=None, confidence=None, evidence=None, silent=None, stale_hours=None) -> None:
+    """Блок типа. `stale_hours` — поток семейств типа молчит N часов по всему парку (§7), `silent` —
+    какие семейства датчиков типа молчат на этом объекте по воронке (раздел 55): оба — при любой
+    оценке, чтобы интерфейс видел, на чём она посчитана; остальное — только у тревоги."""
     blk = {'score': float(score), 'threshold': float(threshold), 'alarm': bool(alarm)}
+    if stale_hours is not None:
+        blk['stale_hours'] = round(float(stale_hours), 1)
+    if silent:
+        blk['silent'] = list(silent)
     if alarm:
         if since_hours is not None:
             blk['since_hours'] = int(since_hours)
         if reasons:
             blk['reasons'] = reasons
         if confidence is not None:
-            blk['confidence'] = float(confidence)
+            blk['confidence'] = round(float(confidence), 4)
         if evidence:
             blk['evidence'] = evidence
     msg['types'][tp] = blk

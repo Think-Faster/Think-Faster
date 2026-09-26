@@ -92,6 +92,9 @@ class _IngestStore:
     def append(self, rows: list[dict]) -> int:
         return self.store.append(rows, con=self.con)
 
+    def apply_reference(self, d: dict) -> str:
+        return self.store.apply_reference(d, con=self.con)
+
 
 class Service:
     def __init__(self, *, settings_dir: Path | None = None, seed: Path | None = None, audit=None,
@@ -256,7 +259,9 @@ class Service:
 
             model_version = self.predictor.version
             clock = self.clock.label if self.clock is not None else 'live'
-            n_alarm = self._emit_forecasts(now, h, frame, objects, scores, thr, applied, model_version, clock)
+            fres = snapmod.freshness(self.store, now)
+            n_alarm = self._emit_forecasts(now, h, frame, objects, scores, thr, applied, model_version, clock,
+                                           fres)
             n_fact, fact_status = self._emit_facts(now, h, eps, coll, model_version, clock)
             have = {(o, tp) for o, tp, *_ in statuses}
             statuses += [s for s in fact_status if (s[0], s[1]) not in have]
@@ -270,7 +275,6 @@ class Service:
             self._save_state()
 
             # наблюдение и обслуживание
-            fres = snapmod.freshness(self.store, now)
             stale = any(fres.get(tp, 0) >= config.STALE_HOURS.get(tp, config.STALE_HOURS['default'])
                         for tp in config.TYPES)
             self.observer.observe(alarms={tp: applied[tp][0] for tp in config.TYPES},
@@ -290,13 +294,57 @@ class Service:
             log.info('такт %s: %s', now.isoformat(), self.last)
             return self.last
 
-    def _emit_forecasts(self, now, h, frame, objects, scores, thr, applied, model_version, clock) -> int:
+    def _silence(self) -> dict[int, set]:
+        """Объект → семейства датчиков, у которых воронка отметила молчащие каналы (раздел 55)."""
+        import snapshot as snapmod
+        out: dict[int, set] = {}
+        for o, s in self.store.silent_channels().select(['object_id', 'stype']).iter_rows():
+            for fam in snapmod.families_of(s):
+                out.setdefault(int(o), set()).add(fam)
+        return out
+
+    def _evidence(self, now, objs: list[int]) -> dict[tuple, list]:
+        """(объект, тип) → свидетели §9.7: последнее событие каналов семейств типа, свежие первыми."""
+        import snapshot as snapmod
+        ev = self.store.last_events(objs, now, config.EVIDENCE_HOURS).sort('ts', descending=True)
+        out: dict[tuple, list] = {}
+        for o, ch, ts, s, v in ev.select(['object_id', 'channel_id', 'ts', 'stype', 'value']).iter_rows():
+            fams = snapmod.families_of(s)
+            for tp, need in snapmod.FAMILIES.items():
+                lst = out.setdefault((int(o), tp), [])
+                if fams & set(need) and len(lst) < config.EVIDENCE_MAX:
+                    lst.append({'sensor_id': int(ch), 'ts': ts.isoformat(timespec='seconds') + config.TZ,
+                                'value': v})
+        return out
+
+    def _emit_forecasts(self, now, h, frame, objects, scores, thr, applied, model_version, clock,
+                        fres: dict | None = None) -> int:
         import recommend
+        import snapshot as snapmod
         per_obj: dict[int, list] = {}
         for tp in config.TYPES:
             for i in np.flatnonzero(applied[tp][0]):
                 per_obj.setdefault(int(i), []).append(tp)
         reasons = {(i, tp): self.predictor.reasons(frame, i, tp, k=3) for i, tps in per_obj.items() for tp in tps}
+        conf = {}
+        for tp in config.TYPES:
+            idx = [i for i, tps in per_obj.items() if tp in tps]
+            try:
+                c = self.predictor.confidence(tp, np.asarray(scores[tp])[idx]) if idx else None
+            except Exception:                # уверенность — подсказка: без неё тревога всё равно уходит
+                log.exception('калибровка %s не посчиталась', tp)
+                c = None
+            if c is not None:
+                conf.update({(i, tp): float(v) for i, v in zip(idx, c)})
+        try:
+            silence = self._silence()
+            evidence = self._evidence(now, [int(objects[i]) for i in per_obj])
+        except Exception:
+            log.exception('молчание каналов и свидетели не собрались')
+            silence, evidence = {}, {}
+        fres = fres or {}
+        stale = {tp: fres[tp] for tp in config.TYPES
+                 if fres.get(tp, 0) >= config.STALE_HOURS.get(tp, config.STALE_HOURS['default'])}
         wanted = {int(objects[i]): (tps, [f'{tp}:{r["feature"]}' for tp in tps for r in reasons[(i, tp)]],
                                     {tp: int(applied[tp][1][i]) for tp in tps})
                   for i, tps in per_obj.items()}
@@ -308,10 +356,18 @@ class Service:
         for i, oid in enumerate(objects):
             o = int(oid)
             msg = outbox.build_message(o, hour_iso(h), model_version, config.TYPES, clock=clock)
+            quiet = silence.get(o, set())
             for tp in config.TYPES:
                 alarm, since = bool(applied[tp][0][i]), int(applied[tp][1][i])
+                sil = sorted(quiet & set(snapmod.FAMILIES[tp]))
+                c = conf.get((i, tp))
+                if c is not None:
+                    for fam in sil:
+                        c *= 1.0 - config.SILENCE_COST.get(tp, {}).get(fam, 0.0)
                 outbox.fill_type(msg, tp, score=scores[tp][i], threshold=thr[tp], alarm=alarm,
-                                 since_hours=since, reasons=reasons.get((i, tp)) if alarm else None)
+                                 since_hours=since, reasons=reasons.get((i, tp)) if alarm else None,
+                                 confidence=c, evidence=evidence.get((o, tp)), silent=sil,
+                                 stale_hours=stale.get(tp))
             rec = recs.get(o)
             if rec is not None:
                 outbox.attach_recommendation(msg, rec)
