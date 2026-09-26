@@ -10,6 +10,11 @@
     TF_WORK=work_pa python urgent.py _prim [зёрен]      # analytics.md, раздел 65
     TF_WORK=work_pa python urgent.py '' [зёрен]         # обычная цель
     TF_WORK=work_pa python urgent.py _prim 5 24         # вторая суточная модель на первичной цели
+    TF_WORK=work_pa python urgent.py _prim 5 24 v1      # то же поверх версии 1 оборудования (сеть v1, тест)
+    TF_WORK=work_pa python urgent.py _prim 5 24 v1pa    # поверх смеси 0,75/0,25 с сетью pa_all (оба года)
+
+Опора — суточный CatBoost×5; с v1 или v1pa — только оборудование, опора — 0,75 ранга CatBoost×5 +
+0,25 ранга сети, как в версии 1.
 """
 import sys
 import numpy as np
@@ -23,6 +28,9 @@ S6 = [0.0002, 0.0005, 0.001, 0.002, 0.003, 0.005, 0.0075, 0.01, 0.015, 0.02, 0.0
 SEEDS = ['', '_s1', '_s2', '_s3', '_s4'][:int(sys.argv[2]) if len(sys.argv) > 2 else 5]
 HZ = int(sys.argv[3]) if len(sys.argv) > 3 else 6       # горизонт второй модели, ч
 YEARS = {'val': [2025], 'test': [2026]}
+BASE = sys.argv[4] if len(sys.argv) > 4 else ''         # '', v1, v1pa — опора у оборудования
+if BASE:
+    TYPES = ['equipment']
 
 
 def pct(p):
@@ -37,6 +45,17 @@ def score(runs, on, yy, tp):
             base = (o, h, n)
         acc = acc + pct(p)
     return base, acc / len(runs)
+
+
+def v1(p24, on):
+    """Версия 1 оборудования: 0,75 ранга бустинга + 0,25 ранга сети, в порядке operating.split."""
+    tag, seeds = ('old_all', range(3)) if BASE == 'v1' else ('pa_all', range(5))
+    if BASE == 'v1' and on != 'test':
+        return None
+    suf = '_val' if on == 'val' else ''
+    net = sum(pct(np.load(config.WORK / 'roll' / f'{tag}_s{s}_2024-01-01_equipment{suf}.npy')) for s in seeds)
+    assert len(net) == len(p24)
+    return 0.75 * pct(p24) + 0.25 * pct(net)
 
 
 def runs_of(o, h, m):
@@ -68,7 +87,7 @@ def caught(key, eps, alarm, W):
     return hit.any(1), lead
 
 
-print(f'# R1: вторая модель {HZ} ч (цель {TG or "все эпизоды"}) поверх суточного\n')
+print(f'# R1: вторая модель {HZ} ч (цель {TG or "все эпизоды"}) поверх суточного {BASE}\n')
 for tp in TYPES:
     base24 = [('main_h24' if tp == 'gas' else 'stfx_main_h24') + s for s in SEEDS]
     run6 = [f'main_h{HZ}{TG}' + s for s in SEEDS]
@@ -79,6 +98,10 @@ for tp in TYPES:
     print('|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|')
     for on, yy in YEARS.items():
         (o, h, n), p24 = score(base24, on, yy, tp)
+        if BASE:
+            p24 = v1(p24, on)
+            if p24 is None:
+                continue
         np_ = operating.split(base24[0], on, yy, tp, 'cat', '_prim')[2]
         _, p6 = score(run6, on, yy, tp)
         order = np.lexsort((h, o))
