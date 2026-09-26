@@ -12,7 +12,8 @@
 
 Права пользователя сервис не знает (права-и-аудит §1): их проверяет BFF у себя и ходит сюда своей
 техучёткой. Пользовательский токен принимается только на `/status` и `/estimate`; на остальных —
-403 и `access.denied`. Неверный токен — 401 и `token.refused`. В событии из токена только `jti`.
+403 и `access.denied`. Неверный токен — 401 и `token.refused`; протухший — 401 без события (§6.2:
+фронт обновляет токен каждые 10 минут, это не событие). В событии из токена только `jti`.
 При `TF_ENV=dev` без ключа и без TF_AUTH_JWKS ручки открыты (стенд); в `prod` ключ, которого нет в
 Vault, берётся с JWKS think-auth, а пока его не получить — 503.
 """
@@ -69,7 +70,7 @@ def create_app(service, verifier=None):
             try:
                 claims = verifier.verify(authorization.split(None, 1)[1].strip())
             except tfkit.TokenError as e:
-                if e.status >= 500:           # ключа нет — отказ не вызывающего, а наш: без аудита
+                if not e.audit:               # ключа нет (наш отказ) или токен протух (§6.2): без аудита
                     raise HTTPException(e.status, e.reason) from None
                 refuse('token.refused', e.status, e.reason, request, jti=e.jti)
             if verifier.kind(claims) == 'service':

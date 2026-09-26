@@ -94,9 +94,15 @@ def secret(path: str, field: str, env_var: str | None = None, required: bool = T
 
 # ----- токены ----------------------------------------------------------------------------------
 class TokenError(Exception):
-    def __init__(self, status: int, reason: str, jti: str | None = None, sub: str | None = None):
+    """`audit` — писать ли отказ в журнал действий. Протухший токен — штатная работа фронта (обновление
+    раз в 10 минут), в журнал действий не идёт (права-и-аудит §6.2): остаётся строкой 401 в журнале
+    запросов. Отказ по нашей вине (нет ключа, 503) — тоже не событие вызывающего."""
+
+    def __init__(self, status: int, reason: str, jti: str | None = None, sub: str | None = None,
+                 audit: bool | None = None):
         super().__init__(reason)
         self.status, self.reason, self.jti, self.sub = status, reason, jti, sub
+        self.audit = status < 500 if audit is None else audit
 
 
 class Verifier:
@@ -146,7 +152,7 @@ class Verifier:
             claims = jwt.decode(token, self.key(), algorithms=['RS256'], audience=self.audience,
                                 options={'require': ['exp', 'sub'], 'verify_aud': self.audience is not None})
         except jwt.ExpiredSignatureError:
-            raise TokenError(401, 'срок токена истёк') from None
+            raise TokenError(401, 'срок токена истёк', audit=False) from None
         except jwt.PyJWTError as e:
             jti = None
             try:
@@ -188,6 +194,7 @@ class Audit:
         self.redis_url = redis_url if redis_url is not None else os.environ.get('TF_REDIS_URL')
         self.spool = spool
         self._r = None
+        self._lock = threading.RLock()       # такт, команды и ручки пишут из разных потоков
 
     def _redis(self):
         if self._r is None and self.redis_url:
@@ -222,10 +229,14 @@ class Audit:
 
     def send(self, row: dict) -> bool:
         payload = json.dumps(row, ensure_ascii=False, default=str)
+        with self._lock:
+            return self._send(payload)
+
+    def _send(self, payload: str) -> bool:
         try:
             r = self._redis()
             if r is not None:
-                self.flush()
+                self._flush(r)
                 r.xadd(self.stream, {'event': payload}, maxlen=self.maxlen, approximate=True)
                 return True
         except Exception as e:                                  # аудит не роняет сервис
@@ -240,12 +251,25 @@ class Audit:
         return False
 
     def flush(self) -> int:
-        """Дослать то, что копилось в файле, пока Redis лежал."""
-        if self.spool is None or not self.spool.exists() or self._r is None:
+        """Дослать то, что копилось в файле, пока Redis лежал: перед каждым событием и по такту сервиса.
+        Оборвётся посреди — часть строк уйдёт второй раз; сервис аудита отбрасывает повтор по `event_id`."""
+        with self._lock:
+            if self.spool is None or not self.spool.exists():
+                return 0
+            try:
+                r = self._redis()
+                return self._flush(r) if r is not None else 0
+            except Exception as e:
+                log.warning('поток аудита недоступен: %s', type(e).__name__)
+                self._r = None
+                return 0
+
+    def _flush(self, r) -> int:
+        if self.spool is None or not self.spool.exists():
             return 0
         lines = self.spool.read_text(encoding='utf-8').splitlines()
         for line in lines:
-            self._r.xadd(self.stream, {'event': line}, maxlen=self.maxlen, approximate=True)
+            r.xadd(self.stream, {'event': line}, maxlen=self.maxlen, approximate=True)
         self.spool.unlink()
         return len(lines)
 

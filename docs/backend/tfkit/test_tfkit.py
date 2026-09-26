@@ -112,6 +112,7 @@ def test_verify_refuses(over, why):
     with pytest.raises(tfkit.TokenError) as e:
         tfkit.Verifier(PEM).verify(token(**over))
     assert e.value.status == 401 and why in e.value.reason
+    assert e.value.audit is (why != 'срок')        # протухший — не событие журнала (§6.2)
 
 
 def test_verify_foreign_key_keeps_jti_for_audit():
@@ -190,3 +191,15 @@ def test_audit_spools_and_flushes(tmp_path):
     a.event('notify.sent', details={'channel': 'email'})
     assert [r['event_type'] for _, r in a._r.rows] == ['notify.failed', 'notify.sent']
     assert not (tmp_path / 'audit.jsonl').exists()
+
+
+def test_audit_flush_without_new_events(tmp_path):
+    """Файл досылается и без нового события — по такту сервиса; при лежащем Redis файл цел."""
+    a = tfkit.Audit('tf-model', redis_url='', spool=tmp_path / 'audit.jsonl')
+    a.event('forecast.muted', details={'reason': 'works'})
+    a._r = FakeRedis(fail=True)
+    assert a.flush() == 0 and (tmp_path / 'audit.jsonl').exists()
+    a._r = FakeRedis()
+    r = a._r
+    assert a.flush() == 1 and not (tmp_path / 'audit.jsonl').exists()
+    assert [row['event_type'] for _, row in r.rows] == ['forecast.muted']

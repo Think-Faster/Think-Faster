@@ -99,9 +99,10 @@ class ApiTest(unittest.TestCase):
                  (token(jti='j5', iss='evil'), 'j5')]
         for tok, _ in cases:
             self.assertEqual(self.get('/status', tok).status_code, 401)
-        self.assertEqual([e[0] for e in self.refused()], ['token.refused'] * len(cases))
+        # протухший (j2) — 401 без события: фронт обновляет токен раз в 10 минут (права-и-аудит §6.2)
+        self.assertEqual([e[0] for e in self.refused()], ['token.refused'] * (len(cases) - 1))
         self.assertTrue(all(e[1] == 'anonymous' for e in self.refused()))
-        self.assertEqual([e[2] for e in self.refused()][2:], ['j3', 'j4', 'j5'])
+        self.assertEqual([e[2] for e in self.refused()][1:], ['j3', 'j4', 'j5'])
         text = repr(self.svc.audit.events)
         self.assertNotIn('eyJ', text)                             # сам токен в аудит не попадает
 

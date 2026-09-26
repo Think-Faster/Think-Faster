@@ -76,7 +76,7 @@ def make_audit():
     import tfkit
     # на стенде без Redis (dev) события копятся в файле на томе, а не ждут таймаута на каждом
     url = os.environ.get('TF_REDIS_URL', '' if config.ENV == 'dev' else config.REDIS_URL)
-    return tfkit.Audit('tf-model', redis_url=url, spool=config.AUDIT_SPOOL)
+    return tfkit.Audit('ml', redis_url=url, spool=config.AUDIT_SPOOL)   # имя сервиса — как в §6.4
 
 
 class _IngestStore:
@@ -264,6 +264,8 @@ class Service:
             self.fclog.write(ts, objects, scores, thr, statuses, model_version, st.version)
             if hasattr(self.sink, 'flush'):
                 self.sink.flush()
+            if hasattr(self.audit, 'flush'):
+                self.audit.flush()                  # 13.4: события, скопившиеся в файле, пока Redis лежал
             self.rules.dump(config.RULES_STATE)
             self._save_state()
 
