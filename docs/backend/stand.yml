@@ -23,7 +23,7 @@ services:
   # У Гриши Vault вне think-fast-net, порт 8200 на хосте (Н13); на стенде — в сети, адрес tf-vault.
   tf-vault:
     container_name: tf-vault
-    image: hashicorp/vault:latest
+    image: hashicorp/vault:1.20.0          # как в think-infra (hashicorp/docker-compose.yml)
     command: server -dev -dev-listen-address=0.0.0.0:8200
     environment:
       VAULT_DEV_ROOT_TOKEN_ID: ${TF_VAULT_ROOT_TOKEN:?TF_VAULT_ROOT_TOKEN is not set}
@@ -39,7 +39,7 @@ services:
   # Dev-Vault хранит всё в памяти: после перезапуска tf-vault — снова `up tf-vault-seed`.
   tf-vault-seed:
     container_name: tf-vault-seed
-    image: hashicorp/vault:latest
+    image: hashicorp/vault:1.20.0          # как в think-infra (hashicorp/docker-compose.yml)
     depends_on:
       tf-vault: {condition: service_healthy}
     networks: [think-fast-net]
