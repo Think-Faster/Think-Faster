@@ -241,3 +241,41 @@ def test_audit_flush_without_new_events(tmp_path):
     r = a._r
     assert a.flush() == 1 and not (tmp_path / 'audit.jsonl').exists()
     assert [row['event_type'] for _, row in r.rows] == ['forecast.muted']
+
+
+def test_request_log_one_row_per_request(tmp_path):
+    """§6.1: шаблон маршрута, метод, код, время, кто спросил; проба живости не пишется; при лежащем
+    Redis строка — в свой файл рядом с файлом событий."""
+    from fastapi import FastAPI, HTTPException
+    from fastapi.testclient import TestClient
+    app = FastAPI()
+
+    @app.get('/items/{item_id}')
+    def item(item_id: int):
+        if item_id == 0:
+            raise HTTPException(404, 'нет')
+        return {'id': item_id}
+
+    @app.get('/api/x/health')
+    def health():
+        return {'ok': True}
+
+    rl = tfkit.request_log(app, tfkit.Audit('tf-model', redis_url='', spool=tmp_path / 'audit.jsonl'),
+                           tfkit.Verifier(PEM))
+    rl.out._r = FakeRedis()
+    c = TestClient(app)
+    c.get('/items/5?q=1', headers={'Authorization': f'Bearer {token(scope="ml.read")}', 'X-Request-ID': 'r-1'})
+    c.get('/items/0', headers={'Authorization': 'Bearer not-a-jwt'})
+    c.get('/nowhere/7')
+    c.get('/api/x/health')
+    rl.q.join()
+    rows = [r for s, r in rl.out._r.rows if s == 'audit:requests']
+    assert [(r['method'], r['route'], r['status']) for r in rows] == [
+        ('GET', '/items/{item_id}', 200), ('GET', '/items/{item_id}', 404), ('GET', '(нет маршрута)', 404)]
+    assert (rows[0]['actor_kind'], rows[0]['actor_id'], rows[0]['request_id']) == ('service', 'u1', 'r-1')
+    assert (rows[1]['actor_kind'], rows[1]['actor_id']) == ('anonymous', None)
+    assert all(isinstance(r['duration_ms'], int) and r['service'] == 'tf-model' for r in rows)
+    rl.out._r = FakeRedis(fail=True)
+    c.get('/items/6')
+    rl.q.join()
+    assert (tmp_path / 'audit-requests.jsonl').exists() and not (tmp_path / 'audit.jsonl').exists()

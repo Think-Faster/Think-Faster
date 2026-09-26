@@ -403,6 +403,8 @@ def query_events(db, event_type: list[str] | None = None, since: datetime | None
 def make_app(connect, verifier, writer: Writer | None = None, audit: 'tfkit.Audit | None' = None):
     from fastapi import FastAPI, Header, HTTPException, Query, Request
     app = FastAPI(title='tf-audit', docs_url=None, redoc_url=None)
+    if isinstance(audit, tfkit.Audit):
+        tfkit.request_log(app, audit, verifier)          # чтение журнала — тоже строка журнала запросов
     local = threading.local()
 
     def db():

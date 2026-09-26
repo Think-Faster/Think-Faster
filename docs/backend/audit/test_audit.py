@@ -218,6 +218,16 @@ def test_request_row_needs_route_template():
         audit.parse_request(json.dumps({**base, 'route': '/x', 'status': 'ok'}), '3-0')
 
 
+def test_request_row_from_tfkit_is_accepted():
+    """Строку журнала запросов сервисы пишут через tfkit.RequestLog — аудит её принимает как есть."""
+    rl = tfkit.RequestLog(tfkit.Audit('ml', redis_url=''))
+    row = rl.row('get', '/api/ml/forecast', 200, 12.6, request_id='r-1', ip='10.0.0.1')
+    got = audit.parse_request(json.dumps(row), '1-0')
+    assert (got['service'], got['method'], got['route'], got['duration_ms'], got['actor_kind']) == \
+        ('ml', 'GET', '/api/ml/forecast', 13, 'anonymous')
+    assert tfkit.REQUESTS_STREAM == audit.STREAM_REQUESTS
+
+
 # ----- запись ----------------------------------------------------------------------------------
 def test_duplicate_from_spool_is_written_once(env):
     kit, r, db, w = env

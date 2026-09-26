@@ -80,6 +80,7 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title='Think Faster — уведомления', version='0.2.0', lifespan=lifespan)
+tfkit.request_log(app, audit, verifier)                  # строка на запрос (права-и-аудит §6.1)
 bearer = HTTPBearer(auto_error=False)
 
 

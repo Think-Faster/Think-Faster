@@ -123,6 +123,8 @@ def create_app(service, verifier=None):
     app = FastAPI(title='tf-model', docs_url=None, redoc_url=None, openapi_url=None)
     app.include_router(r)
     app.include_router(r, prefix='/api/ml')
+    if isinstance(getattr(service, 'audit', None), tfkit.Audit):
+        tfkit.request_log(app, service.audit, verifier)          # строка на запрос (права-и-аудит §6.1)
     return app
 
 

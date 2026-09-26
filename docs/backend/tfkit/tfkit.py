@@ -1,4 +1,5 @@
-"""Общее для наших сервисов контура: секреты из Vault, проверка токенов think-auth, события аудита.
+"""Общее для наших сервисов контура: секреты из Vault, проверка токенов think-auth, события аудита
+и журнал запросов.
 
 Один файл без своих зависимостей, кроме PyJWT и cryptography для токенов и redis для аудита
 (INTEGRATION §13.2, §13.4, §13.5). Подключается из сервиса так:
@@ -12,6 +13,7 @@ Vault, берётся из переменной окружения. В prod — 
 import json
 import logging
 import os
+import queue
 import socket
 import threading
 import time
@@ -291,6 +293,86 @@ class Audit:
             r.xadd(self.stream, {'event': line}, maxlen=self.maxlen, approximate=True)
         self.spool.unlink()
         return len(lines)
+
+
+# ----- журнал запросов -------------------------------------------------------------------------
+# Строка на каждый HTTP-запрос — audit.requests (права-и-аудит §6.1, §6.4): шаблон маршрута, а не путь
+# с номерами и строкой запроса; кто спросил — из токена, если он проходит проверку, иначе anonymous.
+# Поток — `audit:requests` того же Redis. Запись не держит ответ: строка кладётся в очередь, фоновый
+# поток отправляет её через Audit (лёг Redis — в свой файл рядом с файлом событий).
+REQUESTS_STREAM = 'audit:requests'
+
+
+class RequestLog:
+    def __init__(self, audit: Audit, verifier: 'Verifier | None' = None, skip_suffixes=('/health',),
+                 limit: int = 10_000):
+        spool = None if audit.spool is None else Path(audit.spool).with_name(
+            Path(audit.spool).stem + '-requests' + Path(audit.spool).suffix)
+        self.out = Audit(audit.service, redis_url=audit.redis_url, spool=spool, stream=REQUESTS_STREAM)
+        self.verifier, self.skip, self.limit = verifier, tuple(skip_suffixes), limit
+        self.q: queue.Queue = queue.Queue()
+        self.dropped = 0
+        threading.Thread(target=self._run, name='request-log', daemon=True).start()
+
+    def actor(self, authorization: str | None) -> tuple[str, str | None]:
+        if not authorization or self.verifier is None or not authorization.lower().startswith('bearer '):
+            return 'anonymous', None
+        try:
+            claims = self.verifier.verify(authorization.split(None, 1)[1])
+        except Exception:                        # чужой или протухший токен — отказ уже в журнале событий
+            return 'anonymous', None
+        return self.verifier.kind(claims), claims.get('sub')
+
+    def row(self, method: str, route: str, status: int, duration_ms: float, *, authorization=None,
+            request_id=None, ip=None, occurred_at: datetime | None = None) -> dict | None:
+        if route.endswith(self.skip):            # пробы живости Docker каждые секунды — не запросы людей
+            return None
+        kind, sub = self.actor(authorization)
+        return {'occurred_at': (occurred_at or datetime.now(timezone.utc)).isoformat(),
+                'service': self.out.service, 'method': method.upper(), 'route': route.split('?')[0],
+                'status': int(status), 'duration_ms': int(round(duration_ms)), 'actor_kind': kind,
+                'actor_id': sub, 'request_id': request_id, 'ip': ip}
+
+    def put(self, row: dict | None) -> None:
+        if row is None:
+            return
+        if self.q.qsize() >= self.limit:         # Redis и файл не успевают — строка теряется, счётчик растёт
+            self.dropped += 1
+            return
+        self.q.put(row)
+
+    def _run(self) -> None:
+        while True:
+            row = self.q.get()
+            try:
+                self.out.send(row)
+            except Exception:
+                log.exception('строка журнала запросов не записана')
+            finally:
+                self.q.task_done()
+
+    def install(self, app) -> 'RequestLog':
+        """Прослойка FastAPI: шаблон маршрута берётся после ответа (`scope['route']`), 404 — `(нет маршрута)`."""
+        @app.middleware('http')
+        async def _log(request, call_next):
+            t0 = time.perf_counter()
+            status = 500
+            try:
+                resp = await call_next(request)
+                status = resp.status_code
+                return resp
+            finally:
+                route = getattr(request.scope.get('route'), 'path', None) or '(нет маршрута)'
+                self.put(self.row(request.method, route, status, (time.perf_counter() - t0) * 1000,
+                                  authorization=request.headers.get('authorization'),
+                                  request_id=request.headers.get('x-request-id'),
+                                  ip=request.client.host if request.client else None))
+        return self
+
+
+def request_log(app, audit: Audit, verifier: 'Verifier | None' = None, **kw) -> RequestLog:
+    """Подключить журнал запросов к приложению FastAPI сервиса."""
+    return RequestLog(audit, verifier, **kw).install(app)
 
 
 def host() -> str:

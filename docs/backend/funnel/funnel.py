@@ -344,6 +344,8 @@ def make_app(funnel: Funnel, verifier, audit):
     from fastapi.responses import JSONResponse
 
     app = FastAPI(title='Think Faster — воронка показаний', version='1.0.0')
+    if isinstance(audit, tfkit.Audit):
+        tfkit.request_log(app, audit, verifier)          # строка на запрос (права-и-аудит §6.1)
 
     def refuse(event: str, status: int, reason: str, request: Request, claims: dict | None = None, jti=None):
         claims = claims or {}
