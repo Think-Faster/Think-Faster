@@ -1,0 +1,13 @@
+# контекст — корень репозитория; в образ идёт только то, что копирует Dockerfile
+*
+!ML/pipeline
+!ML/service
+!ML/settings
+!docs/backend/tfkit/tfkit.py
+!docs/dataset/справочник_объектов_диспетчер.csv
+!docs/dataset/справочник_каналов_датчиков.csv
+**/__pycache__
+**/.pytest_cache
+ML/service/tests
+ML/service/.venv
+ML/service/data

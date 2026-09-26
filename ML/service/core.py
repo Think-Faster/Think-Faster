@@ -123,6 +123,7 @@ class Service:
         self.last_now: datetime | None = None     # граница последнего посчитанного часа
         self.last: dict = {}                      # сводка последнего такта
         self.freshness: dict = {}
+        self.ingest_stats: dict | None = None  # счётчики приёма Kafka (main.start_ingest)
         self._cal = None
         self._collectors: dict[int, int] | None = None
         self._retrain_thread: threading.Thread | None = None
@@ -649,7 +650,8 @@ class Service:
             'retrain': {'enabled': RETRAIN_ENABLED, 'needed': self.state['retrain_needed'],
                         'reason': self.state.get('retrain_reason')},
             'thresholds': dict(self.history.thresholds) if self.history else {},
-            'freshness_hours': self.freshness, 'last_tick': self.last}
+            'freshness_hours': self.freshness, 'last_tick': self.last,
+            'ingest': dict(self.ingest_stats) if self.ingest_stats is not None else None}
 
     def estimate(self, tp: str, share: float) -> dict:
         """«Доля часов → тревог в сутки» по истории последних 90 суток (§9.3) — без записи."""

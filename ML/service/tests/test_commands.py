@@ -141,6 +141,7 @@ class IngestTest(unittest.TestCase):
         stats = consume(store, Reader(msgs, stop), stop, dead=lambda *a: dead.append(a), batch_size=2)
         self.assertEqual([r['channel_id'] for r in store.rows], [1, 2, 3])
         self.assertEqual((stats['accepted'], stats['dropped'], stats['dead']), (3, 1, 1))
+        self.assertRegex(stats['written_at'], r'^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d$')
         self.assertEqual(dead[0][3], 'tf.ingest.readings')
         self.assertTrue(dead[0][2].startswith('JSONDecodeError'))
 

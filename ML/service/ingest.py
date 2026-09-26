@@ -143,7 +143,8 @@ def consume(store, reader: KafkaReader, stop, dead=None, batch_size: int = 2000,
     Пачка пишется в горячий журнал на 2000 строк или на тишине в `idle` секунд, и только после
     записи коммитится смещение (П3). Сообщение, которое не разобралось, уходит в `dead` (tf.dlq) и
     тоже коммитится: повторять его бессмысленно. Строка, отброшенная чисткой (чужой канал, пустое
-    значение), — только в счётчик `dropped` для наблюдения M10.
+    значение), — только в счётчик `dropped` для наблюдения M10. `written_at` — когда последняя пачка
+    легла в журнал; счётчики отдаёт `/status` (поле `ingest`).
     """
     stats = stats if stats is not None else {}
     for k in ('accepted', 'dropped', 'dead'):
@@ -171,11 +172,13 @@ def consume(store, reader: KafkaReader, stop, dead=None, batch_size: int = 2000,
             if batch:
                 store.append(batch)
                 stats['accepted'] += len(batch)
+                stats['written_at'] = config.now_msk().isoformat(timespec='seconds')
             reader.commit()
             batch, pending = [], 0
     if batch:
         store.append(batch)
         stats['accepted'] += len(batch)
+        stats['written_at'] = config.now_msk().isoformat(timespec='seconds')
         reader.commit()
     return stats
 
