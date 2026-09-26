@@ -9,6 +9,7 @@
 
     TF_WORK=work_pa python urgent.py _prim [зёрен]      # analytics.md, раздел 65
     TF_WORK=work_pa python urgent.py '' [зёрен]         # обычная цель
+    TF_WORK=work_pa python urgent.py _prim 5 24         # вторая суточная модель на первичной цели
 """
 import sys
 import numpy as np
@@ -20,6 +21,7 @@ TYPES = config.TYPES
 S = config.shares()
 S6 = [0.0002, 0.0005, 0.001, 0.002, 0.003, 0.005, 0.0075, 0.01, 0.015, 0.02, 0.03]
 SEEDS = ['', '_s1', '_s2', '_s3', '_s4'][:int(sys.argv[2]) if len(sys.argv) > 2 else 5]
+HZ = int(sys.argv[3]) if len(sys.argv) > 3 else 6       # горизонт второй модели, ч
 YEARS = {'val': [2025], 'test': [2026]}
 
 
@@ -66,10 +68,10 @@ def caught(key, eps, alarm, W):
     return hit.any(1), lead
 
 
-print(f'# R1: срочный контур 6 ч (цель {TG or "все эпизоды"}) поверх суточного\n')
+print(f'# R1: вторая модель {HZ} ч (цель {TG or "все эпизоды"}) поверх суточного\n')
 for tp in TYPES:
     base24 = [('main_h24' if tp == 'gas' else 'stfx_main_h24') + s for s in SEEDS]
-    run6 = [f'main_h6{TG}' + s for s in SEEDS]
+    run6 = [f'main_h{HZ}{TG}' + s for s in SEEDS]
     print(f'## {tp}, доля суточной {S[tp]:.3f}\n')
     print('| период | s6 | первичных | пойм. суточной | +срочной | медиана упрежд., ч | всех эпизодов | +срочной '
           '| ложных сигн. суточной | +срочной (доля) | суточная с той же прибавкой: +первичных '
@@ -101,11 +103,11 @@ for tp in TYPES:
         cost, costh, gain = np.maximum.accumulate(cost), np.maximum.accumulate(costh), np.maximum.accumulate(gain)
         for s6 in S6:
             a6 = p6 >= np.quantile(p6, 1 - s6)
-            c6p, l6p = caught(key, ep_pr, a6, 6)
-            c6a, _ = caught(key, ep_all, a6, 6)
+            c6p, l6p = caught(key, ep_pr, a6, HZ)
+            c6a, _ = caught(key, ep_all, a6, HZ)
             gp = c6p & ~c24p
             ga = c6a & ~c24a
-            f6 = false_runs(o, h, a6 & ~a24, n <= 6)
+            f6 = false_runs(o, h, a6 & ~a24, n <= HZ)
             x6 = int((a6 & ~a24).sum())
             med = f'{np.median(l6p[gp]):.0f}' if gp.any() else '—'
             print(f'| {on} | {s6:g} | {len(ep_pr)} | {c24p.sum()} | {gp.sum()} | {med} | {len(ep_all)} | {ga.sum()} '
