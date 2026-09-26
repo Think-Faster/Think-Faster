@@ -1,0 +1,84 @@
+# Наши сервисы вокруг модели: модель, воронка, уведомления, аудит (ML/INTEGRATION.md §12.3, этапы 6 и 8).
+# Встают в сеть think-fast-net рядом с think-infra и зовут её по тем же именам: tf-kafka, tf-rabbit,
+# tf-redis, tf-postgres. Секреты — только из Vault: у каждого сервиса свой токен роли файлом
+# (TF_VAULT_TOKENS/<сервис>.token, стенд их выпускает сам), в окружении и в образах паролей нет.
+#
+#   у нас:        сначала стенд (stand.yml), затем
+#                 docker compose -f docs/backend/compose.yml --env-file docs/backend/stand.env up -d --build
+#   на сервере:   этот файл и .env без секретов; сеть и инфраструктура — Гриши (этап 8)
+name: tf-services
+
+x-service: &service
+  restart: unless-stopped
+  networks: [think-fast-net]
+  extra_hosts: ["host.docker.internal:host-gateway"]    # Vault Гриши слушает 8200 на хосте (Н13)
+  mem_limit: 512m
+
+x-env: &env
+  TF_ENV: ${TF_ENV:-prod}
+  VAULT_ADDR: ${TF_VAULT_ADDR:-http://host.docker.internal:8200}
+  VAULT_TOKEN_FILE: /run/tf/vault-token
+  TF_REDIS_URL: redis://tf-redis:6379/0
+  TF_AUTH_JWKS: ${TF_AUTH_JWKS:-http://tf-auth:8080/.well-known/jwks}
+
+services:
+
+  tf-model:
+    <<: *service
+    container_name: tf-model
+    build: {context: ../.., dockerfile: ML/service/Dockerfile}
+    image: tf-model:${TF_TAG:-local}
+    environment:
+      <<: *env
+      TF_MODEL_CLOCK: ${TF_MODEL_CLOCK:-live}
+    volumes:
+      - ${TF_MODEL_BUNDLE_DIR:?TF_MODEL_BUNDLE_DIR — папка пакета модели (bundle.py, §13.6)}:/models/current:ro
+      - tf-ml-work:/work
+      - ${TF_VAULT_TOKENS:-./.vault}/model.token:/run/tf/vault-token:ro
+    mem_limit: 4g                       # горячий журнал DuckDB (TF_MEMORY 2GB) и модели в памяти
+
+  tf-funnel:
+    <<: *service
+    container_name: tf-funnel
+    build: {context: ., dockerfile: funnel/Dockerfile}
+    image: tf-funnel:${TF_TAG:-local}
+    environment:
+      <<: *env
+      TF_FUNNEL_PULL: ${TF_FUNNEL_PULL:-}             # стенд: http://tf-emulator:8000
+      TF_FUNNEL_SILENT_MIN: ${TF_FUNNEL_SILENT_MIN:-60}
+      TF_AUDIT_SPOOL: /tmp/tf-audit.spool
+    volumes:
+      - ${TF_VAULT_TOKENS:-./.vault}/funnel.token:/run/tf/vault-token:ro
+
+  tf-notify:
+    <<: *service
+    container_name: tf-notify
+    build: {context: ., dockerfile: notify/Dockerfile}
+    image: tf-notify:${TF_TAG:-local}
+    environment:
+      <<: *env
+      TF_RABBIT_URL: amqp://tf-rabbit:5672/tf
+      NOTIFY_CHANNELS: ${NOTIFY_CHANNELS:-email,telegram}
+      TF_AUDIT_SPOOL: /tmp/tf-audit.spool
+    volumes:
+      - ${TF_VAULT_TOKENS:-./.vault}/notify.token:/run/tf/vault-token:ro
+
+  tf-audit:
+    <<: *service
+    container_name: tf-audit
+    build: {context: ., dockerfile: audit/Dockerfile}
+    image: tf-audit:${TF_TAG:-local}
+    environment:
+      <<: *env
+      # у Гриши tf-postgres в app-network (Н12): там — host=host.docker.internal
+      TF_AUDIT_DB: ${TF_AUDIT_DB:-host=tf-postgres dbname=tf user=audit_writer}
+    volumes:
+      - ${TF_VAULT_TOKENS:-./.vault}/audit.token:/run/tf/vault-token:ro
+
+volumes:
+  tf-ml-work:
+    name: tf-ml-work
+
+networks:
+  think-fast-net:
+    external: true

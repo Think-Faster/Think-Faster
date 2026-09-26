@@ -1,0 +1,159 @@
+# Стенд у нас (ML/INTEGRATION.md §12.3, этап 6): инфраструктура — файлами think-infra без изменений
+# (Redis, RabbitMQ, Kafka с их пользователями, топиками и ACL), плюс то, чего в ней для стенда нет:
+# Vault на think-fast-net с секретами и токенами ролей, PostgreSQL со схемой аудита, эмулятор
+# think-test. Пароли — тестовые, только в stand.env (не в git; образец — stand.env.example).
+#
+#   docker network create think-fast-net
+#   docker compose -f docs/backend/stand.yml --env-file docs/backend/stand.env up -d
+#   docker compose -f docs/backend/compose.yml --env-file docs/backend/stand.env up -d --build
+#
+# Проверка цепочки: эмулятор → воронка (забирает сама, TF_FUNNEL_PULL) → tf.ingest.* → модель →
+# tf.forecast.results; /status воронки и модели, события — в audit.events.
+name: tf-stand
+
+include:
+  - path: ${TF_INFRA:?TF_INFRA — клон think-infra}/redis/docker-compose.yml
+  - path: ${TF_INFRA}/rabbitmq/docker-compose.yml
+    env_file: stand.env
+  - path: ${TF_INFRA}/kafka/docker-compose.yml
+    env_file: stand.env
+
+services:
+
+  # У Гриши Vault вне think-fast-net, порт 8200 на хосте (Н13); на стенде — в сети, адрес tf-vault.
+  tf-vault:
+    container_name: tf-vault
+    image: hashicorp/vault:latest
+    command: server -dev -dev-listen-address=0.0.0.0:8200
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: ${TF_VAULT_ROOT_TOKEN:?TF_VAULT_ROOT_TOKEN is not set}
+    cap_add: [IPC_LOCK]
+    networks: [think-fast-net]
+    healthcheck:
+      test: ["CMD", "vault", "status", "-address=http://127.0.0.1:8200"]
+      interval: 5s
+      retries: 20
+    restart: unless-stopped
+
+  # Одноразовый: секреты по §13.5 и по токену роли на сервис — читать только свои пути.
+  # Dev-Vault хранит всё в памяти: после перезапуска tf-vault — снова `up tf-vault-seed`.
+  tf-vault-seed:
+    container_name: tf-vault-seed
+    image: hashicorp/vault:latest
+    depends_on:
+      tf-vault: {condition: service_healthy}
+    networks: [think-fast-net]
+    environment:
+      VAULT_ADDR: http://tf-vault:8200
+      VAULT_TOKEN: ${TF_VAULT_ROOT_TOKEN}
+      KAFKA_MODEL: ${TF_KAFKA_MODEL_PASSWORD}
+      KAFKA_FUNNEL: ${TF_KAFKA_FUNNEL_PASSWORD}
+      RABBIT_MODEL: ${TF_RABBIT_MODEL_PASSWORD}
+      RABBIT_EMAIL: ${TF_RABBIT_EMAIL_PASSWORD}
+      RABBIT_TELEGRAM: ${TF_RABBIT_TELEGRAM_PASSWORD}
+      AUDIT_DB: ${TF_AUDIT_DB_PASSWORD:?TF_AUDIT_DB_PASSWORD is not set}
+      AUTH_PUBLIC_KEY: ${TF_STAND_AUTH_PUBLIC_KEY:-}
+      SMTP_USER: ${TF_STAND_SMTP_USER:-}
+      SMTP_PASSWORD: ${TF_STAND_SMTP_PASSWORD:-}
+      TELEGRAM_BOT_TOKEN: ${TF_STAND_TELEGRAM_BOT_TOKEN:-}
+      MODEL_SUBS: ${TF_STAND_MODEL_SUBS:-}
+      NOTIFY_SUBS: ${TF_STAND_NOTIFY_SUBS:-}
+      AUDIT_SUBS: ${TF_STAND_AUDIT_SUBS:-}
+      FUNNEL_SUBS: ${TF_STAND_FUNNEL_SUBS:-}
+    volumes:
+      - ${TF_VAULT_TOKENS:-./.vault}:/tokens
+    entrypoint: ["sh", "-euc"]
+    command:
+      - |
+        # put <путь> поле=значение...: пустые поля не пишутся (значения без пробелов)
+        put() {
+          p=$$1; shift; args=""
+          for kv in "$$@"; do [ -n "$${kv#*=}" ] && args="$$args $$kv"; done
+          if [ -n "$$args" ]; then vault kv put "secret/tf/$$p" $$args >/dev/null; echo "secret/tf/$$p"; fi
+        }
+        put kafka model_password="$$KAFKA_MODEL" funnel_password="$$KAFKA_FUNNEL"
+        put rabbit model_password="$$RABBIT_MODEL" email_password="$$RABBIT_EMAIL" telegram_password="$$RABBIT_TELEGRAM"
+        put audit db_password="$$AUDIT_DB" service_subs="$$AUDIT_SUBS"
+        put model service_subs="$$MODEL_SUBS"
+        put funnel service_subs="$$FUNNEL_SUBS"
+        put notify smtp_user="$$SMTP_USER" smtp_password="$$SMTP_PASSWORD" telegram_bot_token="$$TELEGRAM_BOT_TOKEN" service_subs="$$NOTIFY_SUBS"
+        # ключ проверки токенов — многострочный PEM, пишется отдельно
+        if [ -n "$$AUTH_PUBLIC_KEY" ]; then vault kv put secret/tf/auth public_key="$$AUTH_PUBLIC_KEY" >/dev/null; echo secret/tf/auth; fi
+        # role <сервис> <путь>...: политика только на чтение своих путей и токен роли в файл
+        role() {
+          s=$$1; shift
+          for p in "$$@"; do printf 'path "secret/data/tf/%s" {\n  capabilities = ["read"]\n}\n' "$$p"; done \
+            | vault policy write "tf-$$s" - >/dev/null
+          vault token create -policy="tf-$$s" -ttl=768h -display-name="tf-$$s" -field=token > "/tokens/$$s.token"
+          chmod 644 "/tokens/$$s.token"
+          echo "токен tf-$$s: $$*"
+        }
+        role model kafka rabbit auth model
+        role funnel kafka auth funnel
+        role notify rabbit auth notify
+        role audit audit auth
+    restart: "no"
+
+  # У Гриши tf-postgres в app-network (Н12); на стенде — в think-fast-net, схема аудита сразу.
+  tf-postgres:
+    container_name: tf-postgres
+    image: postgres:16
+    environment:
+      POSTGRES_DB: tf
+      POSTGRES_USER: tf
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is not set}
+    volumes:
+      - tf-stand-postgres:/var/lib/postgresql/data
+    networks: [think-fast-net]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tf -d tf"]
+      interval: 5s
+      retries: 20
+    restart: unless-stopped
+
+  # Одноразовый: schema.sql (повторно без вреда) и пароль роли audit_writer — тот же, что в Vault.
+  tf-audit-db-init:
+    container_name: tf-audit-db-init
+    image: postgres:16
+    depends_on:
+      tf-postgres: {condition: service_healthy}
+    networks: [think-fast-net]
+    environment:
+      PGHOST: tf-postgres
+      PGUSER: tf
+      PGDATABASE: tf
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      AUDIT_DB: ${TF_AUDIT_DB_PASSWORD}
+    volumes:
+      - ./audit/schema.sql:/schema.sql:ro
+    entrypoint: ["sh", "-euc"]
+    command:
+      - |
+        psql -q -v ON_ERROR_STOP=1 -f /schema.sql
+        echo "alter role audit_writer password :'pw';" | psql -q -v ON_ERROR_STOP=1 -v pw="$$AUDIT_DB"
+        echo "схема audit готова"
+    restart: "no"
+
+  # Эмулятор потока think-test: одни сутки журнала по текущим часам, ускорение и сбои из панели.
+  tf-emulator:
+    container_name: tf-emulator
+    image: python:3.12-slim
+    working_dir: /app/emulator
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+    command: ["sh", "-c", "pip install -q --no-cache-dir --root-user-action=ignore -r requirements.txt && exec python manage.py runserver 0.0.0.0:8000 --noreload"]
+    volumes:
+      - ${TF_TEST:?TF_TEST — клон think-test}:/app:ro
+    networks: [think-fast-net]
+    ports:
+      - "127.0.0.1:${TF_EMULATOR_PORT:-8090}:8000"   # панель эмулятора: ускорение, сбои
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4)"]
+      interval: 10s
+      start_period: 60s
+    restart: unless-stopped
+
+volumes:
+  tf-stand-postgres:
+    name: tf-stand-postgres

@@ -1256,3 +1256,50 @@ RabbitMQ `tf.notifications` у неё нет права публикации, и
 - **Образ.** `docker build -f docs/backend/funnel/Dockerfile -t tf-funnel docs/backend`,
   пользователь без прав, `TF_ENV=prod`.
 - **Тесты.** `test_funnel.py`, 54 теста без сети. Kafka и эмулятор подменены.
+
+### 13.10 Стенд и размещение
+
+Нужны два файла compose. Они проверены через `docker compose config`; живой запуск ждёт Docker Desktop
+(он остановлен, не хватает памяти).
+
+- **`docs/backend/compose.yml`** — наши сервисы: `tf-model`, `tf-funnel`, `tf-notify`, `tf-audit`.
+  Этот же файл уедет на сервер (этап 8). Сервисы встают во внешнюю сеть `think-fast-net` и зовут
+  инфраструктуру по именам из think-infra. У каждого сервиса свой токен роли Vault файлом
+  `TF_VAULT_TOKENS/<сервис>.token` → `/run/tf/vault-token`, и читает он только свои пути 13.5:
+  - модель — `kafka`, `rabbit`, `auth`, `model`;
+  - воронка — `kafka`, `auth`, `funnel`;
+  - уведомления — `rabbit`, `auth`, `notify`;
+  - аудит — `audit`, `auth`.
+
+  Паролей нет ни в окружении, ни в образах. На сервере Vault Гриши слушает 8200 на хосте (Н13),
+  поэтому по умолчанию `VAULT_ADDR=http://host.docker.internal:8200`. PostgreSQL у него в
+  `app-network` (Н12), и аудиту там задаётся `TF_AUDIT_DB=host=host.docker.internal …`.
+- **`docs/backend/stand.yml`** — инфраструктура стенда:
+  - Redis, RabbitMQ и Kafka подключаются через `include` из клона think-infra (`TF_INFRA`) без
+    единой правки: те же пользователи, топики, ACL, политики очередей;
+  - сверху — только то, чего в think-infra для стенда нет: `tf-vault` (dev, в сети) и одноразовый
+    `tf-vault-seed`, `tf-postgres` с одноразовым `tf-audit-db-init`, `tf-emulator`;
+  - `tf-vault-seed` пишет секреты по 13.5 и выпускает четыре токена ролей;
+  - `tf-audit-db-init` прогоняет `schema.sql` и ставит пароль `audit_writer` тот же, что в Vault;
+  - `tf-emulator` — эмулятор из клона think-test (`TF_TEST`), панель на `127.0.0.1:8090`.
+- **`stand.env.example`** — образец тестовых значений. Сам `stand.env` и `.vault/` в git не
+  попадают (`docs/backend/.gitignore`).
+
+Порядок запуска:
+
+1. `docker network create think-fast-net`.
+2. `docker compose -f docs/backend/stand.yml --env-file docs/backend/stand.env up -d`.
+3. `docker compose -f docs/backend/compose.yml --env-file docs/backend/stand.env up -d --build`.
+
+Цепочка на стенде: эмулятор → воронка (`TF_FUNNEL_PULL`) → `tf.ingest.*` → модель →
+`tf.forecast.results`. Уведомление по факту публикует в `tf.notifications` только `tf-bff`
+(`users.conf` think-infra). Поэтому без BFF этот шаг проверяется публикацией под учёткой `tf-bff`
+стенда.
+
+Ограничения стенда:
+
+- Dev-Vault держит всё в памяти. После перезапуска `tf-vault` нужно снова выполнить
+  `up tf-vault-seed`.
+- Без `TF_STAND_AUTH_PUBLIC_KEY` ключ проверки токенов берётся с JWKS `tf-auth`, которого на стенде
+  нет. Тогда ручки с токеном отвечают 503, а `/health` и поток данных работают.
+- `TF_MODEL_BUNDLE_DIR` — папка пакета из `bundle.py` (13.6), а не `work/export`.

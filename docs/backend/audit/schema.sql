@@ -4,8 +4,8 @@
 --   psql -v ON_ERROR_STOP=1 -f schema.sql
 --
 -- Паролей здесь нет. Роль audit_writer создаётся без пароля, пароль ставит администратор из Vault
--- (secret/tf/audit, поле db_password): psql -v pw="$(vault kv get -field=db_password secret/tf/audit)"
--- -c "alter role audit_writer password :'pw'".
+-- (secret/tf/audit, поле db_password). Переменные psql подставляются только во входном потоке, не в -c:
+--   echo "alter role audit_writer password :'pw';" | psql -v pw="$(vault kv get -field=db_password secret/tf/audit)"
 --
 -- Отличия от §6.4: у события есть event_id — повтор той же записи из потока (перезапуск сервиса
 -- аудита, досылка из файла tfkit) отбрасывается уникальным ключом, а не пишется второй раз.
