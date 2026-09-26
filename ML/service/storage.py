@@ -103,11 +103,12 @@ class HotStore:
         return self._ch
 
     # ----- запись ----------------------------------------------------------
-    def append(self, rows: list[dict]) -> int:
-        """INSERT OR IGNORE: дубль «канал + время + значение» схлопывается (Н6)."""
+    def append(self, rows: list[dict], con=None) -> int:
+        """INSERT OR IGNORE: дубль «канал + время + значение» схлопывается (Н6). `con` — курсор потока
+        приёма (core._IngestStore): такт в это время читает основным соединением."""
         if not rows:
             return 0
-        self.con.executemany(
+        (con or self.con).executemany(
             'INSERT OR IGNORE INTO ev_all VALUES (?,?,?,?,?,?,?)',
             [(r['object_id'], r['channel_id'], r['ts'], r['stype'], r['state'], r['num'], r['value'])
              for r in rows])
@@ -117,16 +118,19 @@ class HotStore:
                "'время': 'VARCHAR', 'тревожное': 'VARCHAR', 'значение_датчика': 'VARCHAR'}"
 
     def bulk_import(self, until: datetime | None = None, since: datetime | None = None,
-                    years: list[int] | None = None) -> int:
-        """Загрузка журнала из csv одним COPY-подобным INSERT (П9, INTEGRATION2 §10.1).
+                    years: list[int] | None = None, chunk_days: int = 7) -> int:
+        """Загрузка журнала из csv (П9, INTEGRATION2 §10.1): окно горячего журнала плюс вся охрана.
 
         Дата — параметр, не константа: `until` (по умолчанию config.DATA_END) режет хвост, `since`
-        — левый край. Годы вне YEARS и 2021 выкидываются, как в events.py. Чистка и дедупликация —
-        внутри того же запроса: разбор CSV — через read_csv поверхности (семейство COPY в DuckDB,
-        кавычки и провалы не ломают строку), массовая вставка объявлена одним INSERT OR IGNORE.
+        (по умолчанию `until` минус глубина M2, 100 сут) — левый край; строки охраны берутся за всю
+        историю, как их хранит `retention_sweep`. Годы вне YEARS и 2021 выкидываются, как в events.py.
+        Разбор CSV — через read_csv поверхности (семейство COPY в DuckDB, кавычки и провалы не ломают
+        строку), чистка — в том же запросе, во временную таблицу без индексов. В ev_all строки идут
+        порциями по `chunk_days` суток через INSERT OR IGNORE: первичный ключ (Н6) растёт в памяти, и
+        одна вставка 100 суток парка (~16 млн строк) не укладывается в TF_MEMORY=2GB, а по неделе — да.
         """
         until = until or config.DATA_END
-        since = since or datetime(2019, 1, 1)
+        since = since or until - timedelta(days=config.HOT_RETENTION_DAYS)
         years = years or config.YEARS
         files = [(config.JOURNAL / f'ext-journal-{y}.csv').as_posix() for y in years]
         missing = [f for f in files if not Path(f).exists()]
@@ -134,18 +138,29 @@ class HotStore:
             raise FileNotFoundError(f'нет журнала: {missing}')
         before = int(self.con.sql('SELECT count(*) FROM ev_all').fetchone()[0])
         self.con.sql(f"""
-            INSERT OR IGNORE INTO ev_all
+            CREATE OR REPLACE TEMP TABLE ev_stage AS
             WITH raw AS (
                 SELECT try_cast(ид_канала_данных AS INTEGER) AS channel_id,
                        try_cast(дата || ' ' || время AS TIMESTAMP) AS ts, значение_датчика AS v
                 FROM read_csv({files}, header=true, quote='"', escape='"', parallel=true,
                               columns={self.RAW_COLS})
-                WHERE ts >= TIMESTAMP '{since}' AND ts < TIMESTAMP '{until}' AND year(ts) <> 2021)
-            SELECT c.object_id::INT, r.channel_id, r.ts, c.stype,
-                   CASE WHEN try_cast(r.v AS DOUBLE) IS NULL THEN r.v END, try_cast(r.v AS DOUBLE), r.v
+                WHERE ts < TIMESTAMP '{until}' AND year(ts) <> 2021)
+            SELECT c.object_id::INT AS object_id, r.channel_id, r.ts, c.stype,
+                   CASE WHEN try_cast(r.v AS DOUBLE) IS NULL THEN r.v END AS state,
+                   try_cast(r.v AS DOUBLE) AS num, r.v AS value
             FROM raw r JOIN ch c USING (channel_id)
-            WHERE NOT (c.stype = '{config.GUARD_STYPE}' AND regexp_matches(r.v, '^[0-9#]{{2}}\\.[0-9#]{{2}}\\.'))
-            """)
+            WHERE (r.ts >= TIMESTAMP '{since}' OR c.stype = '{config.GUARD_STYPE}')
+              AND NOT (c.stype = '{config.GUARD_STYPE}' AND regexp_matches(r.v, '^[0-9#]{{2}}\\.[0-9#]{{2}}\\.'))
+            ORDER BY r.ts""")
+        cols = 'object_id, channel_id, ts, stype, state, num, value'
+        self.con.execute(f"INSERT OR IGNORE INTO ev_all SELECT {cols} FROM ev_stage WHERE ts < TIMESTAMP '{since}'")
+        a = since
+        while a < until:
+            b = min(a + timedelta(days=chunk_days), until)
+            self.con.execute(f"""INSERT OR IGNORE INTO ev_all SELECT {cols} FROM ev_stage
+                                 WHERE ts >= TIMESTAMP '{a}' AND ts < TIMESTAMP '{b}'""")
+            a = b
+        self.con.execute('DROP TABLE ev_stage')
         return int(self.con.sql('SELECT count(*) FROM ev_all').fetchone()[0]) - before
 
     # ----- чтение (образец — retro.open_db) ----------------------------------------

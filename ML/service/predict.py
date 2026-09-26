@@ -1,16 +1,29 @@
-"""Предиктор (M4): выгрузка `work/export` по манифесту main и счёт шести типов (П1).
+"""Предиктор (M4): выгрузка по манифесту и счёт шести типов (П1).
 
-Читает манифест в формате main (`models[tp][seed] = {file, family, params, trees, from_run}`,
-сети — `equipment/tcn_s*.pt`) — без единой правки манифеста.
+Выгрузка — `work/export` при разработке или пакет модели `TF_MODEL_BUNDLE` (/models/current, §13.6).
+Манифест main: `models[tp][ключ] = {file, family, from_run, ...}`; ключ — номер зерна (`'0'`) или
+`<семейство>_s<зерно>` (выгрузки версий, `export.py --equipment-version`). Версия модели типа (M9a,
+раздел 60) — папка рядом: `work/export_<тип>_v<N>` или `<пакет>/<тип>_v<N>`; её `models` и `blend`
+заменяют тип основного манифеста, остальные типы общие.
 
-Оценка зерна кладётся на отсортированную шкалу валидации 2025, как `retro.load_mix_models()`:
-`score = searchsorted(sorted_2025_scores, p, side='right') / len`; смесь по типу — среднее зёрен
-по весам из манифеста (у main веса равные). Шкала каждого зерна — оценки его же прогона на
-проверке (родитель seed в `from_run`), те же файлы `preds/<семейство>_<тип>_val.npy`, что читает
-`operating.split`/`retro.load_mix_models`. Для сети отказа оборудования шкала — `tcn_s<seed>_<тип>
-_val.npy` того же прогона. Истории с той же шкалой (bootstrap) отдаёт `bootstrap_history()`.
+Оценка зерна кладётся на отсортированную шкалу проверки 2025, как `retro.load_mix_models()`:
+`searchsorted(sorted_2025, p, side='right') / len`. Смесь типа — по частям `blend`: среднее рангов
+зёрен семейства, части — со своими весами; без `blend` (main) — среднее всех зёрен.
+
+Шкала зерна (оценки проверки 2025 в порядке витрины) ищется так:
+1. `<папка выгрузки>/scales/<тип>_<семейство>_s<зерно>.npy` — пакет модели;
+2. сеть прогона вперёд: `work/roll/<from_run>_<тип>_val.npy` (`seqmodel.py --score-val`, Н20);
+3. `work/runs/<прогон>/preds/<семейство>_<тип>_val.npy` — как `operating.split`/`retro.load_mix_models`.
+Те же файлы дают начальную историю порога (`bootstrap_history`).
+
+Пункты 2–3 — только для разработки: они ищут по имени прогона, а имя модель не удостоверяет.
+Бустинги выгрузки переобучены на 2022–2026 (`export.py`) и с моделями прогонов не совпадают, а в
+work под теми же именами лежат прежние модели. Пакет (`bundle.locate`) считает шкалу бустинга
+заново — оценки самой модели выгрузки на входах сервиса, шкалу сети проверяет по весам — и
+записывает файл в `e['scale']`: он берётся первым.
 """
 import json
+import re
 from pathlib import Path
 
 import numpy as np
@@ -25,19 +38,53 @@ def load_manifest(export: Path | None = None) -> dict:
     return json.loads(p.read_text(encoding='utf-8'))
 
 
+def seed_of(key) -> int:
+    """Зерно по ключу манифеста: `'3'` (main) или `'tcn_s3'` (версии)."""
+    key = str(key)
+    if key.isdigit():
+        return int(key)
+    m = re.search(r'_s(\d+)$', key)
+    assert m, f'ключ модели без зерна: {key}'
+    return int(m.group(1))
+
+
+def version_dir(export: Path, tp: str, n: int) -> Path | None:
+    """Папка версии `n` типа `tp`: в пакете — `<пакет>/<тип>_v<n>`, при разработке — `work/export_<тип>_v<n>`."""
+    for d in (export / f'{tp}_v{n}', export.parent / f'export_{tp}_v{n}'):
+        if (d / 'manifest.json').exists():
+            return d
+    return None
+
+
+def available_versions(export: Path | None = None) -> dict[str, list[dict]]:
+    """Тип → собранные версии `[{number, name, about, built}]` — для /status и model.switch."""
+    export = Path(export or config.EXPORT)
+    out: dict[str, list[dict]] = {}
+    pats = [(export, re.compile(r'^([a-z]+)_v(\d+)$')), (export.parent, re.compile(r'^export_([a-z]+)_v(\d+)$'))]
+    for root, pat in pats:
+        if not root.exists():
+            continue
+        for d in sorted(root.iterdir()):
+            m = pat.match(d.name)
+            if not m or not (d / 'manifest.json').exists():
+                continue
+            v = json.loads((d / 'manifest.json').read_text(encoding='utf-8')).get('version', {})
+            row = {'number': int(m.group(2)), 'name': v.get('name'), 'about': v.get('about'),
+                   'built': json.loads((d / 'manifest.json').read_text(encoding='utf-8')).get('built')}
+            if all(r['number'] != row['number'] for r in out.get(m.group(1), [])):
+                out.setdefault(m.group(1), []).append(row)
+    for rows in out.values():
+        rows.sort(key=lambda r: r['number'])
+    return out
+
+
 def _is_iso_date(tail: str) -> bool:
     return (len(tail) == 10 and tail[4] == '-' and tail[7] == '-'
             and tail[:4].isdigit() and tail[5:7].isdigit() and tail[8:].isdigit())
 
 
 def _candidate_runs(from_run: str) -> list[str]:
-    """Прогоны-кандидаты под шкалу зерна: сам `from_run` и рабочий прогон его ветки.
-
-    У бустинга `from_run` — рабочий прогон (`main_h24`, `main_h24_s1`). У сети из манифеста
-    `from_run` — имя roll-прогона (`prod_s1_2026-07-01`), который 2025-оценок не держит: валидация
-    seed-0 подписана своим именем (`prod`), остальных зёрен — `prod_s<seed>`, и она лежит в preds
-    рабочего прогона той же ветки. Просто срезаем дату и пробуем обе схемы имени.
-    """
+    """Рабочие прогоны, в preds которых может лежать шкала зерна: сам `from_run` и его ветка без даты."""
     runs = [from_run]
     if _is_iso_date(from_run[-10:]):
         stem = from_run[:-11]
@@ -47,16 +94,26 @@ def _candidate_runs(from_run: str) -> list[str]:
     return runs
 
 
-def val_scale_file(from_run: str, family: str, seed: int, tp: str, work: Path) -> Path | None:
-    """Файл оценок 2025 зерна — как его ищет `operating.split`/`retro.load_mix_models`."""
+def val_scale_file(from_run: str, family: str, seed: int, tp: str, work: Path | None,
+                   root: Path | None = None) -> Path | None:
+    """Файл оценок проверки 2025 зерна (порядок строк витрины 2025) или None."""
+    if root is not None:
+        p = root / 'scales' / f'{tp}_{family}_s{seed}.npy'
+        if p.exists():
+            return p
+    if work is None:
+        return None
     if family == 'tcn':
+        # сеть прогона вперёд называется своим прогоном — это точный файл именно этой сети
+        p = work / 'roll' / f'{from_run}_{tp}_val.npy'
+        if p.exists():
+            return p
         names = [f'tcn_s{seed}_{tp}_val.npy', f'tcn_{tp}_val.npy']
     else:
         names = [f'{family}_{tp}_val.npy']
     for run in _candidate_runs(from_run):
-        d = work / 'runs' / run / 'preds'
         for n in names:
-            p = d / n
+            p = work / 'runs' / run / 'preds' / n
             if p.exists():
                 return p
     return None
@@ -65,158 +122,203 @@ def val_scale_file(from_run: str, family: str, seed: int, tp: str, work: Path) -
 class Predictor:
     """Модели выгрузки + смесь зёрен на шкале проверки 2025.
 
-    Модели грузятся лениво (xgb/cat/torch — опциональные зависимости), шкалы — по первому
-    обращению и кэшируются на память процесса.
+    `versions` — выбранная версия по типу (`{'equipment': 1}`), переключается командой model.switch.
+    Модели грузятся лениво (xgb/cat/torch — опциональные зависимости), шкалы кэшируются на процесс.
     """
 
-    def __init__(self, export: Path | None = None, work: Path | None = None):
+    def __init__(self, export: Path | None = None, work: Path | None = None,
+                 versions: dict[str, int] | None = None):
         self.export = Path(export) if export else config.EXPORT
-        self.work = Path(work) if work else config.WORK
+        self.bundle = (self.export / 'scales').exists()
+        self.work = None if self.bundle and work is None else Path(work) if work else config.WORK
         self.manifest = load_manifest(self.export)
-        self.meta = json.loads((self.work / 'features' / 'meta.json').read_text(encoding='utf-8'))
+        meta = self.export / 'meta.json' if self.bundle else self.work / 'features' / 'meta.json'
+        self.meta = json.loads(meta.read_text(encoding='utf-8'))
         self.features = self.manifest['features']
-        self._boosters: dict[tuple, object] = {}
-        self._nets: dict[int, object] = {}
+        self.versions: dict[str, int] = {}
+        self.entries: dict[str, list[dict]] = {}
+        self.blends: dict[str, list[dict]] = {}
+        self.manifests: dict[str, dict] = {}
+        for tp, models in self.manifest['models'].items():
+            self._set_type(tp, models, self.manifest.get('blend'), self.export, self.manifest)
+        for tp, n in (versions or {}).items():
+            self.use_version(tp, n)
+        self._boosters: dict[Path, object] = {}
+        self._nets: dict[Path, object] = {}
         self._scales: dict[tuple, np.ndarray] = {}
-        self.loaded = False
+        self._importance: dict[str, dict] = {}
+
+    def _set_type(self, tp: str, models: dict, blend, root: Path, manifest: dict) -> None:
+        self.entries[tp] = [{'key': k, 'seed': seed_of(k), 'family': v['family'], 'path': root / v['file'],
+                             'from_run': v.get('from_run', ''), 'root': root} for k, v in models.items()]
+        self.blends[tp] = blend or []
+        self.manifests[tp] = manifest
+        getattr(self, '_importance', {}).pop(tp, None)     # важность — от модели выбранной версии
+
+    def use_version(self, tp: str, n: int | None) -> None:
+        """Версия `n` типа `tp` вместо модели main; `None` или 0 — вернуть модель main."""
+        if not n:
+            self._set_type(tp, self.manifest['models'][tp], self.manifest.get('blend'), self.export,
+                           self.manifest)
+            self.versions.pop(tp, None)
+            return
+        d = version_dir(self.export, tp, int(n))
+        if d is None:
+            raise FileNotFoundError(f'нет собранной версии {n} типа {tp} (export.py --{tp}-version {n})')
+        m = json.loads((d / 'manifest.json').read_text(encoding='utf-8'))
+        if m.get('features', self.features) != self.features:
+            raise ValueError(f'версия {n} типа {tp} собрана на других признаках, чем выгрузка main')
+        self._set_type(tp, m['models'][tp], m.get('blend'), d, m)
+        self.versions[tp] = int(n)
 
     @property
     def version(self) -> str:
-        """Версия выгрузки — дата сборки из манифеста main (`built`, ключа `exported` там нет)."""
-        return str(self.manifest.get('built', ''))
+        """Версия выгрузки: дата сборки main и выбранные версии типов (`2026-09-25+equipment_v1`)."""
+        tail = ''.join(f'+{tp}_v{n}' for tp, n in sorted(self.versions.items()))
+        return f"{self.manifest.get('built', '')}{tail}"
 
     # ----- модели --------------------------------------------------------
     def has_nets(self) -> bool:
-        return any(b['family'] == 'tcn' for tp in self.manifest['models'].values()
-                   for b in tp.values())
+        return any(e['family'] == 'tcn' for es in self.entries.values() for e in es)
 
     def _ensure(self):
-        if self.loaded:
-            return
-        if self.has_nets():
+        need_nets = [e for es in self.entries.values() for e in es
+                     if e['family'] == 'tcn' and e['path'] not in self._nets]
+        if need_nets:
             import torch
             from seqmodel import Net
-            for tp, seeds in self.manifest['models'].items():
-                for seed, info in seeds.items():
-                    if info['family'] != 'tcn' or int(seed) in self._nets:
-                        continue
-                    state = torch.load(self.export / info['file'], map_location='cpu', weights_only=True)
-                    width, c_in = state['inp.weight'].shape[:2]
-                    net = Net(c_in, state['head.0.weight'].shape[1] - 2 * width,
-                              len(config.TYPES), width, 0.0)
-                    net.load_state_dict(state)
-                    self._nets[int(seed)] = net.eval()
-        for tp, seeds in self.manifest['models'].items():
-            for seed, info in seeds.items():
-                if info['family'] == 'tcn' or (tp, int(seed)) in self._boosters:
-                    continue
-                self._boosters[(tp, int(seed))] = _load_booster(self.export / info['file'],
-                                                                info['family'])
-        self.loaded = True
+            for e in need_nets:
+                state = torch.load(e['path'], map_location='cpu', weights_only=True)
+                width, c_in = state['inp.weight'].shape[:2]
+                net = Net(c_in, state['head.0.weight'].shape[1] - 2 * width, len(config.TYPES), width, 0.0)
+                net.load_state_dict(state)
+                self._nets[e['path']] = net.eval()
+        for es in self.entries.values():
+            for e in es:
+                if e['family'] != 'tcn' and e['path'] not in self._boosters:
+                    self._boosters[e['path']] = _load_booster(e['path'], e['family'])
 
     def matrix(self, frame: pl.DataFrame) -> np.ndarray:
         return frame.select(self.features).to_numpy().astype(np.float32)
 
-    def scale(self, tp: str, seed: int, from_run: str, family: str) -> np.ndarray:
-        key = (tp, seed, from_run)
+    def scale_file(self, tp: str, e: dict) -> Path:
+        p = e.get('scale') or val_scale_file(e['from_run'], e['family'], e['seed'], tp, self.work, e['root'])
+        if p is None:
+            raise FileNotFoundError(
+                f'нет шкалы 2025 для {tp}/{e["key"]} ({e["from_run"]}): нужен scales/{tp}_{e["family"]}_s'
+                f'{e["seed"]}.npy в пакете, roll/{e["from_run"]}_{tp}_val.npy (seqmodel.py --score-val) '
+                f'или runs/<прогон>/preds/*_{tp}_val.npy')
+        return p
+
+    def scale(self, tp: str, e: dict) -> np.ndarray:
+        key = (tp, e['path'])
         if key not in self._scales:
-            p = val_scale_file(from_run, family, seed, tp, self.work)
-            if p is None:
-                raise FileNotFoundError(
-                    f'нет шкалы 2025 для {tp}/зерна {seed} ({family}): ждём {val_scale_file(from_run, family, seed, tp, self.work)} '
-                    f'в runs/{from_run}/preds — это тот же файл, что читает retro.load_mix_models')
-            self._scales[key] = np.sort(np.load(p))
+            self._scales[key] = np.sort(np.load(self.scale_file(tp, e)))
         return self._scales[key]
 
-    def _netcols(self, pack: tuple) -> dict[int, np.ndarray]:
-        """Оценки сетей на входе pack: seed → массив по строкам (сигмоида по всем типам)."""
+    def check(self) -> list[str]:
+        """Чего не хватает для счёта: модели и шкалы всех зёрен (пустой список — всё на месте)."""
+        miss = []
+        for tp, es in self.entries.items():
+            for e in es:
+                if not e['path'].exists():
+                    miss.append(f'модель {e["path"]}')
+                if not e.get('scale') and val_scale_file(e['from_run'], e['family'], e['seed'], tp, self.work,
+                                                         e['root']) is None:
+                    miss.append(f'шкала {tp}/{e["key"]} ({e["from_run"]})')
+        return miss
+
+    def _netcols(self, pack: tuple) -> dict[Path, np.ndarray]:
+        """Оценки сетей на входе pack: файл сети → массив по строкам (сигмоида по всем типам)."""
         import torch
         x, s = (torch.from_numpy(a) for a in pack)
         cols = {}
-        for seed, net in self._nets.items():
-            with torch.no_grad():
-                p = torch.sigmoid(net(x, s).float()).cpu().numpy()
-            cols[seed] = p
+        with torch.no_grad():
+            for path, net in self._nets.items():
+                cols[path] = torch.sigmoid(net(x, s).float()).cpu().numpy()
         return cols
+
+    def _blend(self, tp: str, parts: dict[str, list[np.ndarray]]) -> np.ndarray:
+        if not self.blends.get(tp):
+            return np.mean([p for ps in parts.values() for p in ps], axis=0).astype(np.float32)
+        total = sum(b['weight'] for b in self.blends[tp])
+        mix = sum(b['weight'] / total * np.mean(parts[b['family']], axis=0) for b in self.blends[tp])
+        return np.asarray(mix, dtype=np.float32)
 
     def predict(self, frame: pl.DataFrame, seqdata: tuple | None = None) -> dict:
         """Тип → смесь оценок по порядку строк frame (0..1, шкала проверки 2025)."""
         self._ensure()
         X = self.matrix(frame)
-        netcols = self._netcols(seqdata) if seqdata is not None else {}
+        netcols = self._netcols(seqdata) if seqdata is not None and self.has_nets() else {}
         out = {}
-        for tp, seeds in self.manifest['models'].items():
-            parts = []
-            for seed, info in seeds.items():
-                if info['family'] == 'tcn':
-                    p = netcols[int(seed)][:, config.TYPES.index(tp)]
+        for tp, es in self.entries.items():
+            parts: dict[str, list] = {}
+            for e in es:
+                if e['family'] == 'tcn':
+                    p = netcols[e['path']][:, config.TYPES.index(tp)]
                 else:
-                    p = self._boosters[(tp, int(seed))](X)
-                base = self.scale(tp, int(seed), info['from_run'], info['family'])
-                parts.append(np.searchsorted(base, p, side='right') / len(base))
-            out[tp] = np.mean(parts, axis=0).astype(np.float32)
+                    p = self._boosters[e['path']](X)
+                base = self.scale(tp, e)
+                parts.setdefault(e['family'], []).append(np.searchsorted(base, p, side='right') / len(base))
+            out[tp] = self._blend(tp, parts)
         return out
 
     # ----- история и шкала -------------------------------------------------
-    def _seed_ranks(self, tp: str, seed: int, info: dict) -> np.ndarray:
-        """Ранг каждой строки витрины зерна на собственной шкале — как `retro.mix_history`.
-
-        Читаем те же preds, что `operating.split`/`retro.load_mix_models` (строки в порядке витрины
-        того же года), и переводим в долю «своих же» оценок на 2025 — `searchsorted/len`. Это и есть
-        компонента смеси истории; входы сети не пересчитываются (их ряды по витрине не восстанавливаются).
-        """
-        sid = int(seed)
-        p = val_scale_file(info['from_run'], info['family'], sid, tp, self.work)
-        if p is None:
-            raise FileNotFoundError(
-                f'нет шкалы 2025 для {tp}/зерна {sid} ({info["family"]}): ждём '
-                f'pipeline-прогон {info["from_run"]} с preds/*_val.npy — тот же файл, что читает '
-                f'retro.load_mix_models')
-        raw = np.load(p).astype(np.float32)
-        base = np.sort(raw)
-        return np.searchsorted(base, raw, side='right') / len(base)
+    def hours_2025(self) -> np.ndarray:
+        """Час каждой строки витрины 2025 — порядок, в котором лежат шкалы."""
+        if self.bundle:
+            return np.load(self.export / 'history' / 'h_2025.npy')
+        return pl.scan_parquet(self.work / 'features' / '2025.parquet').select('h').collect()['h'].to_numpy()
 
     def bootstrap_history(self, year: int = 2025) -> dict:
-        """(h_hist, p_hist) смеси по строкам витрины года — начальная история для retro.rolling.
+        """(h_hist, p_hist) смеси по строкам витрины 2025 — начальная история порога.
 
-        Той же функцией, что `retro.mix_history`: оценка каждого зерна переводится в долю его же
-        оценок на 2025 (searchsorted/len), смесь — среднее зёрен, массив парка сортируется по часу.
-        Порог с первой же границы часа встаёт в ту же точку, что и у retro на тех же моделях.
+        Как `retro.mix_history`: оценка зерна переводится в долю его же оценок на 2025
+        (searchsorted/len), смесь — как в `predict`, массив парка сортируется по часу.
         """
-        df = pl.scan_parquet(self.work / 'features' / f'{year}.parquet') \
-              .select(['object_id', 'h'] + self.features).collect()
-        h = df['h'].to_numpy()
+        assert year == 2025, 'шкалы и история — проверка 2025'
+        h = self.hours_2025()
         order = np.argsort(h, kind='stable')
         out = {}
-        for tp, seeds in self.manifest['models'].items():
-            parts = [self._seed_ranks(tp, int(seed), info) for seed, info in seeds.items()]
-            if not parts:
-                continue
-            mix = np.mean(parts, axis=0).astype(np.float32)
-            out[tp] = (h[order], mix[order])
+        for tp, es in self.entries.items():
+            parts: dict[str, list] = {}
+            for e in es:
+                raw = np.load(self.scale_file(tp, e)).astype(np.float32)
+                assert len(raw) == len(h), f'шкала {tp}/{e["key"]}: {len(raw)} строк, витрина 2025 — {len(h)}'
+                parts.setdefault(e['family'], []).append(np.searchsorted(np.sort(raw), raw, side='right') / len(raw))
+            if parts:
+                out[tp] = (h[order], self._blend(tp, parts)[order])
         return out
 
     # ----- основания тревоги (ТЗ §5) -----------------------------------------
-    def reasons(self, frame: pl.DataFrame, idx: int, tp: str, k: int = 5) -> list[dict]:
-        """Топ признаков строки по важности из отчёта прогона-родителя (если file есть).
-
-        Не SHAP и не вклад в конкретное решение; манифест main важности не несёт, поэтому берём
-        importance из runs/<from_run>/report_*.json — того же источника, что thresholds() в retro.
-        """
-        seeds = self.manifest['models'].get(tp, {})
+    def importance(self, tp: str) -> dict[str, float]:
+        """Важность признаков типа: `importance.json` пакета или отчёты прогонов-родителей."""
+        if tp in self._importance:
+            return self._importance[tp]
+        es = self.entries.get(tp, [])
         imp: dict[str, float] = {}
-        for seed, info in seeds.items():
-            run = info.get('from_run', '')
-            fam = info['family']
-            for f in sorted((self.work / 'runs' / run).glob('report_*.json')):
-                block = json.loads(f.read_text(encoding='utf-8')).get(tp, {})
-                im = block.get('importance', {}).get(fam)
-                if im:
-                    for name, w in im.items():
-                        imp[name] = imp.get(name, 0.0) + w / max(len(seeds), 1)
-        feats = [f for f in self.features if f in imp]
-        feats.sort(key=lambda f: -abs(imp[f]))
-        return [{'feature': f, 'value': float(frame[idx][f])} for f in feats[:k]]
+        for root in {e['root'] for e in es}:
+            f = root / 'importance.json'
+            if f.exists():
+                imp = json.loads(f.read_text(encoding='utf-8')).get(tp, {})
+        if not imp and self.work is not None:
+            for e in es:
+                for f in sorted((self.work / 'runs' / e['from_run']).glob('report_*.json')):
+                    im = json.loads(f.read_text(encoding='utf-8')).get(tp, {}).get('importance', {}).get(e['family'])
+                    for name, w in dict(im or {}).items():      # train.importance — список пар [признак, вес]
+                        imp[name] = imp.get(name, 0.0) + w / max(len(es), 1)
+        self._importance[tp] = imp
+        return imp
+
+    def reasons(self, frame: pl.DataFrame, idx: int, tp: str, k: int = 5) -> list[dict]:
+        """Топ признаков строки по важности модели типа.
+
+        Не SHAP и не вклад в конкретное решение: важность прогона-родителя (у сетей её нет — пусто).
+        """
+        imp = self.importance(tp)
+        feats = sorted((f for f in self.features if f in imp), key=lambda f: -abs(imp[f]))
+        vals = [(f, frame[idx, f]) for f in feats[:k]]
+        return [{'feature': f, 'value': None if v is None else float(v)} for f, v in vals]
 
 
 def _load_booster(path: Path, family: str):

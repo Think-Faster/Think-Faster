@@ -90,15 +90,38 @@ class StorageTest(unittest.TestCase):
                 ['3', 2, '2019-01-05', '07:00:02', '0', '01.01.1970'],       # охрана: мусорная дата
                 ['4', 999, '2019-01-05', '07:00:03', '1', '42'],             # нет в справочнике
                 ['5', 1, '2026-08-05', '07:00:04', '1', '1.5'],              # вне until
+                ['6', 2, '2019-02-01', '08:00:00', '0', 'Снят с охраны'],    # охрана — за всю историю
+                ['7', 1, '2019-12-30', '09:00:00', '1', '2.5'],              # в окне по умолчанию
+                ['8', 1, '2019-12-31', '09:00:00', '1', '3.5'],
             ])
             import svc as config
             self.addCleanup(st.close)
             config.JOURNAL = j
-            n = st.bulk_import(until=datetime(2026, 1, 1), years=[2019])
+            n = st.bulk_import(until=datetime(2020, 1, 1), since=datetime(2019, 1, 1), years=[2019],
+                               chunk_days=1)
             self.assertEqual((n, st.con.sql('SELECT count(*) FROM ev_all').fetchone()[0]),
-                             (1, 1))                     # только первая строка, дубль схлопнулся
-            row = st.con.sql('SELECT object_id, num, state FROM ev_all').fetchone()
+                             (4, 4))                     # дубль схлопнулся, мусор и чужое отброшены
+            row = st.con.sql("SELECT object_id, num, state FROM ev_all WHERE ts = '2019-01-05 07:00:00'").fetchone()
             self.assertEqual((row[0], row[2]), (5122, 'Обнаружен дым'))
+            st.con.execute('DELETE FROM ev_all')
+            # по умолчанию — глубина горячего журнала (100 сут до until) и вся охрана
+            self.assertEqual(st.bulk_import(until=datetime(2020, 1, 1), years=[2019]), 3)
+            self.assertEqual(st.con.sql('SELECT count(*) FROM ev_all WHERE num IS NOT NULL').fetchone()[0], 2)
+
+    def test_freshness_matches_stype_without_case(self):
+        """Семейства по основе слова без регистра: «Датчик дыма», «Состояние насоса» — свои типы."""
+        import snapshot
+        with tempfile.TemporaryDirectory() as d:
+            st = store_with_ch(Path(d))
+            self.addCleanup(st.close)
+            st.con.execute("INSERT INTO ch VALUES (7, 'Вода', 'Состояние насоса', '', 'Насос', 5122)")
+            st._ch = None
+            st.append([st.clean_event(1, datetime(2026, 1, 4, 11, 30), 'Обнаружен дым'),
+                       st.clean_event(7, datetime(2026, 1, 4, 10, 0), '1')])
+            f = snapshot.freshness(st, datetime(2026, 1, 4, 12))
+            self.assertAlmostEqual(f['fire'], 0.5)
+            self.assertAlmostEqual(f['flood'], 2.0)
+            self.assertEqual(f['gas'], 720.0)                    # газовых событий нет — 30 суток
 
 
 if __name__ == '__main__':

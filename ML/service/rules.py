@@ -12,9 +12,11 @@
 - MUTE — временное молчание по паре (админ-панель); снимается REOPEN или настоящим эпизодом.
 
 Настоящий эпизод (факт из labels.build: `inc`) снимает и отклонение, и молчание — «до следующего
-настоящего эпизода», как в reject.simulate. Состояние — память одного процесса-писателя; при
-рестарте склейка стартует заново, это честнее, чем поднимать её из истории 90 суток.
+настоящего эпизода», как в reject.simulate. Отклонения и молчания — решения людей: они пишутся
+на том (`dump`) до подтверждения команды (§13.3) и переживают рестарт; склейка дребезга — тоже,
+иначе после рестарта сигнал в середине серии начался бы заново.
 """
+import os
 import json
 from pathlib import Path
 
@@ -35,6 +37,7 @@ class RuleState:
         self.rejections: dict[tuple[int, str], int] = {}  # (объект,тип) -> час решения (N-режим)
         self.mutes: dict[tuple[int, str], int] = {}       # (объект,тип) -> час окончания MUTE
         self.suppressed: dict[tuple[int, str], int] = {}  # час последнего подавления (для журнала)
+        self.refs: dict[tuple[int, str], dict] = {}       # (объект,тип) -> команда решения (аудит)
         self.log: list[dict] = []
         if bootstrap and bootstrap.exists():
             self.log = json.loads(bootstrap.read_text(encoding='utf-8'))
@@ -92,31 +95,54 @@ class RuleState:
                     if hour_end - self.rejections[key] > config.REJECT_N_HOURS:
                         self.rejections.pop(key)      # N-режим: молчание ограничено N (§10.1)
             out[tp] = (alarm, since)
+        for key in [k for k, until in self.mutes.items() if hour_end >= until]:
+            self.mutes.pop(key)                       # срок MUTE вышел
+            self.refs.pop(key, None)
         return out
 
     def on_decision(self, object_id: int, tp: str, action: str, ts: int,
-                    mute_hours: int | None = None) -> None:
+                    mute_hours: int | None = None, until: int | None = None,
+                    ref: dict | None = None) -> bool:
+        """Решение диспетчера. Возврат — поменялось ли состояние правил (для не-режектируемого
+        типа REJECT только пишется в историю, §9.1)."""
         key = (object_id, tp)
-        self.log.append({'object_id': object_id, 'type': tp, 'action': action, 'h': ts})
+        self.log.append({'object_id': object_id, 'type': tp, 'action': action, 'h': ts, **(ref or {})})
+        self.log = self.log[-10_000:]
+        changed = False
         if action == 'REJECT':
             if self.settings.is_rejectable(tp):
                 self.rejections[key] = ts
-            # для не-режектируемых типов отклонение — только запись в историю (§9.1)
+                changed = True
         elif action == 'MUTE':
-            self.mutes[key] = ts + (mute_hours if mute_hours is not None else config.REJECT_N_HOURS)
+            self.mutes[key] = until if until is not None else                 ts + (mute_hours if mute_hours is not None else config.REJECT_N_HOURS)
+            changed = True
         elif action in ('REOPEN', 'CONFIRMED'):
-            self.rejections.pop(key, None)
-            if action == 'REOPEN':
-                self.mutes.pop(key, None)
+            # подтверждённое происшествие снимает и молчание — как настоящий эпизод в on_fact
+            changed = self.rejections.pop(key, None) is not None
+            changed = (self.mutes.pop(key, None) is not None) or changed
+        if changed and ref:
+            self.refs[key] = {**ref, 'action': action}
+        return changed
 
-    def on_fact(self, facts: set[tuple[int, str]], hour_end: int) -> None:
-        """«Настоящий эпизод пришёл» — снимает и отклонение, и молчание (reject.simulate)."""
-        for key in list(self.rejections):
-            if key in facts:
-                self.rejections.pop(key, None)
-        for key in list(self.mutes):
-            if key in facts:
-                self.mutes.pop(key, None)
+    def on_fact(self, facts, hour_end: int) -> list[tuple[tuple[int, str], str, dict]]:
+        """«Настоящий эпизод пришёл» — снимает и отклонение, и молчание (reject.simulate).
+        Возврат — снятые пары: ((объект, тип), 'REJECTED'|'MUTED', команда) — для forecast.recurred."""
+        out = []
+        for store, status in ((self.rejections, 'REJECTED'), (self.mutes, 'MUTED')):
+            for key in list(store):
+                if key in facts:
+                    store.pop(key, None)
+                    out.append((key, status, self.refs.pop(key, {})))
+        return out
+
+    def status(self, object_id: int, tp: str, hour_end: int) -> tuple[str, dict] | None:
+        """Решение, под которым пара сейчас: ('REJECTED'|'MUTED', команда) или None."""
+        key = (object_id, tp)
+        if key in self.rejections:
+            return 'REJECTED', self.refs.get(key, {})
+        if key in self.mutes and hour_end < self.mutes[key]:
+            return 'MUTED', self.refs.get(key, {})
+        return None
 
     def reasons(self, object_id: int, tp: str) -> list[str]:
         """Почему сейчас отклонение/молчание — текст для карточки и журнала решений."""
@@ -126,3 +152,34 @@ class RuleState:
         if key in self.mutes:
             return ['MUTE']
         return []
+
+    # ----- том -----------------------------------------------------------------------------------
+    @staticmethod
+    def _k(key) -> str:
+        return f'{key[0]}:{key[1]}'
+
+    @staticmethod
+    def _unk(s: str) -> tuple[int, str]:
+        o, tp = s.split(':', 1)
+        return int(o), tp
+
+    def dump(self, path: Path) -> None:
+        """Состояние правил на том — атомарно: команда подтверждается только после записи."""
+        raw = {'signal': {self._k(k): v for k, v in self.signal.items()},
+               'rejections': {self._k(k): v for k, v in self.rejections.items()},
+               'mutes': {self._k(k): v for k, v in self.mutes.items()},
+               'refs': {self._k(k): v for k, v in self.refs.items()},
+               'log': self.log[-1000:]}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix('.tmp')
+        tmp.write_text(json.dumps(raw, ensure_ascii=False), encoding='utf-8')
+        os.replace(tmp, path)
+
+    def load(self, path: Path) -> bool:
+        if not path.exists():
+            return False
+        raw = json.loads(path.read_text(encoding='utf-8'))
+        for name in ('signal', 'rejections', 'mutes', 'refs'):
+            setattr(self, name, {self._unk(k): v for k, v in raw.get(name, {}).items()})
+        self.log = raw.get('log', [])
+        return True

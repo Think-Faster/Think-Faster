@@ -62,13 +62,16 @@ class Retrainer:
         self.save()
         return {'ok': True}
 
-    def run(self, by: str = 'schedule') -> dict:
+    def run(self, by: str = 'schedule', env: dict | None = None) -> dict:
         self.state.update({'status': 'running', 'started': datetime.now().isoformat()})
         self.save()
         try:
             # продакшн-переобучение: export.py (все годы, пять зёрен); исследование стратегий —
             # это retrain.py, его крутит MLOps/CI, сервис лишь хранит выбранный ключ для журнала
-            subprocess.run([self.python, 'export.py'], cwd=config.ML / 'pipeline', check=True)
+            # таблицы главного диспетчера — текущие версии сервиса (TF_GAPS, TF_WORKS в config.py)
+            import os
+            subprocess.run([self.python, 'export.py'], cwd=config.ML / 'pipeline', check=True,
+                           env={**os.environ, **(env or {})})
             new_manifest = load_manifest()
             self.state.update({'status': 'done', 'version': new_manifest.get('built'),
                                'changed': datetime.now().isoformat(timespec='seconds'),

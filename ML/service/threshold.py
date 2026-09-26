@@ -104,6 +104,32 @@ class Thresholds:
                 self.thresholds[tp] = _thr(*self._hist[tp], h, st.share(tp))
         return changed
 
+    def refresh(self, h: int, st: s.OperatingSettings) -> None:
+        """Порог на час h без дописывания истории — час в игнорируемом периоде (settings.gaps)."""
+        for tp in config.TYPES:
+            if tp in self._hist:
+                self.thresholds[tp] = _thr(*self._hist[tp], h, st.share(tp))
+
+    def drop_hours(self, spans: list[tuple[int, int]]) -> int:
+        """Убрать из истории часы [a, b) игнорируемых периодов (M5: брак не идёт в порог)."""
+        n = 0
+        for tp, (hh, pp) in self._hist.items():
+            keep = np.ones(len(hh), bool)
+            for a, b in spans:
+                keep &= ~((hh >= a) & (hh < b))
+            if not keep.all():
+                n += int((~keep).sum())
+                self._hist[tp] = (hh[keep], pp[keep])
+        return n
+
+    def replace_type(self, tp: str, hist: tuple, st: s.OperatingSettings, h: int,
+                     model_version: str) -> None:
+        """model.switch (§9.4): история и порог одного типа — по ретропрогону новой версии."""
+        self._hist[tp] = hist
+        self.versions[tp] = st.version
+        self.thresholds[tp] = _thr(*hist, h, st.share(tp))
+        self.model_version = model_version
+
     def rebootstrap(self, scores: dict, st: s.OperatingSettings, h: int,
                     model_version: str = '') -> None:
         self.bootstrap(scores, st, h, model_version)

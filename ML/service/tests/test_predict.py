@@ -152,6 +152,110 @@ class PredictTest(unittest.TestCase):
             with self.assertRaises(FileNotFoundError):
                 p.bootstrap_history(2025)
 
+    def test_seed_of_both_key_forms(self):
+        from predict import seed_of
+        self.assertEqual([seed_of('0'), seed_of('cat_s3'), seed_of('tcn_s12')], [0, 3, 12])
+
+    def test_roll_scale_is_exact_net_and_wins(self):
+        """Н20: сеть прогона вперёд — своя шкала roll/<прогон>_<тип>_val.npy раньше рабочего прогона ветки."""
+        with tempfile.TemporaryDirectory() as d:
+            work = Path(d)
+            (work / 'roll').mkdir()
+            np.save(work / 'roll' / 'all_s1_2024-01-01_equipment_val.npy', np.arange(3, dtype=float))
+            (work / 'runs' / 'all_s1' / 'preds').mkdir(parents=True)
+            np.save(work / 'runs' / 'all_s1' / 'preds' / 'tcn_s1_equipment_val.npy', np.arange(3, dtype=float))
+            self.assertEqual(val_scale_file('all_s1_2024-01-01', 'tcn', 1, 'equipment', work),
+                             work / 'roll' / 'all_s1_2024-01-01_equipment_val.npy')
+
+    def test_bundle_scale_first(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / 'scales').mkdir()
+            np.save(root / 'scales' / 'fire_cat_s2.npy', np.arange(3, dtype=float))
+            self.assertEqual(val_scale_file('main_h24_s2', 'cat', 2, 'fire', None, root),
+                             root / 'scales' / 'fire_cat_s2.npy')
+            self.assertIsNone(val_scale_file('main_h24_s2', 'cat', 1, 'fire', None, root))
+
+    def _version(self, work: Path, n: int, models: dict, blend: list, features=('tmp',)):
+        d = work / f'export_equipment_v{n}'
+        d.mkdir(parents=True)
+        (d / 'manifest.json').write_text(json.dumps({
+            'built': '2026-09-26', 'features': list(features), 'blend': blend, 'models': {'equipment': models},
+            'version': {'type': 'equipment', 'number': n, 'name': f'в{n}', 'about': ''}}), encoding='utf-8')
+
+    def test_version_overlay_and_weighted_blend(self):
+        """M9a: версия заменяет только свой тип; смесь — среднее зёрен части, части со своими весами."""
+        from predict import available_versions
+        with tempfile.TemporaryDirectory() as d:
+            work = Path(d)
+            main = {'fire': {'0': {'file': 'fire/cat_s0.cbm', 'family': 'cat', 'from_run': 'main_h24'}},
+                    'equipment': {'0': {'file': 'equipment/tcn_s0.pt', 'family': 'tcn',
+                                        'from_run': 'prod_s0_2026-07-01'}}}
+            self._version(work, 1, {'cat_s0': {'file': 'equipment/cat_s0.cbm', 'family': 'cat', 'from_run': 'a'},
+                                    'cat_s1': {'file': 'equipment/cat_s1.cbm', 'family': 'cat', 'from_run': 'a_s1'},
+                                    'tcn_s0': {'file': 'equipment/tcn_s0.pt', 'family': 'tcn',
+                                               'from_run': 'all_s0_2024-01-01'}},
+                          [{'family': 'cat', 'weight': 0.75}, {'family': 'tcn', 'weight': 0.25}])
+            p = self._predictor(work, work / 'export', main)
+            self.assertEqual(available_versions(work / 'export')['equipment'][0]['number'], 1)
+            p.use_version('equipment', 1)
+            self.assertEqual(p.version, '2026-09-25+equipment_v1')
+            self.assertEqual([e['seed'] for e in p.entries['equipment']], [0, 1, 0])
+            self.assertEqual(p.entries['equipment'][0]['path'], work / 'export_equipment_v1' / 'equipment' / 'cat_s0.cbm')
+            self.assertEqual(p.entries['fire'][0]['path'], work / 'export' / 'fire' / 'cat_s0.cbm')
+            mix = p._blend('equipment', {'cat': [np.array([0.2]), np.array([0.4])], 'tcn': [np.array([1.0])]})
+            self.assertAlmostEqual(float(mix[0]), 0.75 * 0.3 + 0.25 * 1.0, places=6)
+            self.assertAlmostEqual(float(p._blend('fire', {'cat': [np.array([0.2]), np.array([0.6])]})[0]), 0.4, places=6)
+            p.use_version('equipment', None)
+            self.assertEqual(p.version, '2026-09-25')
+            self.assertEqual(p.entries['equipment'][0]['from_run'], 'prod_s0_2026-07-01')
+            with self.assertRaises(FileNotFoundError):
+                p.use_version('equipment', 7)
+
+    def test_version_on_other_features_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            work = Path(d)
+            self._version(work, 2, {'tcn_s0': {'file': 'equipment/tcn_s0.pt', 'family': 'tcn', 'from_run': 'x'}},
+                          [{'family': 'tcn', 'weight': 1.0}], features=('other',))
+            p = self._predictor(work, work / 'export', {'equipment': {}})
+            with self.assertRaises(ValueError):
+                p.use_version('equipment', 2)
+
+    def test_check_lists_missing_models_and_scales(self):
+        with tempfile.TemporaryDirectory() as d:
+            work = Path(d)
+            p = self._predictor(work, work / 'export', {
+                'fire': {'0': {'file': 'fire/cat_s0.cbm', 'family': 'cat', 'from_run': 'main_h24'}}})
+            miss = p.check()
+            self.assertEqual(len(miss), 2)
+            (work / 'export' / 'fire').mkdir()
+            (work / 'export' / 'fire' / 'cat_s0.cbm').write_bytes(b'')
+            (work / 'runs' / 'main_h24' / 'preds').mkdir(parents=True)
+            np.save(work / 'runs' / 'main_h24' / 'preds' / 'cat_fire_val.npy', np.arange(3, dtype=float))
+            self.assertEqual(p.check(), [])
+
+    def test_importance_from_reports_and_reasons_per_version(self):
+        """Отчёт train.py хранит важность списком пар; основания — числа строки; версия — своя важность."""
+        with tempfile.TemporaryDirectory() as d:
+            work = Path(d)
+            (work / 'runs' / 'main_h24').mkdir(parents=True)
+            (work / 'runs' / 'main_h24' / 'report_cat.json').write_text(json.dumps(
+                {'equipment': {'importance': {'cat': [['temp_1h', 0.6], ['smoke_24h', 0.4]]}}}), encoding='utf-8')
+            main = {'equipment': {'0': {'file': 'equipment/cat_s0.cbm', 'family': 'cat', 'from_run': 'main_h24'}}}
+            feats = ('smoke_24h', 'temp_1h')
+            self._version(work, 1, {'cat_s0': {'file': 'equipment/cat_s0.cbm', 'family': 'cat', 'from_run': 'v'}},
+                          [{'family': 'cat', 'weight': 1.0}], features=feats)
+            (work / 'export_equipment_v1' / 'importance.json').write_text(
+                json.dumps({'equipment': {'smoke_24h': 1.0}}), encoding='utf-8')
+            p = self._predictor(work, work / 'export', main, features=feats)
+            self.assertEqual(p.importance('equipment'), {'temp_1h': 0.6, 'smoke_24h': 0.4})
+            frame = pl.DataFrame({'smoke_24h': [3.0, None], 'temp_1h': [21.5, 7.0]})
+            self.assertEqual(p.reasons(frame, 0, 'equipment', k=2),
+                             [{'feature': 'temp_1h', 'value': 21.5}, {'feature': 'smoke_24h', 'value': 3.0}])
+            self.assertEqual(p.reasons(frame, 1, 'equipment', k=2)[1], {'feature': 'smoke_24h', 'value': None})
+            p.use_version('equipment', 1)
+            self.assertEqual(p.importance('equipment'), {'smoke_24h': 1.0})
+
 
 if __name__ == '__main__':
     unittest.main()

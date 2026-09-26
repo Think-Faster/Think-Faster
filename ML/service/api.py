@@ -1,194 +1,135 @@
-"""HTTP-ручки сервиса (M11/M12/П8): JWT на ВСЕХ ручках, 401 без токена.
+"""HTTP-ручки сервиса (INTEGRATION §13.1, токены — §13.2).
 
-FastAPI: маршрут /api/ml обслуживает nginx по суффиксу (INTEGRATION §4). Модуль импортируется без
-fastapi, app = None — стенд работает без него. Токен — Bearer, HMAC-SHA256 с секретом из
-окружения TF_MODEL_TOKEN_SECRET (MБ дев-умолчание только для стенда); подпись фиксирует header и
-payload, exp — не дальше TTL. Единственный глобальный конёк живых ссылок — State: П7 меняет
-predictor/reload сеттинги, и ручки сразу это видят.
+Каждая ручка доступна и с префиксом `/api/ml`, и без него (Н5). Токен — RS256 от think-auth,
+проверка в `tfkit.Verifier`: подпись, `exp`, `aud = api`, издатель, тип `access`. Своих секретов у
+ручек нет, токены нигде не хранятся.
 
-П8: ручек без авторизации нет вообще — ни /health, ни /status; nginx/лоад-балансер знает токен
-службы (заголовок Authorization), клиенты получают его через think-infra.
+| ручка | кто | право |
+|---|---|---|
+| `/health` | nginx, Docker | без токена |
+| `/status`, `/estimate` | админ-панель через BFF или напрямую | техучётка с `ml.read` либо токен пользователя |
+| `/forecast`, `/history` | BFF | только техучётка с `ml.read` |
+
+Права пользователя сервис не знает (права-и-аудит §1): их проверяет BFF у себя и ходит сюда своей
+техучёткой. Пользовательский токен принимается только на `/status` и `/estimate`; на остальных —
+403 и `access.denied`. Неверный токен — 401 и `token.refused`. В событии из токена только `jti`.
+При `TF_ENV=dev` без ключа и без TF_AUTH_JWKS ручки открыты (стенд); в `prod` ключ, которого нет в
+Vault, берётся с JWKS think-auth, а пока его не получить — 503.
 """
-import base64
-import hashlib
-import hmac
-import json
+import logging
+import os
 import threading
-import time
+from datetime import timedelta
 
 import svc as config
-from settings import OperatingSettings
 
-app = None
-_HAVE_FASTAPI = False
-try:
-    from fastapi import Depends, FastAPI, Header, HTTPException
-    _HAVE_FASTAPI = True
-    app = FastAPI(title='tf-model')
-except ImportError:
-    pass
+log = logging.getLogger('tf-model')
+SCOPE = 'ml.read'
 
 
-# ----- JWT (П8) ---------------------------------------------------------
-def _b64(data: bytes) -> str:
-    return base64.urlsafe_b64encode(data).rstrip(b'=').decode('ascii')
-
-
-def _b64d(s: str) -> bytes:
-    pad = '=' * (-len(s) % 4)
-    return base64.urlsafe_b64decode(s + pad)
-
-
-def sign(data: bytes, secret: str = config.TOKEN_SECRET) -> bytes:
-    return hmac.new(secret.encode(), data, hashlib.sha256).digest()
-
-
-def make_token(payload: dict, secret: str = config.TOKEN_SECRET,
-               ttl_hours: int = config.TOKEN_TTL_HOURS) -> str:
-    """Выпуск токена: header и payload подписываются вместе (JWS). Для стенда/тестов."""
-    header = _b64(json.dumps({'alg': 'HS256', 'typ': 'JWT'}).encode())
-    claims = dict(payload)
-    claims['exp'] = int(time.time()) + ttl_hours * 3600
-    body = _b64(json.dumps(claims, sort_keys=True).encode())
-    sig = _b64(sign(f'{header}.{body}'.encode(), secret))
-    return f'{header}.{body}.{sig}'
-
-
-def verify_token(token: str, secret: str = config.TOKEN_SECRET) -> dict | None:
-    if isinstance(token, bytes):
-        token = token.decode()
-    parts = token.split('.')
-    if len(parts) != 3:
+def make_verifier():
+    """Ключ — из Vault (secret/tf/auth public_key), иначе с JWKS think-auth; техучётки без `scope` —
+    по списку `sub` из Vault (secret/tf/model service_subs), пока think-auth не кладёт `scope`."""
+    import tfkit
+    pem = tfkit.secret('auth', 'public_key', 'TF_AUTH_PUBLIC_KEY', required=False)
+    subs = tfkit.secret('model', 'service_subs', 'TF_MODEL_SERVICE_SUBS', required=False) or ''
+    if pem is None and config.ENV == 'dev' and not os.environ.get('TF_AUTH_JWKS'):
+        log.warning('dev: ключа проверки токенов нет — ручки открыты')
         return None
-    header_s, body_s, sig_s = parts
-    try:
-        expected = hmac.new(secret.encode(), f'{header_s}.{body_s}'.encode(),
-                            hashlib.sha256).digest()
-        if not hmac.compare_digest(_b64d(sig_s), expected):
-            return None
-        claims = json.loads(_b64d(body_s))
-    except (ValueError, TypeError):
-        return None
-    if claims.get('exp', 0) < time.time():
-        return None
-    return claims
+    return tfkit.Verifier(public_key=pem, jwks_url=None if pem else config.AUTH_JWKS,
+                          service_subs=[s.strip() for s in subs.split(',') if s.strip()])
 
 
-def _require_auth(authorization: str | None) -> dict:
-    if not authorization or not authorization.lower().startswith('bearer '):
-        raise HTTPException(401, 'нет Bearer-токена')
-    claims = verify_token(authorization[7:].strip())
-    if claims is None:
-        raise HTTPException(401, 'токен не прошёл проверку (подпись/exp)')
-    return claims
+def create_app(service, verifier=None):
+    from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request
+    import tfkit
+    from core import to_msk
 
-
-# ----- состояние и привязка -------------------------------------------------
-class State:
-    """Живые ссылки, которые ручки читают в момент запроса (не копии на bind-момент)."""
-
-    def __init__(self, store=None, predictor=None, history=None, rules=None, settings=None):
-        self.store = store
-        self.predictor = predictor
-        self.history = history
-        self.rules = rules
-        self.settings = settings
-        self._settings_mtime = None
-        self.reload_settings()
-
-    def apply_settings(self, _=None):
-        """on_batch из потока приёма: подхватить новую операционку, если админ переписал файл."""
-        self.reload_settings()
-
-    def reload_settings(self) -> bool:
-        p = config.SETTINGS
-        if self._settings_mtime is None:
-            self._settings_mtime = p.stat().st_mtime_ns if p.exists() else None
-            return False
-        if p.exists() and (mt := p.stat().st_mtime_ns) != self._settings_mtime:
-            self._settings_mtime = mt
-            self.settings = OperatingSettings.load()
-            return True
-        return False
-
-
-def ensure_app():
-    if app is None:
-        raise RuntimeError('fastapi не установлен — ручки недоступны, стенд без них')
-
-
-def _state() -> State:
-    if _live is None:
-        raise HTTPException(503, 'сервис не инициализирован')
-    return _live
-
-
-_live: State | None = None
-
-
-def bind(state: State) -> None:
-    global _live
-    _live = state
-
-
-if app is not None:
-
-    def require_auth(authorization: str | None = Header(default=None)) -> dict:
-        return _require_auth(authorization)
-
-    @app.get('/health')
-    def health(auth: dict = Depends(require_auth)):
-        st = _state()
-        return {'ok': True, 'settings_version': st.settings.version
-                if st.settings else None}
-
-    @app.get('/api/ml/estimate')
-    def estimate(type: str, share: float, auth: dict = Depends(require_auth)):
-        ensure_app()
-        st = _state()
-        if st.settings is None or st.history is None:
-            raise HTTPException(503, 'сервис не инициализирован (нет настроек/истории)')
+    def refuse(event: str, status: int, reason: str, request: Request, claims: dict | None = None, jti=None):
+        """401 — токена нет или он не прошёл проверку (исполнитель неизвестен); 403 — токен верный,
+        права нет (исполнитель — его `sub`). Из токена в событие идёт только `jti`."""
+        claims = claims or {}
         try:
-            st.settings.check(share)
-        except Exception as e:
-            raise HTTPException(422, str(e))
+            service.audit.event(event, 'denied',
+                                actor_kind=verifier.kind(claims) if claims else 'anonymous',
+                                actor_id=claims.get('sub'), request_id=request.headers.get('x-request-id'),
+                                ip=request.client.host if request.client else None,
+                                object_type='route', object_id=request.url.path,
+                                details={'reason': reason, 'jti': claims.get('jti', jti)})
+        except Exception:
+            log.exception('аудит %s не записан', event)
+        raise HTTPException(status, reason)
+
+    def guard(users: bool):
+        def check(request: Request, authorization: str | None = Header(None)) -> dict:
+            if verifier is None:
+                return {'sub': 'dev'}
+            if not authorization or not authorization.lower().startswith('bearer '):
+                refuse('token.refused', 401, 'нет токена', request)
+            try:
+                claims = verifier.verify(authorization.split(None, 1)[1].strip())
+            except tfkit.TokenError as e:
+                if e.status >= 500:           # ключа нет — отказ не вызывающего, а наш: без аудита
+                    raise HTTPException(e.status, e.reason) from None
+                refuse('token.refused', e.status, e.reason, request, jti=e.jti)
+            if verifier.kind(claims) == 'service':
+                if not verifier.has_scope(claims, SCOPE):
+                    refuse('access.denied', 403, f'нужно право {SCOPE}', request, claims)
+            elif not users:
+                refuse('access.denied', 403, 'ручка только для техучётки', request, claims)
+            return claims
+        return check
+
+    anyone, services = guard(users=True), guard(users=False)
+    r = APIRouter()
+
+    @r.get('/health')
+    def health():
+        return service.health()
+
+    @r.get('/status')
+    def status(_=Depends(anyone)):
+        return service.status()
+
+    @r.get('/estimate')
+    def estimate(type: str = Query(...), share: float = Query(...), _=Depends(anyone)):
         try:
-            # М5: ожидаемые тревоги в сутки — по истории оценок парка текущей версии
-            import settings as smod
-            hh, pp = st.history.history(type)
-            return smod.estimate(pp, share, config.THRESHOLD_WINDOW_DAYS)
-        except KeyError:
-            raise HTTPException(422, f'типа {type} нет в манифесте')
+            return service.estimate(type, share)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from None
 
-    @app.post('/api/ml/settings')
-    def update_settings(updates: dict, by: str, reason: str, auth: dict = Depends(require_auth)):
-        ensure_app()
-        st = _state()
-        if st.settings is None:
-            raise HTTPException(503, 'нет настроек')
+    @r.get('/forecast')
+    def forecast(object_id: int = Query(...), _=Depends(services)):
+        msg = service.forecast(object_id)
+        if msg is None:
+            raise HTTPException(404, f'по объекту {object_id} расчёта ещё нет')
+        return msg
+
+    @r.get('/history')
+    def history(object_id: int = Query(...), type: str = Query(...), from_: str | None = Query(None, alias='from'),
+                to: str | None = Query(None), _=Depends(services)):
+        if type not in config.TYPES:
+            raise HTTPException(400, f'тип {type!r} не из {config.TYPES}')
         try:
-            new = st.settings.rebase(updates, by, reason)
-            new.save()
-            st.settings = new
-        except Exception as e:
-            raise HTTPException(422, str(e))
-        return {'version': new.version}
+            b = to_msk(to) if to else (service.last_now or config.now_msk())
+            a = to_msk(from_) if from_ else b - timedelta(days=7)
+        except ValueError:
+            raise HTTPException(400, 'from и to — время ISO 8601') from None
+        if not a < b or b - a > timedelta(days=config.HOT_RETENTION_DAYS):
+            raise HTTPException(400, f'период — от from до to, не длиннее {config.HOT_RETENTION_DAYS} суток')
+        return {'object_id': object_id, 'type': type, 'hours': service.forecast_history(object_id, type, a, b)}
 
-    @app.get('/api/ml/status')
-    def status(auth: dict = Depends(require_auth)):
-        ensure_app()
-        st = _state()
-        return {'settings_version': st.settings.version if st.settings else None,
-                'thresholds': st.history.thresholds if st.history else None}
+    app = FastAPI(title='tf-model', docs_url=None, redoc_url=None, openapi_url=None)
+    app.include_router(r)
+    app.include_router(r, prefix='/api/ml')
+    return app
 
 
-def start_api(state: State, host: str | None = None, port: int | None = None) -> threading.Thread:
-    """П8: uvicorn из процесса сервиса (поток-демон); bind в момент старта."""
+def start_api(service, verifier=None, host: str = config.API_HOST, port: int = config.API_PORT):
+    """uvicorn в потоке процесса сервиса (13.1: четвёртый поток)."""
     import uvicorn
-    ensure_app()
-    bind(state)
-    t = threading.Thread(target=lambda: uvicorn.run(
-        app, host=host or config.API_HOST, port=port or config.API_PORT,
-        log_level='warning'), daemon=True)
+    app = create_app(service, verifier)
+    server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level='warning'))
+    t = threading.Thread(target=server.run, name='api', daemon=True)
     t.start()
-    return t
+    return server

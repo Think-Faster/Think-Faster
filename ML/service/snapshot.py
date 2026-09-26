@@ -16,19 +16,22 @@ import polars as pl
 import svc as config
 
 
-def snapshot(store, t: datetime, meta: dict, cal: dict, seq: bool = False):
+def snapshot(store, t: datetime, meta: dict, cal: dict, seq: bool = False, holes=()):
     """Строки признаков всех объектов на момент t (+ вход сети, если seq).
 
-    Возврат — как в retro.snapshot(): (df, seq_pack) — один прогон labels.build на такт.
+    Возврат — как в retro.snapshot(): (df, seq_pack) — один прогон labels.build на такт. `holes` —
+    игнорируемые периоды главного диспетчера (settings.gaps): их события не идут в признаки.
     """
     import retro
-    return retro.snapshot(store.con, t, meta, cal, seq=seq)
+    return retro.snapshot(store.con, t, meta, cal, seq=seq, holes=holes)
 
 
-# семейства датчиков, на которые держится каждый тип (INTEGRATION §7: молчание семьи бьёт по типу)
-STYPE_PAT = {'smoke': 'Дым', 'heat': 'Теплово', 'temp': 'Температур', 'gas': 'Газов',
-             'flood': 'Затоплен', 'pump': 'Насос', 'phase': 'Фаз', 'ups': 'ИБП',
-             'fan': 'Вентилятор', 'door': 'Дверь', 'motion': 'Движение', 'hatch': 'Люк'}
+# семейства датчиков, на которые держится каждый тип (INTEGRATION §7: молчание семьи бьёт по типу).
+# Основа слова в нижнем регистре ищется в stype без регистра: в справочнике «Датчик дыма»,
+# «Состояние насоса», «Датчик движения» — с заглавной основы не находились, и флаг горел всегда.
+STYPE_PAT = {'smoke': 'дым', 'heat': 'теплов', 'temp': 'температур', 'gas': 'газов',
+             'flood': 'затоплен', 'pump': 'насос', 'phase': 'фаз', 'ups': 'ибп',
+             'fan': 'вентилятор', 'door': 'двер', 'motion': 'движени', 'hatch': 'люк'}
 FAMILIES = {'fire': ('smoke', 'heat', 'temp'), 'gas': ('gas',),
             'flood': ('flood', 'pump'), 'equipment': ('phase', 'ups', 'fan', 'pump'),
             'sensor': ('smoke', 'temp'), 'intrusion': ('door', 'motion', 'hatch')}
@@ -48,7 +51,7 @@ def freshness(store, t: datetime, back_days: int = 30) -> dict:
     lasts = {}
     for s, last in raws:
         for fam, pat in STYPE_PAT.items():
-            if pat in s:
+            if pat in s.lower():
                 lasts[fam] = max(lasts.get(fam, oldest), last)
     hours = 24.0 * back_days
     out = {}

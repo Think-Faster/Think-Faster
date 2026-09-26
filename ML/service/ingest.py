@@ -6,8 +6,8 @@
 
 Прод (П3): приём живёт в отдельном потоке и коммитит смещения САМ, явно, после каждой пачки —
 auto.commit выключен, чтобы такт никогда не принёс «уже съеденное» после падения. Та же схема для
-решений диспетчера (INTEGRATION §2.5): у них ОТДЕЛЬНЫЙ group.id `tf-model-decisions` (П4) — своя
-схема сообщений и своя позиция; отсутствие сообщений в паузе — не ошибка (poll с таймаутом).
+решений диспетчера — но они приходят не из Kafka, а из RabbitMQ `tf.model.commands` (commands.py,
+INTEGRATION §13.3); отсутствие сообщений в паузе — не ошибка (poll с таймаутом).
 
 Повтор (П9): чтение файлов — polars (ленивый периодический сдвиг), дата — параметр, а не
 константа; массовая заливка — COPY-семейство поверх read_csv в HotStore.bulk_import.
@@ -89,14 +89,10 @@ class KafkaReader(JournalReader):
             raise RuntimeError('confluent-kafka не установлен — сервис без него не читает '
                                'tf.ingest.* (см. ML/service/requirements.txt)') from e
         self.topics = topics or [config.TOPIC_READINGS, config.TOPIC_JOURNAL]
-        conf = {'bootstrap.servers': config.KAFKA_BOOTSTRAP,
-                'group.id': group or config.KAFKA_GROUP,
-                'auto.offset.reset': 'earliest',
-                'enable.auto.commit': False,          # П3: коммитим после пачки, не раньше
-                'max.partition.fetch.bytes': config.MAX_MSG_BYTES}
-        if config.KAFKA_PASSWORD:
-            conf.update({'security.protocol': 'sasl_ssl', 'sasl.mechanism': 'PLAIN',
-                         'sasl.username': 'tf-model', 'sasl.password': config.KAFKA_PASSWORD})
+        conf = config.kafka_conf(**{'group.id': group or config.KAFKA_GROUP,
+                                    'auto.offset.reset': 'earliest',
+                                    'enable.auto.commit': False,     # П3: коммит после пачки
+                                    'max.partition.fetch.bytes': config.MAX_MSG_BYTES})
         self.consumer = Consumer(conf)
         self.consumer.subscribe(self.topics)
 
@@ -138,6 +134,50 @@ class KafkaReader(JournalReader):
     def __exit__(self, *exc):
         self.close()
         return False
+
+
+def consume(store, reader: KafkaReader, stop, dead=None, batch_size: int = 2000, idle: float = 1.0,
+            stats: dict | None = None) -> dict:
+    """Прод (поток приёма в `--loop`): читать tf.ingest.* до `stop`, а не до первой паузы.
+
+    Пачка пишется в горячий журнал на 2000 строк или на тишине в `idle` секунд, и только после
+    записи коммитится смещение (П3). Сообщение, которое не разобралось, уходит в `dead` (tf.dlq) и
+    тоже коммитится: повторять его бессмысленно. Строка, отброшенная чисткой (чужой канал, пустое
+    значение), — только в счётчик `dropped` для наблюдения M10.
+    """
+    stats = stats if stats is not None else {}
+    for k in ('accepted', 'dropped', 'dead'):
+        stats.setdefault(k, 0)
+    batch: list[dict] = []
+    pending = 0
+    while not stop.is_set():
+        msg = reader.consumer.poll(idle)
+        if msg is not None and msg.error() is None:
+            pending += 1
+            try:
+                ev = reader._parse(msg.value())
+                clean = store.clean_event(ev.channel_id, ev.ts, ev.value)
+            except (ValueError, KeyError, TypeError) as e:     # JSONDecodeError и UnicodeDecodeError — тоже ValueError
+                stats['dead'] += 1
+                if dead is not None:
+                    dead(msg.value(), msg.key(), f'{type(e).__name__}: {e}', msg.topic())
+                clean = None
+            else:
+                if clean is None:
+                    stats['dropped'] += 1
+            if clean is not None:
+                batch.append(clean)
+        if pending and (len(batch) >= batch_size or msg is None):
+            if batch:
+                store.append(batch)
+                stats['accepted'] += len(batch)
+            reader.commit()
+            batch, pending = [], 0
+    if batch:
+        store.append(batch)
+        stats['accepted'] += len(batch)
+        reader.commit()
+    return stats
 
 
 def pull(store: HotStore, reader: JournalReader, on_batch=None, since=None, until=None) -> dict:

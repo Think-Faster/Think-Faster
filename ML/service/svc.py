@@ -7,11 +7,17 @@
 """
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 SERVICE = Path(__file__).resolve().parent
 ML = SERVICE.parent
 sys.path.insert(0, str(ML / 'pipeline'))
+# общий модуль контура (Vault, токены, аудит): в репозитории — docs/backend/tfkit, в образе — рядом
+for _kit in (os.environ.get('TF_KIT'), ML.parent / 'docs' / 'backend' / 'tfkit', SERVICE / 'tfkit'):
+    if _kit and (Path(_kit) / 'tfkit.py').exists():
+        sys.path.insert(0, str(_kit))
+        break
 
 import config as pipe  # noqa: E402  pipeline/config.py: TF_JOURNAL, TF_WORK, YEARS, TYPES, HORIZON
 
@@ -22,7 +28,9 @@ for _name in ('DICT', 'JOURNAL', 'YEARS', 'GAPS', 'WARMUP', 'DATA_END', 'TRAIN_E
 WORK = pipe.WORK
 HOT_DB = WORK / 'service' / 'hot.duckdb'
 OUT_DIR = WORK / 'service' / 'out'
-EXPORT = WORK / 'export'
+# 13.6: выгрузка для контейнера — папка только для чтения (TF_MODEL_BUNDLE); на стенде — work/export
+BUNDLE = Path(os.environ['TF_MODEL_BUNDLE']) if os.environ.get('TF_MODEL_BUNDLE') else None
+EXPORT = BUNDLE or WORK / 'export'
 MANIFEST = EXPORT / 'manifest.json'
 FEATURES = WORK / 'features'
 STATE_DIR = OUT_DIR
@@ -30,27 +38,75 @@ HISTORY = OUT_DIR / 'history.parquet'
 DECISIONS_LOG = OUT_DIR / 'decisions.parquet'
 RETRAIN_LOG = OUT_DIR / 'retrain.json'
 OBS_LOG = OUT_DIR / 'observe.json'
+RULES_STATE = OUT_DIR / 'rules.json'                   # отклонения, молчания, склейка — до ack (13.3)
+SERVICE_STATE = OUT_DIR / 'state.json'                 # версии по типам, флаг переобучения, окна M7
+# Таблицы главного диспетчера (13.3): рабочие настройки, график работ, игнорируемые периоды — на томе
+# сервиса с версиями; первая версия — из выгрузки (settings/ рядом с моделями) или из ML/settings
+SETTINGS_DIR = Path(os.environ.get('TF_MODEL_SETTINGS', WORK / 'service' / 'settings'))
+SEED_SETTINGS = BUNDLE / 'settings' if BUNDLE and (BUNDLE / 'settings').exists() else ML / 'settings'
+# §9.4: версии, которые сервис включает сам, пока главный диспетчер не выбрал другую (model.switch);
+# отказ оборудования — v1 «тихая» (cat×5 0.75 + tcn×3 0.25), остальные типы — основная выгрузка
+DEFAULT_VERSIONS = {'equipment': 1}
 
-# §8: дата и время в журнале без зоны, признаки завязаны на местное время — зону фиксируем явно
+# §8: дата и время в журнале без зоны, признаки завязаны на местное время — зону фиксируем явно.
+# Н3: в контейнере часы в UTC, поэтому «сейчас» считается от MSK, а не от зоны процесса. Москва без
+# перехода на летнее время с 2014 года, фиксированного сдвига достаточно, tzdata не нужна.
 TZ = '+03:00'
+MSK = timezone(timedelta(hours=3), 'MSK')
+
+
+def now_msk() -> datetime:
+    """Местное время журнала без зоны — в том же виде, что даты в ext-journal-*.csv."""
+    return datetime.now(MSK).replace(tzinfo=None)
+
+
+ENV = os.environ.get('TF_ENV', 'prod')                 # dev: стенд без Vault (INTEGRATION §13.1)
+# Н8: live — такт по настоящему времени; replay:<начало>:<скорость> — проигрыш тестового года,
+# скорость — модельных секунд в реальную (3600 — модельный час за секунду)
+CLOCK = os.environ.get('TF_MODEL_CLOCK', 'live')
+CLOCK_STATE = OUT_DIR / 'clock.json'                   # Н1: последний посчитанный час
+LAST_RESULTS = OUT_DIR / 'last.json'                   # /forecast: последнее сообщение по объекту
+COMMANDS_SEEN = OUT_DIR / 'commands.json'              # 13.3: command_id уже применённых команд
+AUDIT_SPOOL = OUT_DIR / 'audit.jsonl'                  # 13.4: события, пока Redis недоступен
 
 # M2: глубина горячего журнала — самое длинное окно признаков 90 суток плюс запас (INTEGRATION §1.2)
 HOT_RETENTION_DAYS = 100
 GUARD_STYPE = 'Состояние охраны'     # строки охраны не удаляются из горячего журнала никогда
 
-# Kafka (INTEGRATION §4): топики заданы в think-infra; пароль — из TF_KAFKA_MODEL_PASSWORD
-KAFKA_BOOTSTRAP = os.environ.get('TF_KAFKA_BOOTSTRAP', 'localhost:9092')
-KAFKA_PASSWORD = os.environ.get('TF_KAFKA_MODEL_PASSWORD', '')
+# Kafka (think-infra/kafka): SASL_PLAINTEXT внутри think-fast-net, учётка tf-model, группа — с
+# префикса tf-model (acls.conf); пароль — из Vault secret/tf/kafka (INTEGRATION §13.5)
+KAFKA_BOOTSTRAP = os.environ.get('TF_KAFKA_BOOTSTRAP', 'tf-kafka:9092')
+KAFKA_USER = 'tf-model'
 KAFKA_GROUP = 'tf-model-ingest'
-KAFKA_GROUP_DECISIONS = 'tf-model-decisions'   # П4: свой group у решений, не смешивать с приёмом
 TOPIC_READINGS = 'tf.ingest.readings'
 TOPIC_JOURNAL = 'tf.ingest.journal'
 TOPIC_REFERENCE = 'tf.ingest.reference'
 TOPIC_RESULTS = 'tf.forecast.results'
 TOPIC_DLQ = 'tf.dlq'
-TOPIC_DECISIONS = 'tf.dispatch.decisions'
-TOPIC_SETTINGS = 'tf.dispatch.settings'
 MAX_MSG_BYTES = 1_048_576           # 1 МБ по ТЗ
+
+# RabbitMQ (think-infra/rabbitmq): модель только читает tf.model.commands (13.3), прав на
+# объявление нет — очередь проверяется пассивно; пароль — из Vault secret/tf/rabbit
+RABBIT_URL = os.environ.get('TF_RABBIT_URL', 'amqp://tf-rabbit:5672/tf')
+RABBIT_USER = 'tf-model'
+QUEUE_COMMANDS = 'tf.model.commands'
+COMMAND_RETRIES = 5                 # после пятой доставки — reject, сообщение уходит в tf.dlq
+
+REDIS_URL = os.environ.get('TF_REDIS_URL', 'redis://tf-redis:6379/0')     # поток аудита
+AUTH_JWKS = os.environ.get('TF_AUTH_JWKS', 'http://tf-auth:8080/.well-known/jwks')
+
+
+def kafka_conf(**extra) -> dict:
+    """Подключение к Kafka для читателя и писателя: один конфиг на обоих."""
+    import tfkit
+    conf = {'bootstrap.servers': KAFKA_BOOTSTRAP}
+    password = tfkit.secret('kafka', 'model_password', 'TF_KAFKA_MODEL_PASSWORD',
+                            required=ENV != 'dev')
+    if password:
+        conf.update({'security.protocol': 'SASL_PLAINTEXT', 'sasl.mechanism': 'PLAIN',
+                     'sasl.username': KAFKA_USER, 'sasl.password': password})
+    conf.update(extra)
+    return conf
 
 # §7: опоздание потока — не повод не считать; за сколько часов данные считаем «несвежими»
 STALE_HOURS = {'default': 1, 'flood': 3}
@@ -62,9 +118,6 @@ CHATTER_GAP_HOURS = 6
 # M6: отклонение диспетчера после REJECT — молчание на N часов или до конца серии (ISA 18.2 «clear»)
 REJECT_N_HOURS = 168
 
-# П8: JWT на всех ручках; секрет и токены сервисов — из env, в коде только умолчания для стенда
-TOKEN_SECRET = os.environ.get('TF_MODEL_TOKEN_SECRET', 'dev-secret')
-TOKEN_ALGO = 'HS256'
-TOKEN_TTL_HOURS = 12
+# Н4: токены — RS256 от think-auth (13.2), проверка в tfkit.Verifier; своих секретов у ручек нет
 API_HOST = os.environ.get('TF_MODEL_API_HOST', '0.0.0.0')
 API_PORT = int(os.environ.get('TF_MODEL_API_PORT', '8000'))

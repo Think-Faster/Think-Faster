@@ -109,6 +109,37 @@ class RulesTest(unittest.TestCase):
                                     OBJECTS, hh, THR)['fire']
                 self.assertEqual(since[0], 0)
 
+    def test_state_survives_restart_and_fact_reports_recurred(self):
+        """13.3: решения людей на томе до подтверждения; факт снимает их и называет снятые пары."""
+        with tempfile.TemporaryDirectory() as d:
+            st = make_settings(Path(d))
+            r = RuleState(st, history=hist())
+            self.assertTrue(r.on_decision(10, 'gas', 'REJECT', 100, ref={'command_id': 'c1', 'by': 'u1'}))
+            self.assertFalse(r.on_decision(10, 'fire', 'REJECT', 100))      # fire — только в историю
+            r.on_decision(20, 'flood', 'MUTE', 100, until=110, ref={'command_id': 'c2'})
+            r.apply({'fire': np.array([0.9, 0.0, 0.0])}, OBJECTS, 100, THR)
+            r.dump(Path(d) / 'rules.json')
+            again = RuleState(st, history=hist())
+            self.assertTrue(again.load(Path(d) / 'rules.json'))
+            self.assertEqual(again.rejections, {(10, 'gas'): 100})
+            self.assertEqual(again.mutes, {(20, 'flood'): 110})
+            self.assertEqual(again.signal[(10, 'fire')]['start'], 100)
+            self.assertEqual(again.status(10, 'gas', 105), ('REJECTED', {'command_id': 'c1', 'by': 'u1', 'action': 'REJECT'}))
+            self.assertEqual(again.status(20, 'flood', 109)[0], 'MUTED')
+            gone = again.on_fact({(10, 'gas'), (30, 'fire')}, 106)
+            self.assertEqual(gone, [((10, 'gas'), 'REJECTED', {'command_id': 'c1', 'by': 'u1', 'action': 'REJECT'})])
+            self.assertIsNone(again.status(10, 'gas', 106))
+
+    def test_mute_expires(self):
+        with tempfile.TemporaryDirectory() as d:
+            r = RuleState(make_settings(Path(d)), history=hist())
+            r.on_decision(20, 'fire', 'MUTE', 100, until=102)
+            out = r.apply({'fire': np.array([0.0, 0.9, 0.0])}, OBJECTS, 101, THR)['fire'][0]
+            self.assertFalse(out[1])
+            out = r.apply({'fire': np.array([0.0, 0.9, 0.0])}, OBJECTS, 102, THR)['fire'][0]
+            self.assertTrue(out[1])
+            self.assertEqual(r.mutes, {})
+
 
 if __name__ == '__main__':
     unittest.main()

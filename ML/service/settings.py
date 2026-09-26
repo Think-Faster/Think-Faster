@@ -64,7 +64,7 @@ class OperatingSettings:
                     if k in u:
                         types[tp][k] = u[k]
         raw = {'version': self.version + 1,
-               'changed': now or datetime.now().astimezone().isoformat(timespec='seconds'),
+               'changed': now or datetime.now(config.MSK).isoformat(timespec='seconds'),
                'changed_by': by, 'reason': reason, 'types': types}
         _validate(raw)
         return self._from(raw)
@@ -76,7 +76,9 @@ class OperatingSettings:
     def save(self, path: Path | None = None) -> None:
         p = Path(path) if path else config.SETTINGS
         p.parent.mkdir(parents=True, exist_ok=True)
-        json.dump(self.as_dict(), p.open('w', encoding='utf-8'), ensure_ascii=False, indent=1)
+        tmp = p.with_suffix('.tmp')
+        tmp.write_text(json.dumps(self.as_dict(), ensure_ascii=False, indent=1), encoding='utf-8')
+        tmp.replace(p)
 
 
 def _validate(raw: dict) -> None:

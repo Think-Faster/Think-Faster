@@ -34,19 +34,22 @@ class Observer:
 
     def observe(self, *, alarms: dict, history: dict, freshness: dict,
                 stale: bool, dlq: int, now) -> dict:
-        """history: тип → массив оценок окна. Отдаёт сводку и копит в buf."""
+        """history: тип → (часы, оценки парка) истории порога. PSI — оценки парка за последние сутки
+        против истории старше недели (строки истории — объект-часы, а не часы). Сводка копится в buf."""
         per = {}
         for tp in config.TYPES:
-            h = history.get(tp, np.empty(0))
-            exp_share = (alarms.get(tp, 0) / max(len(alarms.get(tp, []) or []), 1))
-            per[tp] = {'window_size': int(h.size), 'alarm_share': float(exp_share),
-                       'psi_vs_week': -1}
-            if h.size:
-                last_week = h[-24:]
-                per[tp]['psi_vs_week'] = psi(h[: max(h.size - 168, 1)], last_week)[0]
+            hh, pp = history.get(tp, (np.empty(0), np.empty(0)))
+            a = np.asarray(alarms.get(tp, []), float)
+            per[tp] = {'window_size': int(pp.size), 'alarm_share': float(a.mean()) if a.size else 0.0,
+                       'psi_day_vs_history': None, 'psi_grade': None}
+            if pp.size:
+                ref, win = pp[hh <= hh[-1] - 168], pp[hh > hh[-1] - 24]
+                val, grade = psi(ref[::max(1, ref.size // 200_000)], win)
+                per[tp].update({'psi_day_vs_history': None if np.isnan(val) else round(val, 4),
+                                'psi_grade': grade})
         summary = {'hour': now.isoformat(), 'freshness_hours': freshness,
                    'stale': stale, 'dlq': dlq, 'types': per}
-        self.buf.append(summary)
+        self.buf = self.buf[-199:] + [summary]
         return summary
 
     def dump(self):
