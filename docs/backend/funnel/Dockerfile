@@ -1,21 +1,18 @@
-# Воронка показаний. Контекст сборки — docs/backend (рядом лежит tfkit):
+# Воронка показаний (Go). Контекст сборки — docs/backend, как у остальных наших сервисов:
 #   docker build -f docs/backend/funnel/Dockerfile -t tf-funnel docs/backend
 # Пароль Kafka (tf-funnel) и техучётки шины — из Vault (secret/tf/kafka, secret/tf/funnel).
-FROM python:3.12-slim
+FROM golang:1.27 AS build
+WORKDIR /src
+COPY funnel/go.mod funnel/go.sum ./
+RUN go mod download
+COPY funnel/*.go ./
+RUN go test ./... && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /tf-funnel .
 
-RUN pip install --no-cache-dir confluent-kafka==2.15.1 redis==8.1.0 fastapi==0.141.1 uvicorn==0.54.0 \
-        PyJWT==2.15.0 cryptography==50.0.1
-
-WORKDIR /app
-COPY tfkit/tfkit.py /app/tfkit/tfkit.py
-COPY funnel/funnel.py /app/funnel/funnel.py
-
-RUN useradd --uid 10004 --no-create-home --shell /usr/sbin/nologin tffunnel
-USER tffunnel
-
-ENV TF_ENV=prod PYTHONUNBUFFERED=1
+# статический бинарь: без оболочки и пакетов, с корневыми сертификатами и /tmp
+FROM gcr.io/distroless/static-debian12
+COPY --from=build /tf-funnel /tf-funnel
+USER 10004:10004
+ENV TF_ENV=prod GOMEMLIMIT=400MiB
 EXPOSE 8000
-WORKDIR /app/funnel
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD python -c "import sys,urllib.request; sys.exit(urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status != 200)"
-ENTRYPOINT ["python", "funnel.py"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD ["/tf-funnel", "-health"]
+ENTRYPOINT ["/tf-funnel"]
