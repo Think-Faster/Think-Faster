@@ -3,10 +3,12 @@
 Суточная — CatBoost ×5 на входах A′ (stfx_main_h24*, газ — main_h24*), тревога на доле config.shares().
 Срочная — CatBoost ×5 с горизонтом 6 ч (main_h6<цель>*), своя доля s6 из сетки.
 Добавка: эпизоды, не пойманные суточной за 24 ч, но пойманные срочной за 6 ч (упреждение ≥ 1 ч).
-Цена: ложные сигналы срочной вне тревог суточной (серия часов, за которой 6 ч нет эпизода),
-в долях ложных сигналов суточной (серия, за которой 24 ч нет эпизода).
+Цена в двух мерах: ложные сигналы срочной вне тревог суточной (серия часов, за которой 6 ч нет
+эпизода), в долях ложных сигналов суточной (серия, за которой 24 ч нет эпизода), и часы тревоги
+срочной вне тревог суточной. Опора — суточная с долей, поднятой до той же цены в каждой мере.
 
     TF_WORK=work_pa python urgent.py _prim [зёрен]      # analytics.md, раздел 65
+    TF_WORK=work_pa python urgent.py '' [зёрен]         # обычная цель
 """
 import sys
 import numpy as np
@@ -70,8 +72,9 @@ for tp in TYPES:
     run6 = [f'main_h6{TG}' + s for s in SEEDS]
     print(f'## {tp}, доля суточной {S[tp]:.3f}\n')
     print('| период | s6 | первичных | пойм. суточной | +срочной | медиана упрежд., ч | всех эпизодов | +срочной '
-          '| ложных сигн. суточной | +срочной (доля) | суточная с той же прибавкой: +первичных |')
-    print('|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|')
+          '| ложных сигн. суточной | +срочной (доля) | суточная с той же прибавкой: +первичных '
+          '| часов тревоги +срочной | суточная с той же прибавкой часов: +первичных |')
+    print('|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|')
     for on, yy in YEARS.items():
         (o, h, n), p24 = score(base24, on, yy, tp)
         np_ = operating.split(base24[0], on, yy, tp, 'cat', '_prim')[2]
@@ -89,12 +92,13 @@ for tp in TYPES:
         c24a, _ = caught(key, ep_all, a24, 24)
         # опора при той же цене: поднять долю суточной так, чтобы ложных сигналов прибавилось столько же
         grid = np.unique(np.r_[S[tp], S[tp] * np.geomspace(1.02, 12, 40)])
-        cost, gain = [], []
+        cost, costh, gain = [], [], []
         for sh in grid:
             a = p24 >= np.quantile(p24, 1 - sh)
             cost.append(false_runs(o, h, a, n <= 24) - f24)
+            costh.append(int((a & ~a24).sum()))
             gain.append(int((caught(key, ep_pr, a, 24)[0] & ~c24p).sum()))
-        cost, gain = np.maximum.accumulate(cost), np.maximum.accumulate(gain)
+        cost, costh, gain = np.maximum.accumulate(cost), np.maximum.accumulate(costh), np.maximum.accumulate(gain)
         for s6 in S6:
             a6 = p6 >= np.quantile(p6, 1 - s6)
             c6p, l6p = caught(key, ep_pr, a6, 6)
@@ -102,7 +106,9 @@ for tp in TYPES:
             gp = c6p & ~c24p
             ga = c6a & ~c24a
             f6 = false_runs(o, h, a6 & ~a24, n <= 6)
+            x6 = int((a6 & ~a24).sum())
             med = f'{np.median(l6p[gp]):.0f}' if gp.any() else '—'
             print(f'| {on} | {s6:g} | {len(ep_pr)} | {c24p.sum()} | {gp.sum()} | {med} | {len(ep_all)} | {ga.sum()} '
-                  f'| {f24} | {f6} ({f6 / max(f24, 1):.0%}) | {np.interp(f6, cost, gain):.0f} |', flush=True)
+                  f'| {f24} | {f6} ({f6 / max(f24, 1):.0%}) | {np.interp(f6, cost, gain):.0f} '
+                  f'| {x6} | {np.interp(x6, costh, gain):.0f} |', flush=True)
     print()

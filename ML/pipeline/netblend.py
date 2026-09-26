@@ -4,6 +4,8 @@
 С ключом --versions — версии оборудования на A′ (тест 2026, доля 0,059): v1 как в выгрузке,
 v1 с пятью зёрнами сети и с сетью на A′, v2–v4, смесь v2 + v3. Раздел 65 analytics.md.
 Меры как в sticky.point: поймано, свежих (тревога стоит < RUN_CAP ч), ложных сигналов (склейка 6 ч), ложных ч.
+Смеси сравниваются с бустингом дважды: при ложных сигналах и при ложных часах не больше, чем у него на
+рабочей доле. Меры расходятся: смесь глаже, у неё меньше сигналов на те же часы (раздел 34).
 
     TF_WORK=work_pa python netblend.py fire,sensor,flood,intrusion
     TF_WORK=work_pa python netblend.py --versions
@@ -90,6 +92,27 @@ def blends(TYPES):
         for w in WS:
             v, t = out[('val', w)], out[('test', w)]
             f = lambda x: '—' if x is None else f'{x[0]} / {x[1]} ({x[2]:.4f})'
+            print(f'| {tp} | {w} | {f(v)} | {f(t)} |', flush=True)
+
+    # при равных ложных часах — мера раздела 34
+    print('\n| тип | вес сети | проверка: поймано / свежих / ложных сигн. при ложных ч ≤ бустинга (доля) | тест: то же |')
+    print('|---|---:|---|---|')
+    for tp in TYPES:
+        out = {}
+        for on, yy in (('val', [2025]), ('test', [2026])):
+            d, cat, net = rows(tp, on, yy)
+            cap = point(d, cat, S[tp])[3]
+            for w in WS:
+                p = (1 - w) * cat + w * net
+                best = None
+                for sh in S[tp] * np.geomspace(0.5, 1.5, 41):
+                    r = point(d, p, sh)
+                    if r[3] <= cap and (best is None or r[0] > best[0]):
+                        best = (r[0], r[1], r[2], sh)
+                out[(on, w)] = best
+        for w in WS:
+            v, t = out[('val', w)], out[('test', w)]
+            f = lambda x: '—' if x is None else f'{x[0]} / {x[1]} / {x[2]} ({x[3]:.4f})'
             print(f'| {tp} | {w} | {f(v)} | {f(t)} |', flush=True)
 
 
