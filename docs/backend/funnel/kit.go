@@ -48,7 +48,7 @@ func (e *SecretError) Error() string { return e.msg }
 var (
 	vaultMu    sync.Mutex
 	vaultCache = map[string]map[string]any{}
-	vaultLogin string                  // токен, выданный по AppRole, на время жизни процесса
+	vaultLogin string            // токен, выданный по AppRole, на время жизни процесса
 	vaultRetry = 5 * time.Second // пауза между попытками, пока Vault запечатан или не поднялся
 )
 

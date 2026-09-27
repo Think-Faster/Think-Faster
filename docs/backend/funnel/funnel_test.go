@@ -745,6 +745,123 @@ func TestMakeSinkProdNeedsVault(t *testing.T) {
 	}
 }
 
+// fakeVault — Vault с входом AppRole (r1/s1 → токены a0, a1, …) и двумя секретами; good — действующие токены.
+type fakeVault struct {
+	mu   sync.Mutex
+	seen [][2]string
+	good map[string]bool
+	deny bool // политика не пускает к секретам ни с каким токеном
+	n    int
+}
+
+func startVault(t *testing.T) *fakeVault {
+	fv := &fakeVault{good: map[string]bool{}}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fv.mu.Lock()
+		defer fv.mu.Unlock()
+		if r.Method == "POST" {
+			var b map[string]string
+			json.NewDecoder(r.Body).Decode(&b)
+			fv.seen = append(fv.seen, [2]string{r.URL.Path, ""})
+			if r.URL.Path != "/v1/auth/approle/login" || b["role_id"] != "r1" || b["secret_id"] != "s1" {
+				w.WriteHeader(400)
+				return
+			}
+			tok := fmt.Sprintf("a%d", fv.n)
+			fv.n++
+			fv.good[tok] = true
+			json.NewEncoder(w).Encode(map[string]any{"auth": map[string]string{"client_token": tok}})
+			return
+		}
+		tok := r.Header.Get("X-Vault-Token")
+		fv.seen = append(fv.seen, [2]string{r.URL.Path, tok})
+		data := map[string]map[string]string{"/v1/secret/data/tf/kafka": {"funnel_password": "p1"},
+			"/v1/secret/data/tf/redis": {"TF_REDIS_PASSWORD": "r1"}}[r.URL.Path]
+		if data == nil {
+			w.WriteHeader(404)
+			return
+		}
+		if !fv.good[tok] || fv.deny {
+			w.WriteHeader(403)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"data": data, "metadata": map[string]any{}}})
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("VAULT_ADDR", srv.URL)
+	t.Setenv("VAULT_ROLE_ID", "r1")
+	t.Setenv("VAULT_SECRET_ID", "s1")
+	resetVault := func() {
+		vaultMu.Lock()
+		vaultCache, vaultLogin = map[string]map[string]any{}, ""
+		vaultMu.Unlock()
+	}
+	resetVault()
+	t.Cleanup(resetVault)
+	return fv
+}
+
+func TestVaultAppRoleLogin(t *testing.T) {
+	// как docs/vault-entrypoint.sh think-infra: роль и секрет → токен, дальше чтение по токену
+	fv := startVault(t)
+	for _, c := range [][3]string{{"kafka", "funnel_password", "p1"}, {"redis", "TF_REDIS_PASSWORD", "r1"}} {
+		if v, err := Secret(c[0], c[1], "", true); v != c[2] || err != nil {
+			t.Fatal(c, v, err)
+		}
+	}
+	want := [][2]string{{"/v1/auth/approle/login", ""}, {"/v1/secret/data/tf/kafka", "a0"}, {"/v1/secret/data/tf/redis", "a0"}}
+	if !reflect.DeepEqual(fv.seen, want) { // вход один раз на процесс
+		t.Fatal(fv.seen)
+	}
+}
+
+func TestVaultAppRoleReloginOnExpiredToken(t *testing.T) {
+	fv := startVault(t)
+	if _, err := VaultRead("kafka"); err != nil {
+		t.Fatal(err)
+	}
+	fv.mu.Lock()
+	delete(fv.good, "a0") // токен истёк
+	fv.mu.Unlock()
+	vaultMu.Lock()
+	vaultCache = map[string]map[string]any{}
+	vaultMu.Unlock()
+	if v, err := Secret("kafka", "funnel_password", "", true); v != "p1" || err != nil {
+		t.Fatal(v, err)
+	}
+	logins := 0
+	for _, s := range fv.seen {
+		if s[0] == "/v1/auth/approle/login" {
+			logins++
+		}
+	}
+	if logins != 2 {
+		t.Fatal(fv.seen)
+	}
+}
+
+func TestVaultAppRoleWrongSecretID(t *testing.T) {
+	startVault(t)
+	t.Setenv("VAULT_SECRET_ID", "чужой")
+	_, err := VaultRead("kafka")
+	var se *SecretError
+	if !errors.As(err, &se) || !strings.Contains(err.Error(), "400 на вход AppRole") || strings.Contains(err.Error(), "чужой") {
+		t.Fatal(err)
+	}
+}
+
+func TestVaultReadForbiddenWithoutRelogin(t *testing.T) {
+	// 403 и после нового входа (путь не в политике роли) — ошибка сразу, без ожидания TF_VAULT_WAIT
+	fv := startVault(t)
+	t.Setenv("TF_VAULT_WAIT", "30")
+	fv.deny = true
+	start := time.Now()
+	_, err := VaultRead("kafka")
+	if err == nil || !strings.Contains(err.Error(), "403") || time.Since(start) > 3*time.Second || len(fv.seen) != 4 {
+		t.Fatal(err, time.Since(start), fv.seen) // вход, 403, повторный вход, 403
+	}
+}
+
 func TestKafkaConfDevPassword(t *testing.T) {
 	t.Setenv("TF_KAFKA_BOOTSTRAP", "k:9092")
 	t.Setenv("TF_KAFKA_FUNNEL_PASSWORD", "dev")
