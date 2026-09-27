@@ -1,0 +1,26 @@
+id,group,resource,actions,mask,scope
+95a928c2-54d7-545d-92e9-1f09cdfdacd4,engineers,objects,R,2,свой коллектор или участок
+0b66be04-317e-5492-a0fb-56b9a38d199f,engineers,sensors,R,2,свой коллектор или участок
+b5dd0382-5e79-528c-8831-4a353d3abe17,engineers,predictions,R,2,свой коллектор или участок
+2ce0f804-451b-5fb5-a424-f58ef5822947,engineers,tasks,RU,6,свой коллектор или участок
+6703bd26-85b3-55b9-bc67-b76abba3ec91,engineers,incidents,R,2,свой коллектор или участок
+155d180b-8b68-56c9-a120-b77b14cbfb2c,engineers,schedule,R,2,свой коллектор или участок
+c81fc310-6e93-5f31-b7cb-48fcb5248b14,engineers,assigned_objects,R,2,свой коллектор или участок
+f1f85e38-f377-56ea-9089-539507248ae8,engineers,engineers,R,2,свой коллектор или участок
+9648ab49-5aad-5e26-926d-5d66034b92c6,engineers,presence,R,2,свой коллектор или участок
+1e8ecf3c-aa33-5611-871d-f50cc02dffbe,dispatchers,objects,R,2,весь район
+3726292f-8530-594f-a2b6-aa058e2c856a,dispatchers,sensors,R,2,весь район
+f35e1f86-db2a-55ae-9e4d-1c45d130c7b1,dispatchers,predictions,RU,6,весь район
+53428fb1-3598-5cda-bea3-4c1cac503c9c,dispatchers,tasks,CRU,7,весь район
+fb2cbc10-4f62-522d-804b-867203e0e12b,dispatchers,incidents,CRU,7,весь район
+67efde5b-f814-512a-96ec-13ded2ea1b58,dispatchers,schedule,R,2,весь район
+bc54059c-598e-5d76-a89a-3e7dae9d2b65,dispatchers,assigned_objects,R,2,весь район
+92a70154-66a1-5dac-87f7-bb1e1b3433a7,dispatchers,engineers,R,2,весь район
+5be63733-c7ea-5ff4-81da-9e3559b27a1c,dispatchers,presence,R,2,весь район
+98559b6b-a86d-5ef0-ba49-002a1155eac2,chief_dispatchers,predictions,RUE,22,весь район
+8ecd1354-39ae-586a-92f2-c46c37377374,chief_dispatchers,model_settings,RU,6,весь район
+471c598c-0957-52b8-8f8e-6a12f7d593ad,chief_dispatchers,schedule,CRUD,15,весь район
+31e0d8c6-10bc-516b-a434-d69a959535d2,chief_dispatchers,assigned_objects,CRUD,15,весь район
+66316acb-0664-5570-8dca-48fb4f8e63b2,chief_dispatchers,engineers,CRUD,15,весь район
+12f17c7a-124d-57de-af26-6152f95a82e8,chief_dispatchers,groups,RU,6,весь район
+423ef182-d287-56c8-ad2f-0ce5cdcc0440,chief_dispatchers,users,R,2,весь район

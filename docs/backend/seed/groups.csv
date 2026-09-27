@@ -1,0 +1,17 @@
+id,code,name,is_system
+956359ff-8aa8-5a41-a1bd-5571230da293,chief_dispatchers,Главные диспетчеры,False
+def4368a-f803-5abe-9f03-dd26ef8d59b1,dispatchers,Диспетчеры,False
+ad34f9a9-ebd9-5818-be07-193437fd5b2f,dispatch_shift_a,Смена А,False
+130fc6a4-5d84-5f21-b5a1-3974a6455a09,dispatch_shift_b,Смена Б,False
+387f13b7-e9f0-511a-95b9-bac43ecc8443,dispatch_shift_v,Смена В,False
+0cba14bc-7ded-5cef-a3d2-71debf86770d,dispatch_shift_g,Смена Г,False
+b6952cfd-61f7-5be1-bbe2-74b1c2a72b63,engineers,Инженеры,False
+70ef4c7c-509b-5738-8484-6a048a6b9293,line_staff,Линейный персонал,False
+d46c9f2e-ce07-559b-8144-dceebe34f3d4,site_engineers,Инженеры участков,False
+4cbad0f2-6258-5779-90e5-e412d3c71dd3,mobile_brigade,Мобильная бригада ППР и ТО АКМ,False
+7895733f-3375-55de-a68e-69875192f922,power_engineers,Энергетики,False
+b19cea9b-7e1e-5a7e-9c62-aaf1e75ac3af,comms_engineers,Связь и автоматика,False
+7b053bd2-69b5-5d2d-93c5-bb56ceffa7fd,site_1,Участок 1,False
+dd75f773-4f67-54d1-9807-e72c7d90342b,site_2,Участок 2,False
+5da262b8-2581-512a-ae85-f2ac0e9cb23f,site_3,Участок 3,False
+174d6ff2-9ab3-5607-8dfe-69361b8e5f34,site_4,Участок 4,False
