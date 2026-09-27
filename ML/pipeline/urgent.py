@@ -22,6 +22,14 @@
 
     TF_WORK=work_pa python urgent.py _prim 5 24 v1pa prim_ow0:3:0.25
     TF_WORK=work_pa python urgent.py _prim 5 6 '' h6_prim_ow0:3:1
+
+Шестой аргумент — семейства второй модели через запятую (по умолчанию cat), ранги усредняются:
+
+    TF_WORK=work_pa python urgent.py _prim 5 24 v1pa '' cat,xgb
+
+Седьмой — типы через запятую (по умолчанию все), например 10 зёрен срочной на 3 ч у подтопления:
+
+    TF_WORK=work_pa python urgent.py _prim 10 3 '' '' cat flood
 """
 import sys
 import numpy as np
@@ -32,13 +40,17 @@ TG = sys.argv[1] if len(sys.argv) > 1 else '_prim'
 TYPES = config.TYPES
 S = config.shares()
 S6 = [0.0002, 0.0005, 0.001, 0.002, 0.003, 0.005, 0.0075, 0.01, 0.015, 0.02, 0.03]
-SEEDS = ['', '_s1', '_s2', '_s3', '_s4'][:int(sys.argv[2]) if len(sys.argv) > 2 else 5]
+# зёрна второй модели; у суточной опоры их пять — берётся не больше
+SEEDS = ['' if s == 0 else f'_s{s}' for s in range(int(sys.argv[2]) if len(sys.argv) > 2 else 5)]
 HZ = int(sys.argv[3]) if len(sys.argv) > 3 else 6       # горизонт второй модели, ч
 YEARS = {'val': [2025], 'test': [2026]}
 BASE = sys.argv[4] if len(sys.argv) > 4 else ''         # '', v1, v1pa — опора у оборудования
 if BASE:
     TYPES = ['equipment']
-NET = sys.argv[5].split(':') if len(sys.argv) > 5 else None
+NET = sys.argv[5].split(':') if len(sys.argv) > 5 and sys.argv[5] else None
+MODELS = sys.argv[6].split(',') if len(sys.argv) > 6 and sys.argv[6] else ['cat']
+if len(sys.argv) > 7:
+    TYPES = sys.argv[7].split(',')
 
 
 def with_net(p6, on, tp):
@@ -54,14 +66,15 @@ def pct(p):
     return p.argsort().argsort() / len(p)
 
 
-def score(runs, on, yy, tp):
+def score(runs, on, yy, tp, models=('cat',)):
     acc, base = 0, None
     for r in runs:
-        o, h, n, p = operating.split(r, on, yy, tp, 'cat')
-        if base is None:
-            base = (o, h, n)
-        acc = acc + pct(p)
-    return base, acc / len(runs)
+        for m in models:
+            o, h, n, p = operating.split(r, on, yy, tp, m)
+            if base is None:
+                base = (o, h, n)
+            acc = acc + pct(p)
+    return base, acc / (len(runs) * len(models))
 
 
 def v1(p24, on):
@@ -104,9 +117,9 @@ def caught(key, eps, alarm, W):
     return hit.any(1), lead
 
 
-print(f'# R1: вторая модель {HZ} ч (цель {TG or "все эпизоды"}) поверх суточного {BASE}\n')
+print(f'# R1: вторая модель {HZ} ч {"+".join(MODELS)} (цель {TG or "все эпизоды"}) поверх суточного {BASE}\n')
 for tp in TYPES:
-    base24 = [('main_h24' if tp == 'gas' else 'stfx_main_h24') + s for s in SEEDS]
+    base24 = [('main_h24' if tp == 'gas' else 'stfx_main_h24') + s for s in SEEDS[:5]]
     run6 = [f'main_h{HZ}{TG}' + s for s in SEEDS]
     print(f'## {tp}, доля суточной {S[tp]:.3f}\n')
     print('| период | s6 | первичных | пойм. суточной | +срочной | медиана упрежд., ч | всех эпизодов | +срочной '
@@ -120,7 +133,7 @@ for tp in TYPES:
             if p24 is None:
                 continue
         np_ = operating.split(base24[0], on, yy, tp, 'cat', '_prim')[2]
-        _, p6 = score(run6, on, yy, tp)
+        _, p6 = score(run6, on, yy, tp, MODELS)
         if NET:
             p6 = with_net(p6, on, tp)
         order = np.lexsort((h, o))
