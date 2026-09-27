@@ -19,6 +19,7 @@
 прогоны обучаются на A′ заново (`train.py --models xgb --params tuned --types sensor` и т. п.):
 
     TF_WORK=work_pa python urgent.py _prim 5 6 work '' cat sensor
+    TF_WORK=work_pa python urgent.py _prim 5 24 v1work    # v1pa с CatBoost-частью tunedh24, как в пакете
 
 Пятый аргумент — сеть во второй модели, `<имя>:<зёрен>:<вес>`: ранги второй модели смешиваются с
 рангами сети `seqmodel.py --name <имя>_s<зерно>` того же горизонта (runs/main_h<HZ>/preds), вес 1 —
@@ -49,11 +50,11 @@ SEEDS = ['' if s == 0 else f'_s{s}' for s in range(int(sys.argv[2]) if len(sys.a
 HZ = int(sys.argv[3]) if len(sys.argv) > 3 else 6       # горизонт второй модели, ч
 YEARS = {'val': [2025], 'test': [2026]}
 BASE = sys.argv[4] if len(sys.argv) > 4 else ''         # '', v1, v1pa — опора у оборудования; work
-if BASE in ('v1', 'v1pa'):
+if BASE in ('v1', 'v1pa', 'v1work'):
     TYPES = ['equipment']
 # рабочая суточная модель в пакете, если она не CatBoost на умолчаниях: прогон и семейство
 WORK_BASE = {'sensor': ('main_h24_tuned', 'xgb'), 'fire': ('main_h24_tunedh24', 'cat'),
-             'flood': ('main_h24_tuned', 'cat')}
+             'flood': ('main_h24_tuned', 'cat'), 'equipment': ('main_h24_tunedh24', 'cat')}
 NET = sys.argv[5].split(':') if len(sys.argv) > 5 and sys.argv[5] else None
 MODELS = sys.argv[6].split(',') if len(sys.argv) > 6 and sys.argv[6] else ['cat']
 if len(sys.argv) > 7:
@@ -126,7 +127,7 @@ def caught(key, eps, alarm, W):
 
 print(f'# R1: вторая модель {HZ} ч {"+".join(MODELS)} (цель {TG or "все эпизоды"}) поверх суточного {BASE}\n')
 for tp in TYPES:
-    brun, bfam = WORK_BASE[tp] if BASE == 'work' and tp in WORK_BASE else (None, 'cat')
+    brun, bfam = WORK_BASE[tp] if BASE in ('work', 'v1work') and tp in WORK_BASE else (None, 'cat')
     base24 = [(brun or ('main_h24' if tp == 'gas' else 'stfx_main_h24')) + s for s in SEEDS[:5]]
     run6 = [f'main_h{HZ}{TG}' + s for s in SEEDS]
     print(f'## {tp}, доля суточной {S[tp]:.3f}\n')
@@ -136,7 +137,7 @@ for tp in TYPES:
     print('|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|')
     for on, yy in YEARS.items():
         (o, h, n), p24 = score(base24, on, yy, tp, (bfam,))
-        if BASE in ('v1', 'v1pa'):
+        if BASE in ('v1', 'v1pa', 'v1work'):
             p24 = v1(p24, on)
             if p24 is None:
                 continue
