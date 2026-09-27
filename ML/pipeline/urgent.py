@@ -141,7 +141,8 @@ for tp in TYPES:
             a = p24 >= np.quantile(p24, 1 - sh)
             cost.append(false_runs(o, h, a, n <= 24) - f24)
             costh.append(int((a & ~a24).sum()))
-            gain.append(int((caught(key, ep_pr, a, 24)[0] & ~c24p).sum()))
+            # горизонт второй модели длиннее суток — и опоре засчитывается поимка в том же окне
+            gain.append(int((caught(key, ep_pr, a, max(HZ, 24))[0] & ~c24p).sum()))
         cost, costh, gain = np.maximum.accumulate(cost), np.maximum.accumulate(costh), np.maximum.accumulate(gain)
         for s6 in S6:
             a6 = p6 >= np.quantile(p6, 1 - s6)
