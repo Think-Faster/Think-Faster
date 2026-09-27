@@ -901,7 +901,21 @@ def insert(f, table, cols, rows, conflict='DO NOTHING', target=''):
         f.write(f'\nON CONFLICT {target}{conflict};\n\n')
 
 
-def write_sql(objs, pickets, sens, layers, ppl, gs, mem, closure, grants, brigades, profiles, assigned, sched):
+def shift_of(text):
+    """'07:00–19:00' → ('07:00', 12); '08:00–08:00+1' → ('08:00', 24)."""
+    if not text:
+        return None, None
+    a, b = text.split('–')
+    h = (int(b[:2]) * 60 + int(b[3:5]) - int(a[:2]) * 60 - int(a[3:5])) / 60 + (24 if b.endswith('+1') else 0)
+    return a, int(h)
+
+
+PERMIT_KIND = {'CONFINED_SPACE': 1, 'GAS_HAZARD': 2, 'ELECTRICAL': 3}
+WORK_SOURCE = {'ORGANIZER': 1, 'CHIEF_DISPATCHER': 2, 'CARRIED_OVER': 3}
+
+
+def write_sql(objs, pickets, sens, layers, ppl, gs, mem, closure, grants, brigades, profiles, assigned, sched,
+              prm, ws):
     ts = q(STAMP)
     with open(HERE / 'seed.sql', 'w', encoding='utf-8', newline='\n') as f:
         f.write('-- Синтетические данные стенда: docs/backend/seed/seed.py build, руками не править.\n'
@@ -952,16 +966,30 @@ def write_sql(objs, pickets, sens, layers, ppl, gs, mem, closure, grants, brigad
                 + ',\n'.join(f"({q(x['id'])}, {q(x['group'])}, {q(x['resource'])}, {x['mask']})" for x in grants)
                 + '\n) v(id, code, res, mask) JOIN groups g ON g.code = v.code JOIN resources r ON r.code = v.res\n'
                   'ON CONFLICT (principal_type, principal_id, resource_id) DO NOTHING;\n\n')
-        insert(f, 'brigades', ['id', 'name'], [[q(b['id']), q(b['name'])] for b in brigades])
+        insert(f, 'brigades', ['id', 'name', 'unit', 'leader_id'],
+               [[q(b['id']), q(b['name']), q(b['unit']), q(b.get('leader'))] for b in brigades])
         insert(f, 'engineer_profiles', ['user_id', 'brigade_id', 'phone', 'telegram', 'specialization', 'status'],
                [[q(r['user_id']), q(r['brigade_id']), q(r['phone']), 'NULL',
                  q('{' + ','.join(r['specialization'].split()) + '}'), q(r['status'])] for r in profiles])
         insert(f, 'assigned_objects', ['user_id', 'object_id', 'assigned_by', 'assigned_at', 'note'],
                [[q(a['user_id']), q(a['object_id']), q(a['assigned_by']), ts, q(a['note'])] for a in assigned])
-        insert(f, 'schedule_entries', ['id', 'user_id', 'date_from', 'date_to', 'status', 'source', 'changed_by',
-                                       'changed_at'],
+        insert(f, 'schedule_entries', ['id', 'user_id', 'date_from', 'date_to', 'status', 'shift_start',
+                                       'shift_hours', 'source', 'changed_by', 'changed_at'],
                [[q(s['id']), q(s['user_id']), q(str(s['date_from'])), q(str(s['date_to'])), q(s['status']),
-                 q(s['source'] + (f", {s['shift']}" if s['shift'] else '')), q(s['changed_by']), ts] for s in sched])
+                 q(shift_of(s['shift'])[0]), q(shift_of(s['shift'])[1]), q(s['source']), q(s['changed_by']), ts]
+                for s in sched])
+        insert(f, 'engineer_permits', ['id', 'user_id', 'kind', 'level', 'valid_until', 'document_no', 'checked_by',
+                                       'checked_at'],
+               [[q(r['id']), q(r['user_id']), q(PERMIT_KIND[r['kind']]), q(r['level']), q(str(r['valid_until'])),
+                 q(r['document_no']), q(r['checked_by']), q(str(r['checked_at']))] for r in prm])
+        # время графика — местное, как в works_2026.csv; created_by пуст: строки от организатора, не из интерфейса
+        insert(f, 'work_schedule', ['work_id', 'version', 'object_id', 'work_kind', 'incident_types', 'removed_sensor',
+                                    'starts_at', 'ends_at', 'source', 'comment', 'deleted', 'created_by', 'created_at'],
+               [[q(int(w['work_id'])), q(w['version']), q(int(w['object_id']) if w['object_id'] else None),
+                 q(w['work_kind']), q('{' + ','.join(w['incident_types'].split()) + '}'), q(w['removed_sensor']),
+                 q(w['starts_at'].replace(' ', 'T') + ':00+03:00'), q(w['ends_at'].replace(' ', 'T') + ':00+03:00'), q(WORK_SOURCE[w['source']]), q(w['comment']),
+                 'false', 'NULL', ts] for w in ws])
+        f.write("SELECT setval('work_schedule_work_id_seq', (SELECT max(work_id) FROM work_schedule));\n\n")
         f.write('INSERT INTO rbac_version (id, value) VALUES (1, 1)\n'
                 'ON CONFLICT (id) DO UPDATE SET value = rbac_version.value + 1;\n\nCOMMIT;\n')
     print('seed.sql:', round((HERE / 'seed.sql').stat().st_size / 1e6, 1), 'МБ')
@@ -1034,7 +1062,8 @@ def build():
                                               'note'])
     write_csv('work_schedule_2026.csv', ws, ['work_id', 'version', 'object_id', 'work_kind', 'incident_types',
                                              'removed_sensor', 'starts_at', 'ends_at', 'source', 'comment', 'crew'])
-    write_sql(objs, pickets, sens, layers, ppl, gs, mem, closure, grants, brigades, profiles, assigned, sched)
+    write_sql(objs, pickets, sens, layers, ppl, gs, mem, closure, grants, brigades, profiles, assigned, sched,
+              prm, ws)
 
 
 if __name__ == '__main__':
