@@ -15,6 +15,13 @@
 
 Опора — суточный CatBoost×5; с v1 или v1pa — только оборудование, опора — 0,75 ранга CatBoost×5 +
 0,25 ранга сети, как в версии 1.
+
+Пятый аргумент — сеть во второй модели, `<имя>:<зёрен>:<вес>`: ранги второй модели смешиваются с
+рангами сети `seqmodel.py --name <имя>_s<зерно>` того же горизонта (runs/main_h<HZ>/preds), вес 1 —
+одна сеть:
+
+    TF_WORK=work_pa python urgent.py _prim 5 24 v1pa prim_ow0:3:0.25
+    TF_WORK=work_pa python urgent.py _prim 5 6 '' h6_prim_ow0:3:1
 """
 import sys
 import numpy as np
@@ -31,6 +38,16 @@ YEARS = {'val': [2025], 'test': [2026]}
 BASE = sys.argv[4] if len(sys.argv) > 4 else ''         # '', v1, v1pa — опора у оборудования
 if BASE:
     TYPES = ['equipment']
+NET = sys.argv[5].split(':') if len(sys.argv) > 5 else None
+
+
+def with_net(p6, on, tp):
+    """Ранги второй модели в смеси с рангами сети; порядок строк сети — index_<on> прогона main_h<HZ>."""
+    tag, n, w = NET[0], int(NET[1]), float(NET[2])
+    preds = config.WORK / 'runs' / f'main_h{HZ}' / 'preds'
+    net = sum(pct(np.load(preds / f'{tag}_s{s}_{tp}_{on}.npy')) for s in range(n))
+    assert len(net) == len(p6)
+    return (1 - w) * pct(p6) + w * pct(net)
 
 
 def pct(p):
@@ -104,6 +121,8 @@ for tp in TYPES:
                 continue
         np_ = operating.split(base24[0], on, yy, tp, 'cat', '_prim')[2]
         _, p6 = score(run6, on, yy, tp)
+        if NET:
+            p6 = with_net(p6, on, tp)
         order = np.lexsort((h, o))
         o, h, n, np_, p24, p6 = (a[order] for a in (o, h, n, np_, p24, p6))
         key = o.astype(np.int64) * 10**7 + h
