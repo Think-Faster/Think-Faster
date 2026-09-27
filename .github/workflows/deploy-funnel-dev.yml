@@ -1,0 +1,98 @@
+# Воронка tf-funnel на dev-стенд Гриши: собирается из этого репозитория (docs/backend/funnel), как
+# tf-bff из think-bff. Код копируется на сервер, образ собирается там же, контейнер встаёт в
+# think-fast-net рядом с tf-bff, tf-auth, tf-kafka и vault; nginx отдаёт его под /api/funnel/*.
+#
+# Нужно в настройках репозитория (Settings → Secrets and variables → Actions):
+#   секреты репозитория DEV_IP, DEV_USER, DEV_SSH_KEY — те же, что у think-bff;
+#   окружение dev с VAULT_ROLE_ID и VAULT_SECRET_ID роли tf-svc-tf-funnel
+#     (think-infra: hashicorp/scripts/setup.sh service-credentials tf-funnel).
+# Пока их нет, выкатка пропускается, а не падает.
+name: Deploy tf-funnel to dev
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/backend/funnel/**'
+      - '.github/workflows/deploy-funnel-dev.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-funnel-dev
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: dev
+    env:
+      DEV_IP: ${{ secrets.DEV_IP }}
+    steps:
+      - name: No dev secrets — skip
+        if: env.DEV_IP == ''
+        run: echo "::notice::DEV_IP/DEV_USER/DEV_SSH_KEY не заданы в репозитории — выкатка tf-funnel пропущена"
+
+      - name: Checkout repository
+        if: env.DEV_IP != ''
+        uses: actions/checkout@v4
+
+      - name: Copy funnel sources to server
+        if: env.DEV_IP != ''
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.DEV_IP }}
+          username: ${{ secrets.DEV_USER }}
+          key: ${{ secrets.DEV_SSH_KEY }}
+          source: docs/backend/funnel
+          target: tf-funnel-src
+          strip_components: 2
+          rm: true
+
+      - name: Build and restart tf-funnel
+        if: env.DEV_IP != ''
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          VAULT_ROLE_ID: ${{ secrets.VAULT_ROLE_ID }}
+          VAULT_SECRET_ID: ${{ secrets.VAULT_SECRET_ID }}
+        with:
+          host: ${{ secrets.DEV_IP }}
+          username: ${{ secrets.DEV_USER }}
+          key: ${{ secrets.DEV_SSH_KEY }}
+          envs: VAULT_ROLE_ID,VAULT_SECRET_ID
+          script: |
+            set -e
+            if [ -z "$VAULT_ROLE_ID" ] || [ -z "$VAULT_SECRET_ID" ]; then
+              echo "В окружении dev нет VAULT_ROLE_ID/VAULT_SECRET_ID роли tf-svc-tf-funnel" >&2
+              exit 1
+            fi
+            docker network inspect think-fast-net >/dev/null
+
+            # контекст сборки — как docs/backend в репозитории: Dockerfile берёт funnel/*
+            cd ~/tf-funnel-src
+            docker build -f funnel/Dockerfile -t tf-funnel:dev .
+
+            docker rm -f tf-funnel >/dev/null 2>&1 || true
+            # переменные — те же, что у tf-funnel в docs/backend/compose.yml; секреты — только из Vault
+            docker run -d --name tf-funnel \
+              --network think-fast-net \
+              --restart unless-stopped \
+              --memory 512m \
+              -v tf-funnel-data:/data \
+              -e TF_ENV=prod \
+              -e VAULT_ADDR=http://vault:8200 \
+              -e TF_VAULT_WAIT=900 \
+              -e TF_REDIS_URL=redis://tf-redis:6379/0 \
+              -e TF_AUTH_JWKS=http://tf-auth:8080/.well-known/jwks \
+              -e TF_FUNNEL_SILENT_MIN=60 \
+              -e TF_FUNNEL_ARCHIVE=/data/archive \
+              -e TF_FUNNEL_ARCHIVE_DAYS=0 \
+              -e TF_BFF_URL=http://tf-bff:8080 \
+              -e TF_AUDIT_SPOOL=/tmp/tf-audit.spool \
+              -e VAULT_ROLE_ID \
+              -e VAULT_SECRET_ID \
+              tf-funnel:dev
+
+            docker image prune -f >/dev/null
+            sleep 15
+            docker ps --filter name=^tf-funnel$ --format '{{.Names}} {{.Status}}'
+            docker logs --tail 50 tf-funnel
