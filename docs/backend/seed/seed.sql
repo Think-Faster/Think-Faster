@@ -19665,6 +19665,7 @@ SELECT v.id::uuid, 2, g.id, r.id, v.mask, '2026-09-27T00:00:00+03:00'::timestamp
 ('9648ab49-5aad-5e26-926d-5d66034b92c6', 'engineers', 'presence', 2),
 ('1e8ecf3c-aa33-5611-871d-f50cc02dffbe', 'dispatchers', 'objects', 2),
 ('3726292f-8530-594f-a2b6-aa058e2c856a', 'dispatchers', 'sensors', 2),
+('2aa346d7-fb33-5cd1-8216-20bdf937f17f', 'dispatchers', 'readings', 2),
 ('f35e1f86-db2a-55ae-9e4d-1c45d130c7b1', 'dispatchers', 'predictions', 6),
 ('53428fb1-3598-5cda-bea3-4c1cac503c9c', 'dispatchers', 'tasks', 7),
 ('fb2cbc10-4f62-522d-804b-867203e0e12b', 'dispatchers', 'incidents', 7),

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"errors"
 	"io"
 	"log/slog"
@@ -41,10 +42,34 @@ func (s *statusWriter) WriteHeader(code int) {
 	s.ResponseWriter.WriteHeader(code)
 }
 
+// Hijack и Unwrap — WebSocket (/stream) проходит сквозь журнал запросов.
+func (s *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return http.NewResponseController(s.ResponseWriter).Hijack()
+}
+
+func (s *statusWriter) Unwrap() http.ResponseWriter { return s.ResponseWriter }
+
+// LogsConf — окно «Логи» (stream.go): у кого спрашивать права на объекты, cookie с токеном, какие
+// Origin пускать в WebSocket (пусто — только свой хост), сколько часов архива смотреть за запрос,
+// когда закрыть потоки (остановка воронки). nil — /log и /stream отвечают 503.
+type LogsConf struct {
+	Scoper   Scoper
+	Cookie   string
+	Origins  []string
+	MaxHours int
+	Done     <-chan struct{}
+}
+
 type server struct {
 	f        *Funnel
 	verifier *Verifier
 	audit    Auditor
+
+	scoper   Scoper
+	cookie   string
+	origins  []string
+	maxHours int
+	done     <-chan struct{}
 }
 
 // refuse — отказ по токену или праву: событие в аудит и ответ.
@@ -115,10 +140,15 @@ func (s *server) status(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.caller(w, r, ""); !ok {
 		return
 	}
+	subs := 0
+	if s.f.Hub != nil {
+		subs = s.f.Hub.Subscribers()
+	}
 	writeJSON(w, 200, struct {
 		Stats
 		channelsSnapshot
-	}{s.f.Stats(), s.f.Channels.Snapshot(200)})
+		LogViewers int `json:"log_viewers"`
+	}{s.f.Stats(), s.f.Channels.Snapshot(200), subs})
 }
 
 func (s *server) events(w http.ResponseWriter, r *http.Request) {
@@ -157,14 +187,25 @@ func (s *server) events(w http.ResponseWriter, r *http.Request) {
 }
 
 // NewHandler — ручки воронки; за nginx те же пути с префиксом /api/funnel. rl — журнал запросов
-// (права-и-аудит §6.1), nil — без него.
-func NewHandler(f *Funnel, v *Verifier, audit Auditor, rl *RequestLog) http.Handler {
-	s := &server{f, v, audit}
+// (права-и-аудит §6.1), nil — без него; logs — окно «Логи», nil — выключено.
+func NewHandler(f *Funnel, v *Verifier, audit Auditor, rl *RequestLog, logs *LogsConf) http.Handler {
+	s := &server{f: f, verifier: v, audit: audit, cookie: "access_token", maxHours: 72}
+	if logs != nil {
+		s.scoper, s.origins, s.done = logs.Scoper, logs.Origins, logs.Done
+		if logs.Cookie != "" {
+			s.cookie = logs.Cookie
+		}
+		if logs.MaxHours > 0 {
+			s.maxHours = logs.MaxHours
+		}
+	}
 	mux := http.NewServeMux()
 	for _, p := range []string{"", "/api/funnel"} {
 		mux.HandleFunc("GET "+p+"/health", s.health)
 		mux.HandleFunc("GET "+p+"/status", s.status)
 		mux.HandleFunc("POST "+p+"/events", s.events)
+		mux.HandleFunc("GET "+p+"/log", s.log)
+		mux.HandleFunc("GET "+p+"/stream", s.stream)
 	}
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 404, detail{"Not Found"}) })
 	if rl == nil {
@@ -178,8 +219,13 @@ func NewHandler(f *Funnel, v *Verifier, audit Auditor, rl *RequestLog) http.Hand
 			if _, pattern := mux.Handler(r); pattern != "" && pattern != "/" {
 				route = pattern[strings.Index(pattern, " ")+1:]
 			}
-			rl.Put(r.Method, route, sw.status, time.Since(t0), r.Header.Get("Authorization"),
-				r.Header.Get("X-Request-Id"), clientIP(r))
+			auth := r.Header.Get("Authorization")
+			if auth == "" { // окно «Логи» приходит с cookie
+				if t := userToken(r, s.cookie); t != "" {
+					auth = "Bearer " + t
+				}
+			}
+			rl.Put(r.Method, route, sw.status, time.Since(t0), auth, r.Header.Get("X-Request-Id"), clientIP(r))
 		}()
 		mux.ServeHTTP(sw, r)
 	})

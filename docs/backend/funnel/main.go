@@ -1,7 +1,8 @@
 // Воронка показаний Think Faster (INTEGRATION §13.9): шина объектов (Вариант Б) присылает события
 // пакетами POST /events, воронка проверяет каждое, пишет хорошие в Kafka (tf.ingest.journal — тревожные
 // и нечисловые, tf.ingest.readings — числа) и следит, какие каналы замолчали (channel.status в
-// tf.ingest.reference). На стенде TF_FUNNEL_PULL — забор у эмулятора вместо приёма.
+// tf.ingest.reference). На стенде TF_FUNNEL_PULL — забор у эмулятора вместо приёма. Принятое ещё и
+// копится в архив со сжатием (TF_FUNNEL_ARCHIVE) и раздаётся окну «Логи» (/log, /stream).
 package main
 
 import (
@@ -137,6 +138,24 @@ func main() {
 		fail("TF_FUNNEL_SILENT_MIN", err)
 	}
 	funnel := NewFunnel(sink, audit, NewChannels(60*silentMin))
+	funnel.Hub = NewHub()
+	if dir := getenv("TF_FUNNEL_ARCHIVE", "/data/archive"); dir != "off" {
+		days, err := strconv.Atoi(getenv("TF_FUNNEL_ARCHIVE_DAYS", "0"))
+		if err != nil || days < 0 {
+			fail("TF_FUNNEL_ARCHIVE_DAYS", fmt.Errorf("число дней, 0 — хранить всё"))
+		}
+		funnel.Archive = NewArchive(dir, days)
+		defer funnel.Archive.Close()
+	}
+	var logs *LogsConf
+	if bff := getenv("TF_BFF_URL", "http://tf-bff:8080"); bff != "off" {
+		hours, err := strconv.Atoi(getenv("TF_FUNNEL_LOG_HOURS", "72"))
+		if err != nil || hours < 1 {
+			fail("TF_FUNNEL_LOG_HOURS", fmt.Errorf("число часов больше 0"))
+		}
+		logs = &LogsConf{Scoper: NewBffScoper(bff), Cookie: getenv("TF_AUTH_COOKIE", "access_token"),
+			Origins: splitList(os.Getenv("TF_FUNNEL_WS_ORIGINS")), MaxHours: hours}
+	}
 
 	stop := make(stopChan)
 	go func() { // обход молчания и досылка аудита
@@ -152,13 +171,27 @@ func main() {
 			}()
 		}
 	}()
+	if funnel.Archive != nil {
+		go func() { // сжатие закрытых часов архива и удаление старых дней
+			for !stop.Wait(60) {
+				if n, err := funnel.Archive.Compact(now()); err != nil {
+					slog.Error("архив: " + err.Error())
+				} else if n > 0 {
+					slog.Info(fmt.Sprintf("архив: сжато часов %d", n))
+				}
+			}
+		}()
+	}
 	if base := os.Getenv("TF_FUNNEL_PULL"); base != "" {
 		go Pull(funnel, base, stop, 1, 5000, nil)
 		slog.Info("стенд: забираю поток у " + base)
 	}
 
+	if logs != nil {
+		logs.Done = stop
+	}
 	srv := &http.Server{Addr: fmt.Sprintf(":%d", port), Handler: NewHandler(funnel, verifier, audit,
-		NewRequestLog(audit, verifier, 10_000)), ReadHeaderTimeout: 10 * time.Second}
+		NewRequestLog(audit, verifier, 10_000), logs), ReadHeaderTimeout: 10 * time.Second}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	go func() {

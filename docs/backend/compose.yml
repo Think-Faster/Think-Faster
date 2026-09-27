@@ -50,9 +50,15 @@ services:
       <<: *env
       TF_FUNNEL_PULL: ${TF_FUNNEL_PULL:-}             # стенд: http://tf-emulator:8000
       TF_FUNNEL_SILENT_MIN: ${TF_FUNNEL_SILENT_MIN:-60}
+      # окно «Логи»: архив показаний (часы сжимаются zstd; 0 дней — хранить всё), права — у BFF
+      TF_FUNNEL_ARCHIVE: /data/archive
+      TF_FUNNEL_ARCHIVE_DAYS: ${TF_FUNNEL_ARCHIVE_DAYS:-0}
+      TF_BFF_URL: ${TF_BFF_URL:-http://tf-bff:8080}
       TF_AUDIT_SPOOL: /tmp/tf-audit.spool
       VAULT_ROLE_ID: ${TF_FUNNEL_VAULT_ROLE_ID:?TF_FUNNEL_VAULT_ROLE_ID — role_id роли tf-svc-tf-funnel}
       VAULT_SECRET_ID: ${TF_FUNNEL_VAULT_SECRET_ID:?TF_FUNNEL_VAULT_SECRET_ID is not set}
+    volumes:
+      - tf-funnel-data:/data
 
   tf-notify:
     <<: *service
@@ -81,6 +87,8 @@ services:
 volumes:
   tf-ml-work:
     name: tf-ml-work
+  tf-funnel-data:
+    name: tf-funnel-data
 
 networks:
   think-fast-net:

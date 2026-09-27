@@ -132,17 +132,21 @@ type TakeResult struct {
 type Actor struct{ Sub, Kind string }
 
 type Stats struct {
-	Packets      int     `json:"packets"`
-	Accepted     int     `json:"accepted"`
-	Rejected     int     `json:"rejected"`
-	Unavailable  int     `json:"unavailable"`
-	LastAccepted *string `json:"last_accepted"`
+	Packets       int     `json:"packets"`
+	Accepted      int     `json:"accepted"`
+	Rejected      int     `json:"rejected"`
+	Unavailable   int     `json:"unavailable"`
+	ArchiveErrors int     `json:"archive_errors"`
+	LastAccepted  *string `json:"last_accepted"`
 }
 
+// Funnel — приём. Archive и Hub — окно «Логи» (archive.go, stream.go); nil — выключены.
 type Funnel struct {
 	Sink     Sink
 	Audit    Auditor
 	Channels *Channels
+	Archive  *Archive
+	Hub      *Hub
 	Now      func() float64
 
 	mu    sync.Mutex
@@ -189,6 +193,7 @@ func (f *Funnel) Take(raw []any, via string, actor *Actor, requestID string) (Ta
 			f.mu.Unlock()
 			return TakeResult{}, err
 		}
+		f.keep(good, t)
 	}
 	var back []int64
 	for _, ev := range good {
@@ -215,6 +220,33 @@ func (f *Funnel) Take(raw []any, via string, actor *Actor, requestID string) (Ta
 		bad = bad[:100]
 	}
 	return TakeResult{len(good), bad}, nil
+}
+
+// keep — принятое в архив и в открытые окна «Логи». Ошибка архива приём не отменяет: Kafka уже
+// подтвердила запись.
+func (f *Funnel) keep(good []Event, t float64) {
+	if f.Archive == nil && f.Hub == nil {
+		return
+	}
+	var rows []Row
+	if f.Archive != nil {
+		var err error
+		if rows, err = f.Archive.Put(good, t); err != nil {
+			slog.Error("архив показаний: " + err.Error())
+			f.mu.Lock()
+			f.stats.ArchiveErrors++
+			f.mu.Unlock()
+		}
+	} else {
+		at := iso(t)
+		rows = make([]Row, len(good))
+		for i, ev := range good {
+			rows[i] = Row{at, ev}
+		}
+	}
+	if f.Hub != nil {
+		f.Hub.Publish(rows)
+	}
 }
 
 // Reject — telemetry.rejected: почему и сколько; значений датчиков в журнале нет (§6.3).
@@ -271,6 +303,9 @@ func (f *Funnel) Status(channels []int64, state string, t float64) {
 		body := orderedRow{{"kind", "channel.status"}, {"ид_канала_данных", c}, {"status", state},
 			{"at", iso(t)}, {"since", iso(since)}}
 		msgs = append(msgs, Message{TopicReference, fmt.Sprintf("channel-status:%d", c), body})
+		if f.Hub != nil {
+			f.Hub.PublishStatus(c, state, iso(t), iso(since))
+		}
 	}
 	if err := f.Sink.Send(msgs); err != nil {
 		var u *Unavailable

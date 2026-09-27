@@ -10,6 +10,7 @@ f1f85e38-f377-56ea-9089-539507248ae8,engineers,engineers,R,2,свой колле
 9648ab49-5aad-5e26-926d-5d66034b92c6,engineers,presence,R,2,свой коллектор или участок
 1e8ecf3c-aa33-5611-871d-f50cc02dffbe,dispatchers,objects,R,2,весь район
 3726292f-8530-594f-a2b6-aa058e2c856a,dispatchers,sensors,R,2,весь район
+2aa346d7-fb33-5cd1-8216-20bdf937f17f,dispatchers,readings,R,2,весь район
 f35e1f86-db2a-55ae-9e4d-1c45d130c7b1,dispatchers,predictions,RU,6,весь район
 53428fb1-3598-5cda-bea3-4c1cac503c9c,dispatchers,tasks,CRU,7,весь район
 fb2cbc10-4f62-522d-804b-867203e0e12b,dispatchers,incidents,CRU,7,весь район

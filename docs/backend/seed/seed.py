@@ -799,8 +799,9 @@ MASK = {'C': 1, 'R': 2, 'U': 4, 'D': 8, 'E': 16, 'I': 32, 'M': 64}
 GRANTS = {  # группа → ресурс → действия; матрица ролей docs/common/права-и-аудит.md §3
     'engineers': {'objects': 'R', 'sensors': 'R', 'predictions': 'R', 'tasks': 'RU', 'incidents': 'R',
                   'schedule': 'R', 'assigned_objects': 'R', 'engineers': 'R', 'presence': 'R'},
-    'dispatchers': {'objects': 'R', 'sensors': 'R', 'predictions': 'RU', 'tasks': 'CRU', 'incidents': 'CRU',
-                    'schedule': 'R', 'assigned_objects': 'R', 'engineers': 'R', 'presence': 'R'},
+    # readings — окно «Логи» по любому объекту; инженеру показания открывают его заявки (BFF /readings/scope)
+    'dispatchers': {'objects': 'R', 'sensors': 'R', 'readings': 'R', 'predictions': 'RU', 'tasks': 'CRU',
+                    'incidents': 'CRU', 'schedule': 'R', 'assigned_objects': 'R', 'engineers': 'R', 'presence': 'R'},
     'chief_dispatchers': {'predictions': 'RUE', 'model_settings': 'RU', 'schedule': 'CRUD',
                           'assigned_objects': 'CRUD', 'engineers': 'CRUD', 'groups': 'RU', 'users': 'R'},
 }

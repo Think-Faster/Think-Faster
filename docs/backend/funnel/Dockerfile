@@ -6,11 +6,13 @@ WORKDIR /src
 COPY funnel/go.mod funnel/go.sum ./
 RUN go mod download
 COPY funnel/*.go ./
-RUN go test ./... && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /tf-funnel .
+RUN go test ./... && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /tf-funnel . && mkdir -p /out/data/archive
 
 # статический бинарь: без оболочки и пакетов, с корневыми сертификатами и /tmp
 FROM gcr.io/distroless/static-debian12
 COPY --from=build /tf-funnel /tf-funnel
+# архив показаний (окно «Логи»); в compose сюда монтируется том tf-funnel-data
+COPY --from=build --chown=10004:10004 /out/data /data
 USER 10004:10004
 ENV TF_ENV=prod GOMEMLIMIT=400MiB
 EXPOSE 8000

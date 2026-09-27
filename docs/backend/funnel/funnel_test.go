@@ -421,7 +421,7 @@ func answer(w *httptest.ResponseRecorder) map[string]any {
 func httpFixture() (http.Handler, fixture) {
 	x := newFixture()
 	_, p := testKey()
-	return NewHandler(x.f, NewVerifier(p, "", []string{"think-bus"}), x.f.Audit, nil), x
+	return NewHandler(x.f, NewVerifier(p, "", []string{"think-bus"}), x.f.Audit, nil, nil), x
 }
 
 func TestHTTPAcceptsPacket(t *testing.T) {
@@ -544,7 +544,7 @@ func TestHTTPHealthOpenStatusClosed(t *testing.T) {
 
 func TestHTTPDevWithoutKey(t *testing.T) {
 	x := newFixture()
-	if w := call(NewHandler(x.f, nil, x.f.Audit, nil), "POST", "/events", []any{ev1(1)}, nil); w.Code != 202 {
+	if w := call(NewHandler(x.f, nil, x.f.Audit, nil, nil), "POST", "/events", []any{ev1(1)}, nil); w.Code != 202 {
 		t.Fatal(w.Code)
 	}
 }
@@ -553,7 +553,7 @@ func TestHTTPRequestLogRouteTemplate(t *testing.T) {
 	x := newFixture()
 	_, p := testKey()
 	v := NewVerifier(p, "", nil)
-	h := NewHandler(x.f, v, x.f.Audit, NewRequestLog(x.f.Audit.(*Audit), v, 100))
+	h := NewHandler(x.f, v, x.f.Audit, NewRequestLog(x.f.Audit.(*Audit), v, 100), nil)
 	call(h, "GET", "/api/funnel/health", "", nil) // пробы живости не пишутся
 	call(h, "POST", "/api/funnel/events", []any{ev1(1)}, bearer(nil))
 	call(h, "GET", "/nope", "", nil)
