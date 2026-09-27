@@ -14,7 +14,11 @@
     TF_WORK=work_pa python urgent.py _prim 5 24 v1pa    # поверх смеси 0,75/0,25 с сетью pa_all (оба года)
 
 Опора — суточный CatBoost×5; с v1 или v1pa — только оборудование, опора — 0,75 ранга CatBoost×5 +
-0,25 ранга сети, как в версии 1.
+0,25 ранга сети, как в версии 1. С work — опора того семейства и подбора, что в пакете
+(work/export/manifest.json): у датчика XGBoost с подбором, у пожара и подтопления CatBoost с подбором;
+прогоны обучаются на A′ заново (`train.py --models xgb --params tuned --types sensor` и т. п.):
+
+    TF_WORK=work_pa python urgent.py _prim 5 6 work '' cat sensor
 
 Пятый аргумент — сеть во второй модели, `<имя>:<зёрен>:<вес>`: ранги второй модели смешиваются с
 рангами сети `seqmodel.py --name <имя>_s<зерно>` того же горизонта (runs/main_h<HZ>/preds), вес 1 —
@@ -44,9 +48,12 @@ S6 = [0.0002, 0.0005, 0.001, 0.002, 0.003, 0.005, 0.0075, 0.01, 0.015, 0.02, 0.0
 SEEDS = ['' if s == 0 else f'_s{s}' for s in range(int(sys.argv[2]) if len(sys.argv) > 2 else 5)]
 HZ = int(sys.argv[3]) if len(sys.argv) > 3 else 6       # горизонт второй модели, ч
 YEARS = {'val': [2025], 'test': [2026]}
-BASE = sys.argv[4] if len(sys.argv) > 4 else ''         # '', v1, v1pa — опора у оборудования
-if BASE:
+BASE = sys.argv[4] if len(sys.argv) > 4 else ''         # '', v1, v1pa — опора у оборудования; work
+if BASE in ('v1', 'v1pa'):
     TYPES = ['equipment']
+# рабочая суточная модель в пакете, если она не CatBoost на умолчаниях: прогон и семейство
+WORK_BASE = {'sensor': ('main_h24_tuned', 'xgb'), 'fire': ('main_h24_tunedh24', 'cat'),
+             'flood': ('main_h24_tuned', 'cat')}
 NET = sys.argv[5].split(':') if len(sys.argv) > 5 and sys.argv[5] else None
 MODELS = sys.argv[6].split(',') if len(sys.argv) > 6 and sys.argv[6] else ['cat']
 if len(sys.argv) > 7:
@@ -119,7 +126,8 @@ def caught(key, eps, alarm, W):
 
 print(f'# R1: вторая модель {HZ} ч {"+".join(MODELS)} (цель {TG or "все эпизоды"}) поверх суточного {BASE}\n')
 for tp in TYPES:
-    base24 = [('main_h24' if tp == 'gas' else 'stfx_main_h24') + s for s in SEEDS[:5]]
+    brun, bfam = WORK_BASE[tp] if BASE == 'work' and tp in WORK_BASE else (None, 'cat')
+    base24 = [(brun or ('main_h24' if tp == 'gas' else 'stfx_main_h24')) + s for s in SEEDS[:5]]
     run6 = [f'main_h{HZ}{TG}' + s for s in SEEDS]
     print(f'## {tp}, доля суточной {S[tp]:.3f}\n')
     print('| период | s6 | первичных | пойм. суточной | +срочной | медиана упрежд., ч | всех эпизодов | +срочной '
@@ -127,12 +135,12 @@ for tp in TYPES:
           '| часов тревоги +срочной | суточная с той же прибавкой часов: +первичных |')
     print('|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|')
     for on, yy in YEARS.items():
-        (o, h, n), p24 = score(base24, on, yy, tp)
-        if BASE:
+        (o, h, n), p24 = score(base24, on, yy, tp, (bfam,))
+        if BASE in ('v1', 'v1pa'):
             p24 = v1(p24, on)
             if p24 is None:
                 continue
-        np_ = operating.split(base24[0], on, yy, tp, 'cat', '_prim')[2]
+        np_ = operating.split(base24[0], on, yy, tp, bfam, '_prim')[2]
         _, p6 = score(run6, on, yy, tp, MODELS)
         if NET:
             p6 = with_net(p6, on, tp)
