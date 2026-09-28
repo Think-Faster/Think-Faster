@@ -1,0 +1,125 @@
+# Воронка tf-funnel на prod (thinkfaster.ru). Образ собирается здесь, в CI (docs/backend/funnel), и
+# публикуется на Docker Hub (<DOCKERHUB_USERNAME>/tf-funnel:prod-<коммит> и :prod); сервер его только
+# скачивает — docker pull публичного образа, без docker login и без сборки на сервере. Секретов в образе
+# нет: пароли сервис берёт из Vault.
+# Параметры — think-infra docs/funnel-tz/tf-funnel.md: эмулятора на prod нет (TF_FUNNEL_PULL не задаётся,
+# иначе в prod Kafka уйдут тестовые данные), архив 14 дней, спул аудита на томе.
+#
+# Нужно в настройках репозитория:
+#   секреты репозитория DOCKERHUB_USERNAME, DOCKERHUB_TOKEN (публикация образа),
+#     PROD_IP, PROD_USER, PROD_SSH_KEY (вход на сервер prod);
+#   окружение prod с FUNNEL_VAULT_ROLE_ID и FUNNEL_VAULT_SECRET_ID роли tf-svc-tf-funnel —
+#     в контейнер уходят под прежними именами VAULT_ROLE_ID / VAULT_SECRET_ID.
+# Запуск только вручную (Actions → Deploy tf-funnel to prod → Run workflow): prod — после проверки на dev.
+name: Deploy tf-funnel to prod
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-funnel-prod
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  TF_FUNNEL_WS_ORIGINS: https://thinkfaster.ru,https://www.thinkfaster.ru
+  TF_FUNNEL_ARCHIVE_DAYS: '14'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: prod
+    steps:
+      - name: Check secrets
+        env:
+          PROD_IP: ${{ secrets.PROD_IP }}
+          PROD_USER: ${{ secrets.PROD_USER }}
+          PROD_SSH_KEY: ${{ secrets.PROD_SSH_KEY }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          FUNNEL_VAULT_ROLE_ID: ${{ secrets.FUNNEL_VAULT_ROLE_ID }}
+          FUNNEL_VAULT_SECRET_ID: ${{ secrets.FUNNEL_VAULT_SECRET_ID }}
+        run: |
+          missing=""
+          for name in PROD_IP PROD_USER PROD_SSH_KEY DOCKERHUB_USERNAME DOCKERHUB_TOKEN \
+                      FUNNEL_VAULT_ROLE_ID FUNNEL_VAULT_SECRET_ID; do
+            [ -n "${!name}" ] || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::не заданы секреты:$missing (PROD_*, DOCKERHUB_* — репозиторий; FUNNEL_VAULT_* — окружение prod)"
+            exit 1
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # контекст сборки — docs/backend: Dockerfile берёт funnel/*; go test идёт внутри сборки
+      - name: Build and push image
+        id: image
+        env:
+          REPO: ${{ secrets.DOCKERHUB_USERNAME }}/tf-funnel
+        run: |
+          tag="prod-${GITHUB_SHA::7}"
+          docker build -f docs/backend/funnel/Dockerfile -t "$REPO:$tag" -t "$REPO:prod" docs/backend
+          docker push "$REPO:$tag"
+          docker push "$REPO:prod"
+          echo "image=$REPO:$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Restart tf-funnel
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          VAULT_ROLE_ID: ${{ secrets.FUNNEL_VAULT_ROLE_ID }}
+          VAULT_SECRET_ID: ${{ secrets.FUNNEL_VAULT_SECRET_ID }}
+          IMAGE: ${{ steps.image.outputs.image }}
+        with:
+          host: ${{ secrets.PROD_IP }}
+          username: ${{ secrets.PROD_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          envs: VAULT_ROLE_ID,VAULT_SECRET_ID,IMAGE,TF_FUNNEL_WS_ORIGINS,TF_FUNNEL_ARCHIVE_DAYS
+          command_timeout: 20m
+          script: |
+            set -e
+            [ -n "$VAULT_ROLE_ID" ] || { echo "нет FUNNEL_VAULT_ROLE_ID в окружении prod (роль tf-svc-tf-funnel)" >&2; exit 1; }
+            [ -n "$VAULT_SECRET_ID" ] || { echo "нет FUNNEL_VAULT_SECRET_ID в окружении prod (роль tf-svc-tf-funnel)" >&2; exit 1; }
+            docker network inspect think-fast-net >/dev/null
+            docker pull "$IMAGE"
+
+            docker rm -f tf-funnel >/dev/null 2>&1 || true
+            # секреты — только из Vault; пара роли — в окружение контейнера, не в файлы
+            docker run -d --name tf-funnel \
+              --network think-fast-net \
+              --restart unless-stopped \
+              --memory 512m \
+              -v tf-funnel-data:/data \
+              -e TF_ENV=prod \
+              -e VAULT_ADDR=http://vault:8200 \
+              -e TF_VAULT_WAIT=900 \
+              -e TF_REDIS_URL=redis://tf-redis:6379/0 \
+              -e TF_AUTH_JWKS=http://tf-auth:8080/.well-known/jwks \
+              -e TF_FUNNEL_SILENT_MIN=60 \
+              -e TF_FUNNEL_ARCHIVE=/data/archive \
+              -e TF_FUNNEL_ARCHIVE_DAYS \
+              -e TF_FUNNEL_WS_ORIGINS \
+              -e TF_BFF_URL=http://tf-bff:8080 \
+              -e TF_AUDIT_SPOOL=/data/audit.spool \
+              -e VAULT_ROLE_ID \
+              -e VAULT_SECRET_ID \
+              "$IMAGE"
+
+            sleep 20
+            docker logs --tail 40 tf-funnel
+            [ "$(docker inspect -f '{{.State.Running}}' tf-funnel)" = true ] \
+              || { echo "tf-funnel не запущен" >&2; exit 1; }
+            if docker logs tf-funnel 2>&1 | grep -qi 'permission denied'; then
+              echo "tf-funnel: Vault отказал во входе (permission denied) — проверьте пару FUNNEL_VAULT_*" >&2
+              exit 1
+            fi
+            docker image prune -f >/dev/null
