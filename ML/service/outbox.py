@@ -46,7 +46,9 @@ def build_fact(object_id: int, hour_end: str, model_version: str, types: dict,
     """Канал «по факту» (M8, §2.3): только типы, у которых эпизод живой в этот час. У типа —
     `started_at`, `last_at`, `new` (объявление или обновление); в окне графика работ — `note` и
     `work_id` (§1.6: газ по коллектору в ППР приходит с пометкой, диспетчер закрывает причиной
-    «известные работы на объекте»)."""
+    «известные работы на объекте»). У `intrusion` — `route`, у `fire` при жаре — `temperature`;
+    типы только по факту — `temperature` (`direction`, `channels`) и `blind` (`cause`, `share`,
+    `possible_accident`), §13.11."""
     return {'schema': 1, 'kind': 'fact', 'object_id': object_id, 'hour_end': hour_end,
             'model_version': model_version, 'clock': clock, 'types': types}
 

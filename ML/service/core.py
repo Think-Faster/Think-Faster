@@ -52,6 +52,11 @@ def hour_iso(h: int) -> str:
     return (ft.T0 + timedelta(hours=h + 1)).isoformat(sep='T', timespec='minutes') + config.TZ
 
 
+def _iso(ts: datetime, spec: str = 'minutes') -> str:
+    """Момент журнала (московское время без зоны) в ISO с зоной для сообщений."""
+    return ts.isoformat(timespec=spec) + config.TZ
+
+
 def to_msk(s) -> datetime:
     """Время из команды: с зоной — переводится в MSK, без зоны — уже местное время журнала."""
     t = s if isinstance(s, datetime) else datetime.fromisoformat(str(s).replace('Z', '+00:00'))
@@ -262,7 +267,12 @@ class Service:
             fres = snapmod.freshness(self.store, now)
             n_alarm = self._emit_forecasts(now, h, frame, objects, scores, thr, applied, model_version, clock,
                                            fres)
-            n_fact, fact_status = self._emit_facts(now, h, eps, coll, model_version, clock)
+            try:
+                accs = factmod.accidents(self.store, now)
+            except Exception:
+                log.exception('аварии и слепота (§13.11) не посчитались')
+                accs = []
+            n_fact, fact_status = self._emit_facts(now, h, eps, coll, model_version, clock, accs)
             have = {(o, tp) for o, tp, *_ in statuses}
             statuses += [s for s in fact_status if (s[0], s[1]) not in have]
 
@@ -374,17 +384,21 @@ class Service:
             self.sink.send(msg)
         return len(reasons)
 
-    def _emit_facts(self, now, h, eps, coll, model_version, clock) -> tuple[int, list]:
+    def _emit_facts(self, now, h, eps, coll, model_version, clock, accs=()) -> tuple[int, list]:
         """Канал «по факту» (M8): объявление и его обновления, пока эпизод живой. Н10 по §1.6: газ и
         прочие типы из строки графика — с пометкой «идёт ППР по графику» и номером строки; отказ
-        снятого датчика — MUTED в историю главного диспетчера, диспетчеру не уходит."""
+        снятого датчика — MUTED в историю главного диспетчера, диспетчеру не уходит. У проникновения —
+        маршрут. Аварии и слепота §13.11 (`accs`) в окне любых работ молчат полностью: ни объявления,
+        ни MUTED, ни аудита — иначе дублировали бы график и прогноз. Жара при живом пожаре — поле
+        `temperature` в блоке пожара, а не отдельный тип."""
         import recommend
         per_obj: dict[int, dict] = {}
         statuses = []
         for e in eps:
             o, tp = e['object_id'], e['type']
-            blk = {'started_at': e['t0'].isoformat(timespec='minutes') + config.TZ,
-                   'last_at': e['t1'].isoformat(timespec='minutes') + config.TZ, 'new': e['new']}
+            blk = {'started_at': _iso(e['t0']), 'last_at': _iso(e['t1']), 'new': e['new']}
+            if 'route' in e:
+                blk['route'] = [{**r, 'at': _iso(r['at'], 'seconds')} for r in e['route']]
             if e['noise'] == 'Н10':
                 w = self.works.fact_window(o, e['collector_id'] or coll.get(o), tp, e['t0'], e['stype'])
                 if w is not None and tp == 'sensor' and w.sensor and e['stype'] == w.sensor:
@@ -395,7 +409,24 @@ class Service:
                     continue
                 blk.update({'note': worksmod.FACT_NOTE, 'work_id': w.work_id if w else None})
             per_obj.setdefault(o, {})[tp] = blk
-        wanted = {o: ([tp for tp, b in tps.items() if 'note' not in b], (), {}) for o, tps in per_obj.items()}
+        for e in accs:
+            o, tp = e['object_id'], e['type']
+            if self.works.covers(o, e['collector_id'] or coll.get(o), e['t0']) is not None:
+                continue
+            blk = {'started_at': _iso(e['t0']), 'last_at': _iso(e['t1']), 'new': e['new']}
+            if tp == 'temperature':
+                info = {'direction': e['direction'],
+                        'channels': [{**x, 'at': _iso(x['at'])} for x in e['channels']]}
+                fire = per_obj.get(o, {}).get('fire')
+                if e['direction'] == 'hot' and fire is not None:
+                    fire['temperature'] = info
+                    continue
+                blk.update(info)
+            else:
+                blk.update({'cause': e['cause'], 'share': e['share'], 'possible_accident': True})
+            per_obj.setdefault(o, {})[tp] = blk
+        wanted = {o: ([tp for tp, b in tps.items() if 'note' not in b and tp in config.TYPES], (), {})
+                  for o, tps in per_obj.items()}
         wanted = {o: v for o, v in wanted.items() if v[0]}
         try:
             recs = recommend.batch(self.store.con, now, wanted)

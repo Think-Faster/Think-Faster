@@ -178,6 +178,14 @@ class Works:
                 return w
         return None
 
+    def covers(self, obj: int, collector: int | None, ts: datetime) -> Window | None:
+        """Окно любого вида работ на объекте или его коллекторе в момент ts. Для аварий и слепоты
+        §13.11 это полное молчание: без объявления, MUTED и события аудита."""
+        for w in self.active(ts):
+            if w.object_id in (obj, collector):
+                return w
+        return None
+
     def replace(self, rows: list[dict], version: int, changed_by: str, reason: str | None,
                 now: datetime) -> dict:
         """Новая версия таблицы (settings.works): прежняя уходит в works_versions/. Возврат — разница для аудита."""
