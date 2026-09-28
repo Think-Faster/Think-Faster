@@ -103,7 +103,7 @@ jobs:
             gunzip -c ~/tf-images/model/tf-model.tar.gz | $D image load
             rm -f ~/tf-images/model/tf-model.tar.gz
 
-            $D rm -f tf-model >/dev/null 2>&1 || true
+            $D rm --force tf-model >/dev/null 2>&1 || true
             # секреты — только из Vault; памяти на сервере мало: DuckDB модели — 1 ГБ вместо 2 ГБ
             $D run -d --name tf-model \
               --network think-fast-net \

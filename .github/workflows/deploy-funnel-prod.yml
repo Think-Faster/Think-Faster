@@ -100,7 +100,7 @@ jobs:
             old=$($D inspect -f '{{.Image}}' tf-funnel 2>/dev/null || true)
             $D pull "$IMAGE"
 
-            $D rm -f tf-funnel >/dev/null 2>&1 || true
+            $D rm --force tf-funnel >/dev/null 2>&1 || true
             # секреты — только из Vault; пара роли — в окружение контейнера, не в файлы
             $D run -d --name tf-funnel \
               --network think-fast-net \
