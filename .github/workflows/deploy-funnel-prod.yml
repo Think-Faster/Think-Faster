@@ -97,7 +97,7 @@ jobs:
             # (/srv/thinkfaster, sudoers с env_keep VAULT_ROLE_ID VAULT_SECRET_ID).
             if docker info >/dev/null 2>&1; then D=docker; else D="sudo -n /usr/local/bin/tf-docker"; fi
             $D network inspect think-fast-net >/dev/null
-            old=$($D image inspect -f '{{.Id}}' tf-funnel-prod 2>/dev/null || true)
+            old=$($D inspect -f '{{.Image}}' tf-funnel 2>/dev/null || true)
             $D pull "$IMAGE"
 
             $D rm -f tf-funnel >/dev/null 2>&1 || true
@@ -132,5 +132,4 @@ jobs:
             fi
             # прежний образ — без prune (он задел бы весь сервер): только свой, по id
             new=$($D image inspect -f '{{.Id}}' "$IMAGE")
-            $D tag "$IMAGE" tf-funnel-prod
             [ -z "$old" ] || [ "$old" = "$new" ] || $D rmi "$old" >/dev/null 2>&1 || true
