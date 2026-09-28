@@ -1,0 +1,46 @@
+# Состояние наших сервисов на dev-стенде Гриши — только чтение, запуск руками (Actions → Run workflow).
+# Контейнеры, хвосты логов и журнал аудита в потоке Redis `audit`: сколько событий, какие типы, читает
+# ли их tf-audit (группа audit-writer). Пароль Redis не покидает контейнер tf-redis (REDISCLI_AUTH,
+# как в его healthcheck); из событий печатаются только тип, исход и сервис — без логинов и адресов.
+name: Dev status
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  status:
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEV_IP }}
+          username: ${{ secrets.DEV_USER }}
+          key: ${{ secrets.DEV_SSH_KEY }}
+          script: |
+            echo "== контейнеры"
+            docker ps -a --format '{{.Names}}\t{{.Status}}' | grep -E '^tf-(emulator|funnel|model|audit|bff|auth)\b' || true
+
+            rcli() { docker exec tf-redis sh -c "REDISCLI_AUTH=\"\$TF_REDIS_PASSWORD\" redis-cli --raw $*"; }
+            echo "== поток audit: всего записей"
+            rcli XLEN audit
+            echo "== поток audit: группы читателей (пусто — tf-audit ещё не запускался)"
+            rcli XINFO GROUPS audit || true
+            echo "== последние 200 событий: сервис"
+            rcli XREVRANGE audit + - COUNT 200 | grep -o '"service":"[^"]*"' | sort | uniq -c || true
+            echo "== последние 200 событий: тип и исход"
+            rcli XREVRANGE audit + - COUNT 200 | grep -o '"event_type":"[^"]*","outcome":"[^"]*"' | sort | uniq -c | sort -rn | head -30 || true
+            echo "== audit:dead (отвергнутые tf-audit)"
+            rcli XLEN audit:dead || true
+
+            echo "== tf-bff: Kafka и рассылка по факту"
+            docker logs --since 24h tf-bff 2>&1 | grep -E 'fact alerts|Fact alert|Kafka|TF_KAFKA' | tail -20 || true
+            echo "== tf-funnel"
+            docker logs --tail 30 tf-funnel 2>&1 || true
+            echo "== tf-emulator"
+            docker logs --tail 5 tf-emulator 2>&1 || true
+            echo "== tf-model"
+            docker logs --tail 30 tf-model 2>&1 || true
