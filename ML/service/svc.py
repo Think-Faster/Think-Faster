@@ -94,6 +94,8 @@ COMMAND_RETRIES = 5                 # после пятой доставки —
 
 REDIS_URL = os.environ.get('TF_REDIS_URL', 'redis://tf-redis:6379/0')     # поток аудита
 AUTH_JWKS = os.environ.get('TF_AUTH_JWKS', 'http://tf-auth:8080/.well-known/jwks')
+# Браузер (админ-панель) несёт токен пользователя в HttpOnly-куке think-auth, а не в заголовке — как у воронки.
+AUTH_COOKIE = os.environ.get('TF_AUTH_COOKIE', 'access_token')
 
 
 def kafka_conf(**extra) -> dict:

@@ -10,6 +10,8 @@
 | `/status`, `/estimate` | админ-панель через BFF или напрямую | техучётка с `ml.read` либо токен пользователя |
 | `/forecast`, `/history` | BFF | только техучётка с `ml.read` |
 
+Админ-панель ходит сюда из браузера: токен пользователя — в HttpOnly-куке think-auth (`access_token`,
+TF_AUTH_COOKIE), если заголовка `Authorization` нет; проверка та же.
 Права пользователя сервис не знает (права-и-аудит §1): их проверяет BFF у себя и ходит сюда своей
 техучёткой. Пользовательский токен принимается только на `/status` и `/estimate`; на остальных —
 403 и `access.denied`. Неверный токен — 401 и `token.refused`; протухший — 401 без события (§6.2:
@@ -66,10 +68,14 @@ def create_app(service, verifier=None):
         def check(request: Request, authorization: str | None = Header(None)) -> dict:
             if verifier is None:
                 return {'sub': 'dev'}
-            if not authorization or not authorization.lower().startswith('bearer '):
+            if authorization and authorization.lower().startswith('bearer '):
+                raw = authorization.split(None, 1)[1].strip()
+            else:
+                raw = request.cookies.get(config.AUTH_COOKIE) if not authorization else None
+            if not raw:
                 refuse('token.refused', 401, 'нет токена', request)
             try:
-                claims = verifier.verify(authorization.split(None, 1)[1].strip())
+                claims = verifier.verify(raw)
             except tfkit.TokenError as e:
                 if not e.audit:               # ключа нет (наш отказ) или токен протух (§6.2): без аудита
                     raise HTTPException(e.status, e.reason) from None

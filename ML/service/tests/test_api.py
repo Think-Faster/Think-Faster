@@ -92,6 +92,13 @@ class ApiTest(unittest.TestCase):
         self.assertEqual((ev['event_type'], ev['actor_kind'], ev['actor_id'], ev['object_id']),
                          ('access.denied', 'user', 'u1', '/forecast'))
 
+    def test_browser_cookie_is_a_user_token(self):
+        self.web.cookies.set('access_token', token(jti='jc'))
+        self.assertEqual(self.get('/status').status_code, 200)
+        self.assertEqual(self.get('/forecast', object_id=5122).status_code, 403)   # куки — пользователь, не BFF
+        self.web.cookies.clear()
+        self.assertEqual(self.get('/status').status_code, 401)
+
     def test_bad_tokens_are_401_with_jti_only(self):
         other = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         cases = [(None, None), (token(jti='j2', exp=int(time.time()) - 5), None),

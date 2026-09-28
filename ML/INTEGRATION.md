@@ -1000,6 +1000,7 @@ compose с тем же составом, что в `think-infra`), и тольк
 | `TF_REDIS_URL` | `redis://tf-redis:6379/0` | поток аудита; пароль — из Vault `secret/tf/redis`; при `dev` по умолчанию пусто, события — в файл на томе |
 | `VAULT_ADDR`, `VAULT_ROLE_ID`, `VAULT_SECRET_ID` | нет; в контуре `http://vault:8200` | вход ролью AppRole `tf-svc-tf-model`, как у сервисов think-infra; `VAULT_TOKEN` или `VAULT_TOKEN_FILE` — готовый токен вместо роли |
 | `TF_AUTH_PUBLIC_KEY`, `TF_AUTH_JWKS` | нет; `http://tf-auth:8080/.well-known/jwks` | открытый ключ think-auth (PEM), без него — с JWKS |
+| `TF_AUTH_COOKIE` | `access_token` | кука think-auth с токеном пользователя, когда админ-панель зовёт `/status` и `/estimate` из браузера (13.2) |
 | `TF_MODEL_SINK` | `kafka`, при `dev` — `file` | куда пишутся сообщения прогноза |
 | `TF_MODEL_SETTINGS` | `<TF_WORK>/service/settings` | таблицы главного диспетчера и их версии |
 | `TF_MODEL_RETRAIN` | `off` | `on` включает очередь переобучения (§9.5); в контуре без журнала — выключено |
@@ -1016,6 +1017,9 @@ compose с тем же составом, что в `think-infra`), и тольк
 
 Сервис проверяет подпись RS256 публичным ключом `think-auth`: ключ берётся из `TF_AUTH_PUBLIC_KEY`,
 если его нет — с `/.well-known/jwks`, кэш на час.
+Токен — из `Authorization: Bearer`; без заголовка — из HttpOnly-куки think-auth `access_token`
+(`TF_AUTH_COOKIE`): так админ-панель читает `/status` и `/estimate` прямо из браузера, как окно «Логи»
+у воронки. Кука несёт токен пользователя, поэтому ручки техучётки по ней не открываются (403).
 Проверяются `exp`, `aud = api`, издатель из списка `auth-service`, `tf-auth` и тип токена
 `access`. Тип читается из поля `typ` или `token_type`: пока токены не приведены к концепту (Н10),
 принимаются оба. Для техучётки нужен `scope` с требуемым правом; пока `think-auth` не кладёт
