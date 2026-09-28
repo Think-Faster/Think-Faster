@@ -110,7 +110,8 @@ jobs:
             fi
 
             $D rm --force tf-funnel >/dev/null 2>&1 || true
-            # секреты — только из Vault; пара роли — в окружение контейнера, не в файлы
+            # секреты — только из Vault; пара роли — в окружение контейнера, не в файлы.
+            # sudo сбрасывает окружение (env_keep — только пара роли), поэтому остальное — значением.
             $D run -d --name tf-funnel \
               --network think-fast-net \
               --restart unless-stopped \
@@ -123,11 +124,11 @@ jobs:
               -e TF_AUTH_JWKS=http://tf-auth:8080/.well-known/jwks \
               -e TF_FUNNEL_SILENT_MIN=60 \
               -e TF_FUNNEL_ARCHIVE=/data/archive \
-              -e TF_FUNNEL_ARCHIVE_DAYS \
-              -e TF_FUNNEL_WS_ORIGINS \
+              -e "TF_FUNNEL_ARCHIVE_DAYS=$TF_FUNNEL_ARCHIVE_DAYS" \
+              -e "TF_FUNNEL_WS_ORIGINS=$TF_FUNNEL_WS_ORIGINS" \
               -e TF_BFF_URL=http://tf-bff:8080 \
               -e TF_AUDIT_SPOOL=/data/audit.spool \
-              -e TF_FUNNEL_PULL \
+              -e "TF_FUNNEL_PULL=$TF_FUNNEL_PULL" \
               -e VAULT_ROLE_ID \
               -e VAULT_SECRET_ID \
               "$IMAGE"
