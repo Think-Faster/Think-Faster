@@ -81,6 +81,16 @@ class OperatingSettings:
         tmp.replace(p)
 
 
+def bounds() -> dict:
+    """Границы из operating.schema.json для формы админ-панели (/status): доля по типам и reject_k."""
+    import json as _json
+    schema = _json.loads((pipe.SETTINGS.parent / 'operating.schema.json').read_text(encoding='utf-8'))
+    kb = schema['$defs']['reject_k']
+    return {'share': {tp: [v['properties']['share']['minimum'], v['properties']['share']['maximum']]
+                      for tp, v in schema['properties']['types']['properties'].items()},
+            'reject_k': [kb['minimum'], kb['maximum']]}
+
+
 def _validate(raw: dict) -> None:
     """Проверка по operating.schema.json — та, что в config.operating(), но без записи файла."""
     import json as _json

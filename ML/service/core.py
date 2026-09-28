@@ -28,7 +28,7 @@ import gaps as gapsmod
 import outbox
 import works as worksmod
 from rules import RuleState
-from settings import OperatingSettings, _validate
+from settings import OperatingSettings, _validate, bounds as settings_bounds
 
 log = logging.getLogger('tf-model')
 
@@ -734,6 +734,7 @@ class Service:
                       'types': {tp: {'version': self.state['versions'].get(tp) or 'основная',
                                      'available': avail.get(tp, [])} for tp in config.TYPES}},
             'settings': self.settings.as_dict(),
+            'settings_bounds': settings_bounds(),
             'works': {'version': self.works.version, 'rows': len(self.works.rows), **self.works.meta},
             'gaps': {'version': self.gaps.version, 'rows': self.gaps.rows},
             'retrain': {'enabled': RETRAIN_ENABLED, 'needed': self.state['retrain_needed'],
