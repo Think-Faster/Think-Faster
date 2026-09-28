@@ -27,7 +27,7 @@ permissions:
   contents: read
 
 env:
-  EMULATOR_ASSET: emulator-e8af7a3.tar.gz
+  EMULATOR_ASSET: emulator-6879bc1.tar.gz
 
 jobs:
   deploy:
