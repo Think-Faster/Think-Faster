@@ -1,6 +1,8 @@
-# Воронка tf-funnel на dev-стенд Гриши: собирается из этого репозитория (docs/backend/funnel), как
-# tf-bff из think-bff. Код копируется на сервер, образ собирается там же, контейнер встаёт в
-# think-fast-net рядом с tf-bff, tf-auth, tf-kafka и vault; nginx отдаёт его под /api/funnel/*.
+# Воронка tf-funnel на dev-стенд Гриши: образ собирается здесь, в CI (docs/backend/funnel), и
+# переносится на сервер файлом (docker save → scp → docker load) — без реестра, образ никуда не
+# публикуется. Сборка на самом сервере не укладывалась в 10 минут ssh-action (go build на слабой машине).
+# Контейнер встаёт в think-fast-net рядом с tf-bff, tf-auth, tf-kafka и vault; nginx отдаёт его под
+# /api/funnel/*. Поток берёт у эмулятора tf-emulator (deploy-emulator-dev.yml): TF_FUNNEL_PULL.
 #
 # Нужно в настройках репозитория (Settings → Secrets and variables → Actions):
 #   секреты репозитория DEV_IP, DEV_USER, DEV_SSH_KEY — те же, что у think-bff;
@@ -21,6 +23,9 @@ concurrency:
   group: deploy-funnel-dev
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -36,19 +41,28 @@ jobs:
         if: env.DEV_IP != ''
         uses: actions/checkout@v4
 
-      - name: Copy funnel sources to server
+      # контекст сборки — docs/backend: Dockerfile берёт funnel/*; go test идёт внутри сборки
+      - name: Build image
+        if: env.DEV_IP != ''
+        run: |
+          docker build -f docs/backend/funnel/Dockerfile -t tf-funnel:dev docs/backend
+          mkdir -p img
+          docker save tf-funnel:dev | gzip -1 > img/tf-funnel.tar.gz
+          ls -lh img
+
+      - name: Copy image to server
         if: env.DEV_IP != ''
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.DEV_IP }}
           username: ${{ secrets.DEV_USER }}
           key: ${{ secrets.DEV_SSH_KEY }}
-          source: docs/backend/funnel
-          target: tf-funnel-src
-          strip_components: 2
+          source: img/tf-funnel.tar.gz
+          target: tf-images/funnel
+          strip_components: 1
           rm: true
 
-      - name: Build and restart tf-funnel
+      - name: Restart tf-funnel
         if: env.DEV_IP != ''
         uses: appleboy/ssh-action@v1.0.3
         env:
@@ -59,6 +73,7 @@ jobs:
           username: ${{ secrets.DEV_USER }}
           key: ${{ secrets.DEV_SSH_KEY }}
           envs: VAULT_ROLE_ID,VAULT_SECRET_ID
+          command_timeout: 20m
           script: |
             set -e
             if [ -z "$VAULT_ROLE_ID" ] || [ -z "$VAULT_SECRET_ID" ]; then
@@ -66,10 +81,9 @@ jobs:
               exit 1
             fi
             docker network inspect think-fast-net >/dev/null
-
-            # контекст сборки — как docs/backend в репозитории: Dockerfile берёт funnel/*
-            cd ~/tf-funnel-src
-            docker build -f funnel/Dockerfile -t tf-funnel:dev .
+            gunzip -c ~/tf-images/funnel/tf-funnel.tar.gz | docker load
+            rm -f ~/tf-images/funnel/tf-funnel.tar.gz
+            rm -rf ~/tf-funnel-src
 
             docker rm -f tf-funnel >/dev/null 2>&1 || true
             # переменные — те же, что у tf-funnel в docs/backend/compose.yml; секреты — только из Vault
@@ -83,6 +97,7 @@ jobs:
               -e TF_VAULT_WAIT=900 \
               -e TF_REDIS_URL=redis://tf-redis:6379/0 \
               -e TF_AUTH_JWKS=http://tf-auth:8080/.well-known/jwks \
+              -e TF_FUNNEL_PULL=http://tf-emulator:8000 \
               -e TF_FUNNEL_SILENT_MIN=60 \
               -e TF_FUNNEL_ARCHIVE=/data/archive \
               -e TF_FUNNEL_ARCHIVE_DAYS=0 \

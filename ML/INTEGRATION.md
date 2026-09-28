@@ -1240,6 +1240,24 @@ export_check (обучение 2022–2025, тест 2026) она даёт то�
 по нему создаёт заявку и публикует уведомление в `tf.notifications`. Модель адресатов не знает, в
 RabbitMQ `tf.notifications` у неё нет права публикации, и правильно: адреса групп живут в BFF.
 
+Как сделано в BFF (think-bff, ветка `TF-BFF-FactNotify`, 28.09; решения — `BFF/docs/DECISIONS.md`):
+
+- `FactResultsConsumer` читает `tf.forecast.results` под учёткой `tf-bff`, группа `tf-bff-facts`, пароль —
+  `kafka/bff`. Берёт только `kind: fact` с `clock: live`. Из `types` берёт только записи с `new: true`:
+  `new: false` означает продолжение того же эпизода, повторно не шлём. Первый запуск группы читает с конца
+  топика.
+- На каждое объявление BFF заводит `FactAlert` (объект, тип, `started_at`). Повтор того же сообщения
+  запись не удваивает и второй раз не рассылает. `POST /fact-alerts` рассылает так же.
+- **Кому.** Всем активным пользователям, кто сейчас (МСК) на смене по графику (`schedule_entries`:
+  `Working`, окно `ShiftStart` + `ShiftHours`, смена через полночь учитывается) и у кого на сегодня нет
+  `OnLeave` или `NotWorking`. Нужен хотя бы один канал: почта `users.email` или Telegram
+  `engineer_profiles.telegram` (число или `@канал`).
+- **Как.** Письмо уходит отдельным сообщением `email` на каждый адрес. В Telegram уходит одно сообщение
+  на все `chat_ids`. Везде `kind: fact`, `ticket_id` = id записи. В тексте: тип, объект с адресом, начало
+  по МСК, пометка модели (`note`, `work_id`).
+- В аудит пишется `ticket.created` (`actor_kind: service`, `object_type: fact_alert`): сколько человек на
+  смене и сколько писем и чатов ушло в очередь.
+
 ### 13.8 Документация
 
 Один документ в `docs/` плюс выгрузка в .docx. Структура — по ГОСТ 34.602 и РД 50-34.698 в
@@ -1398,3 +1416,23 @@ RabbitMQ `tf.notifications` у неё нет права публикации, и
 - Без `TF_AUTH_PUBLIC_KEY` ключ проверки токенов берётся с JWKS `tf-auth`, которого на стенде
   нет. Тогда ручки с токеном отвечают 503, а `/health` и поток данных работают.
 - `TF_MODEL_BUNDLE_DIR` — папка пакета из `bundle.py` (13.6), а не `work/export`.
+
+**Dev-стенд Гриши (28.09).** Сервисы выкатываются в `think-fast-net` из GitHub Actions этого
+репозитория. Образ собирается в CI и переносится на сервер файлом (`docker save` → scp → `docker load`),
+без реестра: в образе модели справочники и модели. На самом сервере сборка воронки не укладывалась в
+10 минут.
+
+| Workflow | Контейнер | Что нужно в окружении `dev` |
+|---|---|---|
+| `deploy-emulator-dev.yml` | `tf-emulator` (без портов наружу) | ничего |
+| `deploy-funnel-dev.yml` | `tf-funnel`, `TF_FUNNEL_PULL=http://tf-emulator:8000` | `VAULT_ROLE_ID`, `VAULT_SECRET_ID` роли `tf-svc-tf-funnel` (есть) |
+| `deploy-model-dev.yml` | `tf-model`, пакет в образе | `TF_MODEL_VAULT_ROLE_ID`, `TF_MODEL_VAULT_SECRET_ID` роли `tf-svc-tf-model` |
+| `deploy-audit-dev.yml` | `tf-audit` | `TF_AUDIT_VAULT_ROLE_ID`, `TF_AUDIT_VAULT_SECRET_ID` роли `tf-svc-tf-audit`, схема `audit` |
+
+Код эмулятора (приватный think-test) и пакет модели лежат архивами в приватном релизе `dev-assets`
+этого репозитория: `emulator-e8af7a3.tar.gz`, `model-pa3.tar.gz`. Новый пакет — `gh release upload
+dev-assets model-<версия>.tar.gz` и новое имя в `MODEL_ASSET`.
+
+Пока роли нет, workflow модели и аудита только собирают образ и выкатку пропускают. Роли `tf-model` и
+`tf-audit` в Vault, схему `audit` и пароль `audit_user` заводит администратор think-infra (PR в think-infra
+`dev`). До запуска `tf-audit` события копятся в потоке Redis `audit` и доедут в базу после запуска.

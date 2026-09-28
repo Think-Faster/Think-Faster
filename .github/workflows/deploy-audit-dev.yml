@@ -1,0 +1,102 @@
+# Сервис аудита tf-audit на dev-стенд Гриши (права-и-аудит §6, ML/INTEGRATION.md §13.4): читает
+# поток Redis `audit`, куда пишут tf-bff, tf-auth, tf-funnel и модель, и складывает события в
+# PostgreSQL audit.events. Пока он не запущен, события копятся в потоке (до ~1 млн записей) и
+# доедут в базу после запуска. Образ собирается здесь и переносится файлом, как у воронки.
+#
+# Нужно от администратора think-infra (один раз):
+#   hashicorp/services.conf: tf-audit postgres/audit redis app/tf-audit; setup.sh apply;
+#   схема: postgree/db/schemas.conf — audit, пароль TF_PG_AUDIT_USER_PASSWORD в secrets.conf,
+#     затем psql -f docs/backend/audit/schema.sql (роль audit_user, таблицы и партиции);
+#   в окружении dev этого репозитория: TF_AUDIT_VAULT_ROLE_ID и TF_AUDIT_VAULT_SECRET_ID
+#     (setup.sh service-credentials tf-audit).
+# Пока роли нет, образ только собирается (проверка Dockerfile), а выкатка пропускается.
+name: Deploy tf-audit to dev
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/backend/audit/**'
+      - 'docs/backend/tfkit/**'
+      - '.github/workflows/deploy-audit-dev.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-audit-dev
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: dev
+    env:
+      DEV_IP: ${{ secrets.DEV_IP }}
+      HAS_ROLE: ${{ secrets.TF_AUDIT_VAULT_ROLE_ID != '' && secrets.TF_AUDIT_VAULT_SECRET_ID != '' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build image
+        run: |
+          docker build -f docs/backend/audit/Dockerfile -t tf-audit:dev docs/backend
+          mkdir -p img
+          docker save tf-audit:dev | gzip -1 > img/tf-audit.tar.gz
+          ls -lh img
+
+      - name: No dev secrets or Vault role — skip deploy
+        if: env.DEV_IP == '' || env.HAS_ROLE != 'true'
+        run: echo "::notice::нет DEV_IP или TF_AUDIT_VAULT_ROLE_ID/TF_AUDIT_VAULT_SECRET_ID роли tf-svc-tf-audit в окружении dev — образ собран, выкатка tf-audit пропущена"
+
+      - name: Copy image to server
+        if: env.DEV_IP != '' && env.HAS_ROLE == 'true'
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.DEV_IP }}
+          username: ${{ secrets.DEV_USER }}
+          key: ${{ secrets.DEV_SSH_KEY }}
+          source: img/tf-audit.tar.gz
+          target: tf-images/audit
+          strip_components: 1
+          rm: true
+
+      - name: Restart tf-audit
+        if: env.DEV_IP != '' && env.HAS_ROLE == 'true'
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          VAULT_ROLE_ID: ${{ secrets.TF_AUDIT_VAULT_ROLE_ID }}
+          VAULT_SECRET_ID: ${{ secrets.TF_AUDIT_VAULT_SECRET_ID }}
+        with:
+          host: ${{ secrets.DEV_IP }}
+          username: ${{ secrets.DEV_USER }}
+          key: ${{ secrets.DEV_SSH_KEY }}
+          envs: VAULT_ROLE_ID,VAULT_SECRET_ID
+          command_timeout: 20m
+          script: |
+            set -e
+            docker network inspect think-fast-net >/dev/null
+            gunzip -c ~/tf-images/audit/tf-audit.tar.gz | docker load
+            rm -f ~/tf-images/audit/tf-audit.tar.gz
+
+            docker rm -f tf-audit >/dev/null 2>&1 || true
+            # переменные — как у tf-audit в docs/backend/compose.yml; секреты — только из Vault
+            docker run -d --name tf-audit \
+              --network think-fast-net \
+              --restart unless-stopped \
+              --memory 256m \
+              -e TF_ENV=prod \
+              -e VAULT_ADDR=http://vault:8200 \
+              -e TF_VAULT_WAIT=900 \
+              -e TF_REDIS_URL=redis://tf-redis:6379/0 \
+              -e TF_AUTH_JWKS=http://tf-auth:8080/.well-known/jwks \
+              -e "TF_AUDIT_DB=host=tf-postgres dbname=tf user=audit_user" \
+              -e VAULT_ROLE_ID \
+              -e VAULT_SECRET_ID \
+              tf-audit:dev
+
+            docker image prune -f >/dev/null
+            sleep 20
+            docker ps --filter name=^tf-audit$ --format '{{.Names}} {{.Status}}'
+            docker logs --tail 40 tf-audit

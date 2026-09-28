@@ -1,0 +1,124 @@
+# Модель tf-model на dev-стенд Гриши (ML/INTEGRATION.md §13.1, §13.10). Образ собирается здесь
+# (ML/service/Dockerfile), пакет модели (§13.6) запекается в него слоем в /models/current и
+# переносится на сервер файлом (docker save → scp → docker load) — без реестра: в образе справочники
+# и модели, публиковать его нельзя. Пакет лежит архивом в приватном релизе dev-assets этого
+# репозитория (MODEL_ASSET; новый пакет — gh release upload dev-assets model-<версия>.tar.gz и имя тут).
+#
+# Модель читает tf.ingest.* (их пишет tf-funnel из эмулятора), пишет прогнозы и факты в
+# tf.forecast.results — BFF по фактам заводит заявку и рассылает уведомления дежурным.
+#
+# Нужно в окружении dev (Settings → Environments → dev): TF_MODEL_VAULT_ROLE_ID и
+# TF_MODEL_VAULT_SECRET_ID роли tf-svc-tf-model — её заводит администратор think-infra
+# (hashicorp/services.conf: tf-model kafka/model rabbit/model redis; затем
+# hashicorp/scripts/setup.sh apply и service-credentials tf-model). Пока их нет, образ только
+# собирается (проверка Dockerfile), а выкатка пропускается.
+name: Deploy tf-model to dev
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'ML/service/**'
+      - 'ML/pipeline/**'
+      - 'ML/settings/**'
+      - 'docs/backend/tfkit/**'
+      - '.github/workflows/deploy-model-dev.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-model-dev
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  MODEL_ASSET: model-pa3.tar.gz
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: dev
+    env:
+      DEV_IP: ${{ secrets.DEV_IP }}
+      HAS_ROLE: ${{ secrets.TF_MODEL_VAULT_ROLE_ID != '' && secrets.TF_MODEL_VAULT_SECRET_ID != '' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          docker build -f ML/service/Dockerfile -t tf-model:base .
+          mkdir -p bundle img
+          gh release download dev-assets -R "$GITHUB_REPOSITORY" -p "$MODEL_ASSET" -O bundle.tar.gz
+          tar -xzf bundle.tar.gz -C bundle
+          test -f bundle/manifest.json
+          printf 'FROM tf-model:base\nCOPY --chown=10001 . /models/current\n' \
+            | docker build -t tf-model:dev -f - bundle
+          docker image ls tf-model
+
+      - name: No dev secrets or Vault role — skip deploy
+        if: env.DEV_IP == '' || env.HAS_ROLE != 'true'
+        run: echo "::notice::нет DEV_IP или TF_MODEL_VAULT_ROLE_ID/TF_MODEL_VAULT_SECRET_ID роли tf-svc-tf-model в окружении dev — образ собран, выкатка tf-model пропущена"
+
+      - name: Save image
+        if: env.DEV_IP != '' && env.HAS_ROLE == 'true'
+        run: |
+          docker save tf-model:dev | gzip -1 > img/tf-model.tar.gz
+          ls -lh img
+
+      - name: Copy image to server
+        if: env.DEV_IP != '' && env.HAS_ROLE == 'true'
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.DEV_IP }}
+          username: ${{ secrets.DEV_USER }}
+          key: ${{ secrets.DEV_SSH_KEY }}
+          source: img/tf-model.tar.gz
+          target: tf-images/model
+          strip_components: 1
+          rm: true
+          timeout: 5m
+          command_timeout: 30m
+
+      - name: Restart tf-model
+        if: env.DEV_IP != '' && env.HAS_ROLE == 'true'
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          VAULT_ROLE_ID: ${{ secrets.TF_MODEL_VAULT_ROLE_ID }}
+          VAULT_SECRET_ID: ${{ secrets.TF_MODEL_VAULT_SECRET_ID }}
+        with:
+          host: ${{ secrets.DEV_IP }}
+          username: ${{ secrets.DEV_USER }}
+          key: ${{ secrets.DEV_SSH_KEY }}
+          envs: VAULT_ROLE_ID,VAULT_SECRET_ID
+          command_timeout: 30m
+          script: |
+            set -e
+            docker network inspect think-fast-net >/dev/null
+            gunzip -c ~/tf-images/model/tf-model.tar.gz | docker load
+            rm -f ~/tf-images/model/tf-model.tar.gz
+
+            docker rm -f tf-model >/dev/null 2>&1 || true
+            # переменные — как у tf-model в docs/backend/compose.yml; секреты — только из Vault
+            docker run -d --name tf-model \
+              --network think-fast-net \
+              --restart unless-stopped \
+              --memory 4g \
+              -v tf-ml-work:/work \
+              -e TF_ENV=prod \
+              -e VAULT_ADDR=http://vault:8200 \
+              -e TF_VAULT_WAIT=900 \
+              -e TF_REDIS_URL=redis://tf-redis:6379/0 \
+              -e TF_AUTH_JWKS=http://tf-auth:8080/.well-known/jwks \
+              -e TF_MODEL_CLOCK=live \
+              -e VAULT_ROLE_ID \
+              -e VAULT_SECRET_ID \
+              tf-model:dev
+
+            docker image prune -f >/dev/null
+            sleep 30
+            docker ps --filter name=^tf-model$ --format '{{.Names}} {{.Status}}'
+            docker logs --tail 60 tf-model

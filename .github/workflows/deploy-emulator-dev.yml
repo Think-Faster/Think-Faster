@@ -1,0 +1,109 @@
+# Эмулятор потока tf-emulator на dev-стенд Гриши: отдаёт показания датчиков по журналу из
+# docs/dataset, как на стенде (think-test/emulator). Воронка tf-funnel забирает их по
+# TF_FUNNEL_PULL=http://tf-emulator:8000 и кладёт в Kafka — дальше модель и BFF, как в проде.
+#
+# Код эмулятора живёт в приватном think-test, а токен Actions читает только этот репозиторий,
+# поэтому исходники с данными лежат архивом в приватном релизе dev-assets этого репозитория
+# (EMULATOR_ASSET; обновить — gh release upload dev-assets emulator-<commit>.tar.gz и поменять имя тут).
+# Наружу эмулятор не публикуется: только сеть think-fast-net, без -p. Секретов у него нет.
+name: Deploy tf-emulator to dev
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/deploy-emulator-dev.yml'
+  workflow_dispatch:
+    inputs:
+      speed:
+        description: 'TF_SPEED — ускорение времени эмулятора (1 — реальное время)'
+        default: '1'
+
+concurrency:
+  group: deploy-emulator-dev
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  EMULATOR_ASSET: emulator-e8af7a3.tar.gz
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: dev
+    env:
+      DEV_IP: ${{ secrets.DEV_IP }}
+    steps:
+      - name: No dev secrets — skip
+        if: env.DEV_IP == ''
+        run: echo "::notice::DEV_IP/DEV_USER/DEV_SSH_KEY не заданы в репозитории — выкатка tf-emulator пропущена"
+
+      - name: Build image
+        if: env.DEV_IP != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p emulator img
+          gh release download dev-assets -R "$GITHUB_REPOSITORY" -p "$EMULATOR_ASSET" -O emulator.tar.gz
+          tar -xzf emulator.tar.gz -C emulator
+          cat > emulator/Dockerfile <<'EOF'
+          FROM python:3.12-slim
+          ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONIOENCODING=utf-8 PIP_NO_CACHE_DIR=1
+          WORKDIR /app
+          COPY requirements.txt .
+          RUN pip install -r requirements.txt
+          COPY . .
+          USER nobody
+          EXPOSE 8000
+          HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+              CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4)"
+          CMD ["python", "manage.py", "runserver", "0.0.0.0:8000", "--noreload"]
+          EOF
+          docker build -t tf-emulator:dev emulator
+          docker save tf-emulator:dev | gzip -1 > img/tf-emulator.tar.gz
+          ls -lh img
+
+      - name: Copy image to server
+        if: env.DEV_IP != ''
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.DEV_IP }}
+          username: ${{ secrets.DEV_USER }}
+          key: ${{ secrets.DEV_SSH_KEY }}
+          source: img/tf-emulator.tar.gz
+          target: tf-images/emulator
+          strip_components: 1
+          rm: true
+
+      - name: Restart tf-emulator
+        if: env.DEV_IP != ''
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          TF_SPEED: ${{ github.event.inputs.speed || '1' }}
+        with:
+          host: ${{ secrets.DEV_IP }}
+          username: ${{ secrets.DEV_USER }}
+          key: ${{ secrets.DEV_SSH_KEY }}
+          envs: TF_SPEED
+          command_timeout: 20m
+          script: |
+            set -e
+            docker network inspect think-fast-net >/dev/null
+            gunzip -c ~/tf-images/emulator/tf-emulator.tar.gz | docker load
+            rm -f ~/tf-images/emulator/tf-emulator.tar.gz
+
+            docker rm -f tf-emulator >/dev/null 2>&1 || true
+            docker run -d --name tf-emulator \
+              --network think-fast-net \
+              --restart unless-stopped \
+              --memory 384m \
+              -e TF_SPEED="$TF_SPEED" \
+              tf-emulator:dev
+
+            docker image prune -f >/dev/null
+            sleep 15
+            docker ps --filter name=^tf-emulator$ --format '{{.Names}} {{.Status}}'
+            docker exec tf-emulator python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read().decode()[:300])"
+            docker logs --tail 20 tf-emulator
