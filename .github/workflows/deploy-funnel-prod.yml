@@ -2,8 +2,11 @@
 # публикуется на Docker Hub (<DOCKERHUB_USERNAME>/tf-funnel:prod-<коммит> и :prod); сервер его только
 # скачивает — docker pull публичного образа, без docker login и без сборки на сервере. Секретов в образе
 # нет: пароли сервис берёт из Vault.
-# Параметры — think-infra docs/funnel-tz/tf-funnel.md: эмулятора на prod нет (TF_FUNNEL_PULL не задаётся,
-# иначе в prod Kafka уйдут тестовые данные), архив 14 дней, спул аудита на томе.
+# Параметры — think-infra docs/funnel-tz/tf-funnel.md: архив 14 дней, спул аудита на томе.
+# Выставочный стенд: переменная окружения prod TF_FUNNEL_PULL (Settings → Environments → prod →
+#   Variables), например http://tf-emulator:8000, — воронка сама забирает поток у эмулятора и
+#   параллельно принимает пакеты шины на /events. Пусто — только шина объекта. В режиме эмулятора
+#   в Kafka, архив и базу prod идут его данные (документация §3.3).
 #
 # Нужно в настройках репозитория:
 #   секреты репозитория DOCKERHUB_USERNAME, DOCKERHUB_TOKEN (публикация образа),
@@ -83,11 +86,12 @@ jobs:
           VAULT_ROLE_ID: ${{ secrets.FUNNEL_VAULT_ROLE_ID }}
           VAULT_SECRET_ID: ${{ secrets.FUNNEL_VAULT_SECRET_ID }}
           IMAGE: ${{ steps.image.outputs.image }}
+          TF_FUNNEL_PULL: ${{ vars.TF_FUNNEL_PULL }}
         with:
           host: ${{ secrets.PROD_IP }}
           username: ${{ secrets.PROD_USER }}
           key: ${{ secrets.PROD_SSH_KEY }}
-          envs: VAULT_ROLE_ID,VAULT_SECRET_ID,IMAGE,TF_FUNNEL_WS_ORIGINS,TF_FUNNEL_ARCHIVE_DAYS
+          envs: VAULT_ROLE_ID,VAULT_SECRET_ID,IMAGE,TF_FUNNEL_WS_ORIGINS,TF_FUNNEL_ARCHIVE_DAYS,TF_FUNNEL_PULL
           command_timeout: 20m
           script: |
             set -e
@@ -99,6 +103,11 @@ jobs:
             $D network inspect think-fast-net >/dev/null
             old=$($D inspect -f '{{.Image}}' tf-funnel 2>/dev/null || true)
             $D pull "$IMAGE"
+            if [ -n "$TF_FUNNEL_PULL" ]; then
+              echo "выставочный стенд: поток забирается у $TF_FUNNEL_PULL"
+              $D inspect -f '{{.State.Running}}' tf-emulator 2>/dev/null | grep -q true \
+                || echo "::warning::задан TF_FUNNEL_PULL=$TF_FUNNEL_PULL, но tf-emulator не запущен"
+            fi
 
             $D rm --force tf-funnel >/dev/null 2>&1 || true
             # секреты — только из Vault; пара роли — в окружение контейнера, не в файлы
@@ -118,6 +127,7 @@ jobs:
               -e TF_FUNNEL_WS_ORIGINS \
               -e TF_BFF_URL=http://tf-bff:8080 \
               -e TF_AUDIT_SPOOL=/data/audit.spool \
+              -e TF_FUNNEL_PULL \
               -e VAULT_ROLE_ID \
               -e VAULT_SECRET_ID \
               "$IMAGE"
