@@ -8,6 +8,10 @@
 #   секреты репозитория PROD_IP, PROD_USER, PROD_SSH_KEY (вход на сервер prod);
 #   окружение prod с MODEL_VAULT_ROLE_ID и MODEL_VAULT_SECRET_ID роли tf-svc-tf-model —
 #     в контейнер уходят под прежними именами VAULT_ROLE_ID / VAULT_SECRET_ID.
+# На сервере пользователь PROD_USER ходит к docker через sudo /usr/local/bin/tf-docker; sudo сбрасывает
+#   окружение, поэтому в /etc/sudoers.d/tf-docker нужна строка
+#   Defaults!/usr/local/bin/tf-docker env_keep += "VAULT_ROLE_ID VAULT_SECRET_ID"
+#   иначе пара не дойдёт до контейнера. prune обёртка запрещает — удаляется только свой прежний образ.
 # Запуск только вручную (Actions → Deploy tf-model to prod → Run workflow): prod — после проверки на dev.
 name: Deploy tf-model to prod
 
@@ -91,13 +95,17 @@ jobs:
             set -e
             [ -n "$VAULT_ROLE_ID" ] || { echo "нет MODEL_VAULT_ROLE_ID в окружении prod (роль tf-svc-tf-model)" >&2; exit 1; }
             [ -n "$VAULT_SECRET_ID" ] || { echo "нет MODEL_VAULT_SECRET_ID в окружении prod (роль tf-svc-tf-model)" >&2; exit 1; }
-            docker network inspect think-fast-net >/dev/null
-            gunzip -c ~/tf-images/model/tf-model.tar.gz | docker load
+            # На prod у пользователя выкатки нет доступа к демону: docker — через sudo tf-docker
+            # (/srv/thinkfaster, sudoers с env_keep VAULT_ROLE_ID VAULT_SECRET_ID).
+            if docker info >/dev/null 2>&1; then D=docker; else D="sudo -n /usr/local/bin/tf-docker"; fi
+            $D network inspect think-fast-net >/dev/null
+            old=$($D image inspect -f '{{.Id}}' tf-model:prod 2>/dev/null || true)
+            gunzip -c ~/tf-images/model/tf-model.tar.gz | $D image load
             rm -f ~/tf-images/model/tf-model.tar.gz
 
-            docker rm -f tf-model >/dev/null 2>&1 || true
+            $D rm -f tf-model >/dev/null 2>&1 || true
             # секреты — только из Vault; памяти на сервере мало: DuckDB модели — 1 ГБ вместо 2 ГБ
-            docker run -d --name tf-model \
+            $D run -d --name tf-model \
               --network think-fast-net \
               --restart unless-stopped \
               --memory 2500m \
@@ -114,11 +122,13 @@ jobs:
               tf-model:prod
 
             sleep 30
-            docker logs --tail 40 tf-model
-            [ "$(docker inspect -f '{{.State.Running}}' tf-model)" = true ] \
+            $D logs --tail 40 tf-model
+            [ "$($D inspect -f '{{.State.Running}}' tf-model)" = true ] \
               || { echo "tf-model не запущен" >&2; exit 1; }
-            if docker logs tf-model 2>&1 | grep -qi 'permission denied'; then
+            if $D logs tf-model 2>&1 | grep -qi 'permission denied'; then
               echo "tf-model: Vault отказал во входе (permission denied) — проверьте пару MODEL_VAULT_*" >&2
               exit 1
             fi
-            docker image prune -f >/dev/null
+            # прежний образ — без prune (он задел бы весь сервер): только свой, по id
+            new=$($D image inspect -f '{{.Id}}' tf-model:prod)
+            [ -z "$old" ] || [ "$old" = "$new" ] || $D rmi "$old" >/dev/null 2>&1 || true
