@@ -131,8 +131,9 @@ def load_base(con, lo: int = 0, hi: int = NH) -> tuple[np.ndarray, list[int], di
                         SELECT object_id, {hour_of('ts')} AS h, {case} AS k FROM ev WHERE state IS NOT NULL)
                     WHERE k IS NOT NULL AND h >= {lo} AND h < {hi} AND object_id IN (SELECT object_id FROM obj3)
                     GROUP BY ALL""").fetchnumpy()
-    base[np.array([oi[x] for x in d['object_id']]), dense(d['h']).astype(np.int64) - lo,
-         np.array([IDX[k] for k in d['k']])] = dense(d['n'])
+    # dtype явно: на пустой базе (новый стенд) np.array([]) — float64, индексом не годится
+    base[np.array([oi[x] for x in d['object_id']], dtype=np.int64), dense(d['h']).astype(np.int64) - lo,
+         np.array([IDX[k] for k in d['k']], dtype=np.int64)] = dense(d['n'])
     print('  счётчики состояний', flush=True)
     gas = "stype = 'Газовый датчик' AND num >= 0 AND num <= 15"  # остальное — неисправность (labels.py)
     temp = "stype = 'Датчик температуры' AND num BETWEEN -40 AND 80"
