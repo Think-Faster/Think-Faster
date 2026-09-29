@@ -1,3 +1,85 @@
+# Think-Faster
+
+Главный репозиторий проекта. Здесь модель прогноза и сервисы данных вокруг неё (приём событий,
+уведомления, аудит), исследование нейросети, датасет и сопроводительная документация.
+
+С чего начать эксперту:
+
+1. [docs/документация.md](docs/документация.md), раздел «Кратко для экспертизы» — решение и его цифры
+   по критериям ТЗ.
+2. [ML/SPEC.md](ML/SPEC.md) — постановка задачи модели и рабочая конфигурация.
+3. [ML/results/analytics.md](ML/results/analytics.md) — журнал исследования: что пробовали, что
+   оставили, что отбросили и почему.
+4. [ML/INTEGRATION.md](ML/INTEGRATION.md) — как модель встроена в контур: топики, команды, ручки.
+
+## Что где лежит
+
+| Папка | Что внутри |
+|---|---|
+| [ML/service](ML/service) | `tf-model` — сервис модели. Принимает журнал из Kafka, раз в час считает прогноз шести типов, порог, правила, канал «по факту» и рекомендации; принимает решения диспетчера из RabbitMQ; отдаёт HTTP-ручки. Тесты — [ML/service/tests](ML/service/tests) |
+| [ML/pipeline](ML/pipeline) | исследование: разметка происшествий, признаки, обучение CatBoost, XGBoost и сети TCN, подбор порога, проверка на отложенном тесте 2026 года |
+| [ML/settings](ML/settings) | рабочая конфигурация модели ([operating.json](ML/settings/operating.json) и её схема), график плановых работ, окна испорченных данных |
+| [ML/results](ML/results) | журнал исследования и отчёты по моделям, разметке, переобучению |
+| [docs/backend/funnel](docs/backend/funnel) | `tf-funnel` — приём событий от шины объекта (Go): проверка, раскладка по потокам Kafka, контроль молчания каналов, архив показаний для окна «Логи» |
+| [docs/backend/notify](docs/backend/notify) | `tf-notify` — письма и сообщения в Telegram с повтором и защитой от дублей |
+| [docs/backend/audit](docs/backend/audit) | `tf-audit` — журнал действий всех сервисов в PostgreSQL |
+| [docs/backend/tfkit](docs/backend/tfkit) | общий пакет Python-сервисов: секреты из Vault, проверка токена, событие аудита |
+| [docs/backend/seed](docs/backend/seed) | начальные данные стенда: объекты, датчики, группы, бригады, графики работ |
+| [docs/dataset](docs/dataset) | описание датасета, справочники каналов и объектов, пример журнала |
+| [docs/common](docs/common) | схемы: архитектура, IDEF0, ER, бизнес-процесс, [права и аудит](docs/common/права-и-аудит.md), [структура бэкенда](docs/common/структура.md) |
+| [docs/designs](docs/designs) | референсы интерфейсов, userflow и userstory трёх ролей |
+| [docs/analytics](docs/analytics) | первичная обработка журналов аналитиком (описана ниже) |
+| [docs/instructions](docs/instructions) | как подключиться к стенду, вопросы и ответы по заданию |
+| [docs/ТЗ.md](docs/ТЗ.md) | техническое задание |
+| [.github/workflows](.github/workflows) | выкатка модели, приёма данных и аудита на стенд |
+| [tasks](tasks) | задачи команды |
+
+## Проект целиком
+
+Think-Faster — сервис прогнозирования инцидентов в инженерных коллекторах (ЛЦТ-2026). Раз в час он
+оценивает 78 объектов по журналу событий системы мониторинга и за сутки предупреждает о шести типах
+происшествий: пожар, загазованность, подтопление, отказ оборудования, отказ датчика, проникновение.
+К тревоге прилагаются основания и рекомендация: что сделать, в какой срок, кого послать. Решение
+принимает диспетчер, сервис ничем на объекте не управляет.
+
+| Что | Где |
+|---|---|
+| Прототип | [thinkfaster.ru](https://thinkfaster.ru) |
+| Документация для экспертов: вход, архитектура, решения, методы, соответствие ТЗ, развёртывание, обзор | [think-infra/docs/project](https://github.com/Think-Faster/think-infra/tree/dev/docs/project) |
+| Описание системы по сервисам | [think-infra/docs/system](https://github.com/Think-Faster/think-infra/tree/dev/docs/system) |
+| Сопроводительная документация по ГОСТ 34.602, модель и исследование | [Think-Faster/docs/документация.md](https://github.com/Think-Faster/Think-Faster/blob/main/docs/документация.md) |
+
+| Репозиторий | Что это | Стек |
+|---|---|---|
+| [Think-Faster](https://github.com/Think-Faster/Think-Faster) | модель прогноза, приём данных, уведомления, аудит; исследование, датасет, документация | Python, FastAPI, CatBoost, XGBoost, PyTorch; Go |
+| [think-front](https://github.com/Think-Faster/think-front) | веб-интерфейс: диспетчер, главный диспетчер, инженер, администратор | React 19, TypeScript, Zustand |
+| [think-bff](https://github.com/Think-Faster/think-bff) | API для интерфейса: права, группы, объекты, заявки, прогнозы, настройки модели | .NET 8, ASP.NET Core, EF Core, PostgreSQL |
+| [think-auth](https://github.com/Think-Faster/think-auth) | вход и выпуск токенов RS256 | .NET 8, EF Core, PostgreSQL |
+| [think-infra](https://github.com/Think-Faster/think-infra) | стенд: Vault, PostgreSQL, Kafka, RabbitMQ, Redis, nginx, почта, Telegram; выкатка | Docker Compose, Bash, GitHub Actions |
+| [think-test](https://github.com/Think-Faster/think-test) | эмулятор шины объекта и проверка доступности стенда | Python, Django |
+
+```mermaid
+flowchart LR
+    BUS[шина объекта / эмулятор think-test] -->|POST /api/funnel/events| FUN[tf-funnel]
+    FUN -->|события| K[(Kafka)]
+    K --> ML[tf-model]
+    ML -->|прогноз| K
+    K --> BFF[think-bff]
+    BFF -->|команды модели, уведомления| R[(RabbitMQ)]
+    R --> ML
+    R --> NOT[tf-notify: почта, Telegram]
+    FRONT[think-front] -->|/api/bff| BFF
+    FRONT -->|/api/auth| AUTH[think-auth]
+    ML & FUN & NOT & BFF -->|аудит| RD[(Redis)] --> AUD[tf-audit] --> PG[(PostgreSQL)]
+    V[(Vault)] -.->|секреты при старте| ML & FUN & NOT & AUD & BFF & AUTH
+```
+
+Код, который работает на [thinkfaster.ru](https://thinkfaster.ru): у think-front, think-bff и
+think-auth — ветка `prod`; у think-infra — `prod`, документация — `dev`; у Think-Faster и think-test —
+`main`.
+
+---
+
 [README.md — обработка журналов и обнаружение аномалий.md](https://github.com/user-attachments/files/32302119/README.md.md)
 # Обработка журналов датчиков и обнаружение аномалий
 
