@@ -298,7 +298,9 @@ class Service:
             self.freshness, self.last_now = fres, now
             self.last = {'hour_end': hour_iso(h), 'seconds': round(time.time() - t0, 1),
                          'features_seconds': round(t_feat, 1), 'objects': int(len(objects)),
-                         'alarms': n_alarm, 'muted': sum(s[2] == 'MUTED' for s in statuses),
+                         'alarms': n_alarm,
+                         'alarms_by_type': {tp: int(np.count_nonzero(applied[tp][0])) for tp in config.TYPES},
+                         'muted': sum(s[2] == 'MUTED' for s in statuses),
                          'rejected': sum(s[2] == 'REJECTED' for s in statuses), 'facts': n_fact,
                          'stale': stale, 'sweep': int(sweep or 0)}
             log.info('такт %s: %s', now.isoformat(), self.last)

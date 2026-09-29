@@ -81,6 +81,80 @@ KEYS = [
     ('off', "state = 'Выключен'"),
     ('norm', "state = 'Норма'"),
 ]
+# Подписи для человека: карточка прогноза показывает признаки словами, а не кодами (`describe`)
+KEY_LABELS = {
+    'smoke': 'сработок «Обнаружен дым»', 'smoke_clear': 'событий «Дыма нет»',
+    'smoke_fault': 'неисправностей датчиков дыма', 'heat': 'сработок тепловых датчиков',
+    'manual': 'сработок ручных извещателей', 'temp_hi': 'событий «Температура выше 40ºC»',
+    'temp_lo': 'событий «Температура ниже 3ºC»', 'temp_fault': 'неисправностей датчиков температуры',
+    'gas': 'сработок «Обнаружен газ»', 'gas_fault': 'неисправностей газовых датчиков',
+    'pump_on': 'включений насосов', 'pump_off': 'выключений насосов', 'pump_flooded': 'событий «Затоплен» у насосов',
+    'pump_all': 'событий «Работают все насосы в АНС»', 'pump_fault': 'неисправностей и обесточиваний насосов',
+    'fan_on': 'включений вентиляторов', 'fan_off': 'выключений вентиляторов',
+    'fan_fault': 'неисправностей и обесточиваний вентиляторов', 'phase_off': 'обесточиваний фазы',
+    'phase_on': 'восстановлений питания фазы', 'phase_fault': 'неисправностей фазы',
+    'ups_batt': 'переходов ИБП на батареи', 'ups_mains': 'возвратов ИБП на сеть', 'ups_fault': 'неисправностей ИБП',
+    'switch': 'переключений', 'door': 'открытий дверей', 'hatch': 'открытий люков и стёкол',
+    'av': 'срабатываний КД АВ', 'motion': 'событий «Обнаружено движение»', 'uir_call': 'вызовов по УИР-Р',
+    'uir_lever': 'сдёргиваний рычага УИР-Р', 'arm': 'постановок на охрану', 'disarm': 'снятий с охраны',
+    'guard_faulty': 'событий «Много неисправных устройств»', 'flood_sensor': 'сработок датчиков затопления',
+    'fault_other': 'событий «Неисправен»', 'disconnected': 'отключений устройств',
+    'undefined': 'неопределённых состояний', 'off': 'событий «Выключен»', 'norm': 'событий «Норма»',
+    'events': 'событий всего', 'arrival': 'открытий под охраной с приходом персонала',
+    'visit': 'выездов на коллектор', 'noise_fire': 'массовых срабатываний дыма (шум)',
+    'noise_flood': 'ложных «Затоплен» после события питания (шум)',
+}
+CALENDAR_LABELS = {
+    'hour': 'Час суток', 'dow': 'День недели (0 — понедельник)', 'month': 'Месяц', 'doy_sin': 'Сезон (синус дня года)',
+    'doy_cos': 'Сезон (косинус дня года)', 'holiday': 'Праздничный день', 'long_holiday': 'Длинные каникулы',
+    'may9': '9 Мая', 'days_to_holiday': 'Дней до ближайшего праздника',
+}
+OTHER_LABELS = {
+    'armed': 'Объект на охране (1 — да)', 'guard_object': 'Объект охраны (1 — да)',
+    'since_event': 'Часов с последнего события', 'since_gas': 'Часов с последнего показания газа',
+    'since_temp': 'Часов с последнего показания температуры', 'since_guard': 'Часов с последней постановки или снятия',
+    'since_visit': 'Часов с последнего выезда', 'temp_trend': 'Температура за сутки минус средняя за неделю, ºC',
+    'gas_trend': 'Газ за сутки минус средний за неделю',
+}
+
+
+def window_label(w: int) -> str:
+    """Окно признака словами: 1 ч, 6 ч, 24 ч, 7 сут, 30 сут, 90 сут."""
+    return f'{w} ч' if w <= 24 else f'{w // 24} сут'
+
+
+def describe(name: str, stypes: list[str] | None = None) -> str:
+    """Подпись признака для человека. Незнакомое имя возвращается как есть: подпись — не контракт."""
+    if name in CALENDAR_LABELS:
+        return CALENDAR_LABELS[name]
+    if name in OTHER_LABELS:
+        return OTHER_LABELS[name]
+    if name.startswith('comp_') and name[5:].isdigit():
+        i = int(name[5:])
+        return f'Каналов типа «{stypes[i]}» на объекте' if stypes and i < len(stypes) else 'Каналов одного типа на объекте'
+    if name.startswith('since_') and name[6:] in config.TYPE_NAMES:
+        return f'Часов с последнего эпизода «{config.TYPE_NAMES[name[6:]]}»'
+    base, _, tail = name.rpartition('_')
+    if not (tail.endswith('h') and tail[:-1].isdigit()):
+        return name
+    win = window_label(int(tail[:-1]))
+    scope = ''
+    if base.startswith('coll_'):
+        base, scope = base[5:], ' по коллектору'
+    for pre, text in (('gas_max', 'Максимум газа'), ('gas_mean', 'Среднее показание газа'),
+                      ('temp_mean', 'Средняя температура, ºC'), ('temp_max', 'Максимум температуры, ºC'),
+                      ('temp_min', 'Минимум температуры, ºC'), ('channels', 'Активных каналов в час')):
+        if base == pre:
+            return f'{text} за {win}'
+    for pre, text in (('onset_', 'Эпизодов «{}»'), ('trig_', 'Срабатываний «{}»')):
+        if base.startswith(pre) and base[len(pre):] in config.TYPE_NAMES:
+            return f'{text.format(config.TYPE_NAMES[base[len(pre):]])}{scope} за {win}'
+    if base in KEY_LABELS:
+        text = KEY_LABELS[base]
+        return f'{text[0].upper()}{text[1:]}{scope} за {win}'
+    return name
+
+
 NUMERIC = ['gas_max', 'gas_sum', 'gas_n', 'temp_sum', 'temp_n', 'temp_max', 'temp_min', 'n_events', 'n_channels',
            'guard_last']
 ONSETS = [f'onset_{t}' for t in config.TYPES] + ['noise_fire', 'noise_flood']

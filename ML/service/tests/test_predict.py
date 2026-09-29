@@ -251,10 +251,22 @@ class PredictTest(unittest.TestCase):
             self.assertEqual(p.importance('equipment'), {'temp_1h': 0.6, 'smoke_24h': 0.4})
             frame = pl.DataFrame({'smoke_24h': [3.0, None], 'temp_1h': [21.5, 7.0]})
             self.assertEqual(p.reasons(frame, 0, 'equipment', k=2),
-                             [{'feature': 'temp_1h', 'value': 21.5}, {'feature': 'smoke_24h', 'value': 3.0}])
-            self.assertEqual(p.reasons(frame, 1, 'equipment', k=2)[1], {'feature': 'smoke_24h', 'value': None})
+                             [{'feature': 'temp_1h', 'label': 'temp_1h', 'value': 21.5},
+                              {'feature': 'smoke_24h', 'label': 'Сработок «Обнаружен дым» за 24 ч', 'value': 3.0}])
+            self.assertEqual(p.reasons(frame, 1, 'equipment', k=2)[1]['value'], None)
             p.use_version('equipment', 1)
             self.assertEqual(p.importance('equipment'), {'smoke_24h': 1.0})
+
+    def test_feature_labels_cover_names(self):
+        import features as ft
+        stypes = ['Датчик дыма']
+        self.assertEqual(ft.describe('disarm_168h'), 'Снятий с охраны за 7 сут')
+        self.assertEqual(ft.describe('comp_0', stypes), 'Каналов типа «Датчик дыма» на объекте')
+        self.assertEqual(ft.describe('since_fire'), 'Часов с последнего эпизода «пожар»')
+        self.assertEqual(ft.describe('coll_onset_flood_720h'), 'Эпизодов «подтопление» по коллектору за 30 сут')
+        self.assertEqual(ft.describe('gas_max_6h'), 'Максимум газа за 6 ч')
+        self.assertEqual(ft.describe('hour'), 'Час суток')
+        self.assertEqual(ft.describe('unknown_x'), 'unknown_x')    # незнакомое имя — как есть
 
 
 if __name__ == '__main__':

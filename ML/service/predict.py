@@ -365,7 +365,10 @@ class Predictor:
         imp = self.importance(tp)
         feats = sorted((f for f in self.features if f in imp), key=lambda f: -abs(imp[f]))
         vals = [(f, frame[idx, f]) for f in feats[:k]]
-        return [{'feature': f, 'value': None if v is None else float(v)} for f, v in vals]
+        import features as ft  # pipeline/features.py: подписи признаков для карточки
+        stypes = self.meta.get('stypes')
+        return [{'feature': f, 'label': ft.describe(f, stypes), 'value': None if v is None else float(v)}
+                for f, v in vals]
 
 
 def fit_calibration(mix: np.ndarray, y: np.ndarray) -> dict:
